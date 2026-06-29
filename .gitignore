@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.py[cod]
+.env
+.DS_Store
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+logs/
+src/plugins/ai_chat/assets/learned_stickers.json
+src/plugins/ai_chat/assets/warmup_state.json

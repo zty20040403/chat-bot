@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="80" fill="#cdb4db"/>
+  <circle cx="180" cy="195" r="26" fill="#2f243a"/>
+  <circle cx="324" cy="195" r="26" fill="#2f243a"/>
+  <path d="M194 310c38-26 86-26 124 0" fill="none" stroke="#2f243a" stroke-width="20" stroke-linecap="round"/>
+  <circle cx="382" cy="116" r="28" fill="#ffffff" opacity="0.9"/>
+  <circle cx="424" cy="78" r="18" fill="#ffffff" opacity="0.75"/>
+  <text x="256" y="428" text-anchor="middle" font-size="62" font-weight="900" font-family="PingFang SC, Hiragino Sans GB, Arial" fill="#2f243a">思考中</text>
+</svg>

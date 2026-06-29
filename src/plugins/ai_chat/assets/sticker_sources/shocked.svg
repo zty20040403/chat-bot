@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="80" fill="#ffafcc"/>
+  <circle cx="176" cy="190" r="36" fill="#421b2d"/>
+  <circle cx="336" cy="190" r="36" fill="#421b2d"/>
+  <ellipse cx="256" cy="304" rx="58" ry="72" fill="#421b2d"/>
+  <text x="256" y="430" text-anchor="middle" font-size="62" font-weight="900" font-family="PingFang SC, Hiragino Sans GB, Arial" fill="#421b2d">啊？</text>
+</svg>
