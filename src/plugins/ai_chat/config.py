@@ -55,6 +55,21 @@ class Settings:
     search_auto_enabled: bool
     search_max_results: int
     search_timeout_seconds: int
+    ocr_enabled: bool
+    ocr_max_images: int
+    ocr_max_chars: int
+    ocr_timeout_seconds: int
+    ocr_recent_image_seconds: int
+    voice_enabled: bool
+    voice_provider: str
+    voice_name: str
+    voice_rate: str
+    voice_pitch: str
+    voice_local_name: str
+    voice_local_rate: int
+    voice_max_chars: int
+    voice_timeout_seconds: int
+    voice_recent_seconds: int
     proactive_enabled: bool
     proactive_chance_percent: int
     proactive_cooldown_seconds: int
@@ -91,6 +106,45 @@ class Settings:
             search_auto_enabled=_get_bool("AI_SEARCH_AUTO_ENABLED", True),
             search_max_results=_get_int("AI_SEARCH_MAX_RESULTS", 5),
             search_timeout_seconds=_get_int("AI_SEARCH_TIMEOUT_SECONDS", 10),
+            ocr_enabled=_get_bool("AI_OCR_ENABLED", True),
+            ocr_max_images=max(_get_int("AI_OCR_MAX_IMAGES", 2), 1),
+            ocr_max_chars=max(_get_int("AI_OCR_MAX_CHARS", 4000), 200),
+            ocr_timeout_seconds=max(
+                _get_int("AI_OCR_TIMEOUT_SECONDS", 30), 5
+            ),
+            ocr_recent_image_seconds=max(
+                _get_int("AI_OCR_RECENT_IMAGE_SECONDS", 300), 30
+            ),
+            voice_enabled=_get_bool("AI_VOICE_ENABLED", True),
+            voice_provider=(
+                os.getenv("AI_VOICE_PROVIDER", "edge").strip().lower()
+                or "edge"
+            ),
+            voice_name=(
+                os.getenv(
+                    "AI_VOICE_NAME",
+                    "zh-CN-YunxiaNeural",
+                ).strip()
+                or "zh-CN-YunxiaNeural"
+            ),
+            voice_rate=os.getenv("AI_VOICE_RATE", "+0%").strip() or "+0%",
+            voice_pitch=os.getenv("AI_VOICE_PITCH", "+0Hz").strip() or "+0Hz",
+            voice_local_name=(
+                os.getenv("AI_VOICE_LOCAL_NAME", "Tingting").strip()
+                or "Tingting"
+            ),
+            voice_local_rate=min(
+                max(_get_int("AI_VOICE_LOCAL_RATE", 210), 80), 400
+            ),
+            voice_max_chars=min(
+                max(_get_int("AI_VOICE_MAX_CHARS", 350), 50), 1000
+            ),
+            voice_timeout_seconds=max(
+                _get_int("AI_VOICE_TIMEOUT_SECONDS", 45), 5
+            ),
+            voice_recent_seconds=max(
+                _get_int("AI_VOICE_RECENT_SECONDS", 300), 30
+            ),
             proactive_enabled=_get_bool("AI_PROACTIVE_ENABLED", False),
             proactive_chance_percent=min(
                 max(_get_int("AI_PROACTIVE_CHANCE_PERCENT", 15), 0), 100

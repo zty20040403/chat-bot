@@ -1,4 +1,5 @@
 .venv/
+.cache/
 __pycache__/
 *.py[cod]
 .env
@@ -9,3 +10,4 @@ __pycache__/
 logs/
 src/plugins/ai_chat/assets/learned_stickers.json
 src/plugins/ai_chat/assets/warmup_state.json
+src/plugins/ai_chat/assets/user_profiles.json
