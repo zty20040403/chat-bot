@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, unquote, urlsplit
+from xml.etree import ElementTree
 
 import httpx
 
@@ -124,10 +125,10 @@ async def search_web(
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
     }
 
-    try:
-        async with httpx.AsyncClient(
-            timeout=timeout_seconds, follow_redirects=True, headers=headers
-        ) as client:
+    async with httpx.AsyncClient(
+        timeout=timeout_seconds, follow_redirects=True, headers=headers
+    ) as client:
+        try:
             params = {"q": cleaned_query}
             if freshness in {"d", "w", "m", "y"}:
                 params["df"] = freshness
@@ -136,16 +137,68 @@ async def search_web(
                 params=params,
             )
             response.raise_for_status()
-    except httpx.HTTPError as exc:
-        raise SearchError("联网搜索失败。") from exc
+            duckduckgo_results = _parse_duckduckgo_results(response.text)
+        except httpx.HTTPError:
+            duckduckgo_results = []
 
+        if duckduckgo_results:
+            return _unique_results(duckduckgo_results, max_results)
+
+        try:
+            response = await client.get(
+                "https://www.bing.com/search",
+                params={
+                    "q": cleaned_query,
+                    "format": "rss",
+                    "setlang": "zh-hans",
+                },
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise SearchError("联网搜索失败。") from exc
+
+    return _unique_results(
+        _parse_bing_rss_results(response.text),
+        max_results,
+    )
+
+
+def _parse_duckduckgo_results(html: str) -> list[SearchResult]:
     parser = _DuckDuckGoHTMLParser()
-    parser.feed(response.text)
+    parser.feed(html)
     parser.close()
+    return parser.results
 
+
+def _parse_bing_rss_results(xml: str) -> list[SearchResult]:
+    try:
+        root = ElementTree.fromstring(xml)
+    except ElementTree.ParseError:
+        return []
+
+    results: list[SearchResult] = []
+    for item in root.findall("./channel/item"):
+        title = _clean_text(item.findtext("title", ""))
+        url = item.findtext("link", "").strip()
+        snippet = _clean_text(item.findtext("description", ""))
+        if title and url:
+            results.append(
+                SearchResult(
+                    title=title,
+                    url=url,
+                    snippet=snippet,
+                )
+            )
+    return results
+
+
+def _unique_results(
+    results: list[SearchResult],
+    max_results: int,
+) -> list[SearchResult]:
     unique_results: list[SearchResult] = []
     seen_urls: set[str] = set()
-    for result in parser.results:
+    for result in results:
         if not result.title or not result.url or result.url in seen_urls:
             continue
         seen_urls.add(result.url)
@@ -178,6 +231,23 @@ def render_search_sources(results: list[SearchResult], max_sources: int = 3) -> 
     for index, result in enumerate(results[:max_sources], start=1):
         lines.append(f"{index}. {result.title}\n{result.url}")
     return "\n".join(lines)
+
+
+def render_direct_search_results(
+    results: list[SearchResult],
+    max_results: int = 5,
+) -> str:
+    if not results:
+        return ""
+
+    lines = ["搜索结果："]
+    for index, result in enumerate(results[:max_results], start=1):
+        lines.append(
+            f"{index}. {result.title}\n"
+            f"{result.snippet or '无摘要'}\n"
+            f"{result.url}"
+        )
+    return "\n\n".join(lines)
 
 
 def search_freshness(text: str) -> str | None:

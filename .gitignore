@@ -11,3 +11,10 @@ logs/
 src/plugins/ai_chat/assets/learned_stickers.json
 src/plugins/ai_chat/assets/warmup_state.json
 src/plugins/ai_chat/assets/user_profiles.json
+src/plugins/ai_chat/assets/model_preferences.json
+src/plugins/ai_chat/assets/conversation_history.json
+src/plugins/ai_chat/assets/group_context.json
+src/plugins/ai_chat/assets/long_term_memory.json
+src/plugins/ai_chat/assets/*.sqlite3
+src/plugins/ai_chat/assets/*.sqlite3-wal
+src/plugins/ai_chat/assets/*.sqlite3-shm

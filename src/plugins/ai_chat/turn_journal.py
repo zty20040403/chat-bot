@@ -1,0 +1,1563 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import sqlite3
+import threading
+import time
+import zlib
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Iterator, Literal
+
+from .conversation_scope import ConversationScope
+
+
+TurnStatus = Literal[
+    "running",
+    "succeeded",
+    "silence",
+    "aborted",
+    "crashed",
+]
+ToolState = Literal[
+    "started",
+    "rejected",
+    "succeeded",
+    "failed",
+    "committed",
+    "outcome-unknown",
+]
+TURN_SCHEMA_VERSION = 2
+SEND_LOOP_SEQUENCE_BASE = 1_000_000
+
+
+@dataclass(frozen=True)
+class TurnRecord:
+    turn_id: int
+    scope_key: str
+    turn_ordinal: int
+    trigger_canonical_message_id: int | None
+    status: str
+    provider: str
+    model: str
+    profile: str
+    objective: str
+    final_text: str
+    started_at: int
+    finished_at: int | None
+    tool_call_count: int
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+    prompt_version: str
+    tool_catalog_version: str
+
+    @property
+    def handle(self) -> str:
+        return f"t#{self.turn_ordinal}"
+
+
+@dataclass(frozen=True)
+class TurnEventRecord:
+    event_id: int
+    turn_id: int
+    loop_sequence: int
+    node_id: str
+    event_kind: str
+    state: str
+    tool_name: str
+    input_json: str
+    result_json: str
+    detail: str
+    effect_labels: tuple[str, ...]
+    occurred_at: int
+
+
+@dataclass(frozen=True)
+class ReplayBundle:
+    mode: Literal["verbatim", "digest"]
+    messages: tuple[dict[str, Any], ...]
+    digest_prefix: str
+    reason: str
+    turn_ordinals: tuple[int, ...]
+    covered_canonical_message_ids: tuple[int, ...]
+
+
+class TurnJournal:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        archive_ttl_days: int = 14,
+        archive_max_per_scope: int = 50,
+        archive_max_bytes: int = 512 * 1024,
+        event_max_chars: int = 12000,
+    ) -> None:
+        self.path = Path(path) if str(path) != ":memory:" else None
+        if self.path is not None:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.archive_ttl_seconds = max(int(archive_ttl_days), 0) * 86400
+        self.archive_max_per_scope = max(int(archive_max_per_scope), 0)
+        self.archive_max_bytes = max(int(archive_max_bytes), 4096)
+        self.event_max_chars = max(int(event_max_chars), 1000)
+        self._lock = threading.RLock()
+        self._connection = sqlite3.connect(
+            str(path),
+            timeout=10.0,
+            check_same_thread=False,
+        )
+        self._connection.row_factory = sqlite3.Row
+        self._configure()
+        self._migrate()
+        self.recovered_unknown_effects = self.mark_started_effects_unknown()
+        self.recovered_crashed_turns = self.mark_running_turns_crashed()
+
+    def close(self) -> None:
+        with self._lock:
+            self._connection.close()
+
+    def start_turn(
+        self,
+        scope: ConversationScope,
+        *,
+        trigger_canonical_message_id: int | None,
+        objective: str,
+        provider: str,
+        model: str,
+        profile: str = "default",
+        prompt_version: str = "",
+        tool_catalog_version: str = "",
+        started_at: int | None = None,
+    ) -> TurnRecord:
+        now = int(started_at or time.time())
+        with self._transaction() as cursor:
+            self._ensure_visibility(cursor, scope.key)
+            row = cursor.execute(
+                """
+                SELECT COALESCE(MAX(turn_ordinal), 0) + 1 AS next_ordinal
+                FROM agent_turns WHERE scope_key = ?
+                """,
+                (scope.key,),
+            ).fetchone()
+            ordinal = int(row["next_ordinal"])
+            cursor.execute(
+                """
+                INSERT INTO agent_turns (
+                    scope_key, turn_ordinal, trigger_canonical_message_id,
+                    status, provider, model, profile, objective,
+                    started_at, prompt_version, tool_catalog_version
+                ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    scope.key,
+                    ordinal,
+                    trigger_canonical_message_id,
+                    provider,
+                    model,
+                    profile,
+                    _safe_text(objective, 1000),
+                    now,
+                    prompt_version,
+                    tool_catalog_version,
+                ),
+            )
+            turn_id = int(cursor.lastrowid)
+            stored = self._turn_row(cursor, turn_id)
+        if stored is None:
+            raise RuntimeError("turn was not stored")
+        return self._row_to_turn(stored)
+
+    def update_environment(
+        self,
+        turn_id: int,
+        *,
+        model: str,
+        prompt_version: str,
+        tool_catalog_version: str,
+    ) -> None:
+        with self._transaction() as cursor:
+            cursor.execute(
+                """
+                UPDATE agent_turns
+                SET model = ?, prompt_version = ?, tool_catalog_version = ?
+                WHERE turn_id = ? AND status = 'running'
+                """,
+                (model, prompt_version, tool_catalog_version, int(turn_id)),
+            )
+
+    def record_model_note(
+        self,
+        turn_id: int,
+        loop_sequence: int,
+        content: str,
+    ) -> None:
+        content = _safe_text(content, min(self.event_max_chars, 2000))
+        if not content:
+            return
+        self._insert_event(
+            turn_id=turn_id,
+            loop_sequence=loop_sequence,
+            event_kind="model_note",
+            state="succeeded",
+            detail=content,
+        )
+
+    def record_tool_started(
+        self,
+        turn_id: int,
+        loop_sequence: int,
+        tool_name: str,
+        arguments: dict[str, Any],
+        effect_labels: list[str] | tuple[str, ...],
+    ) -> None:
+        self._insert_event(
+            turn_id=turn_id,
+            loop_sequence=loop_sequence,
+            event_kind="tool",
+            state="started",
+            tool_name=tool_name,
+            input_json=_safe_json(arguments, self.event_max_chars),
+            effect_labels=effect_labels,
+            increment_tool_count=True,
+        )
+
+    def record_tool_finished(
+        self,
+        turn_id: int,
+        loop_sequence: int,
+        tool_name: str,
+        state: ToolState,
+        result: str,
+        effect_labels: list[str] | tuple[str, ...],
+    ) -> None:
+        if state == "started":
+            raise ValueError("finished tool event cannot use started state")
+        self._insert_event(
+            turn_id=turn_id,
+            loop_sequence=loop_sequence,
+            event_kind="tool",
+            state=state,
+            tool_name=tool_name,
+            result_json=_safe_result(result, self.event_max_chars),
+            effect_labels=effect_labels,
+        )
+
+    def record_tool_rejected(
+        self,
+        turn_id: int,
+        loop_sequence: int,
+        tool_name: str,
+        arguments: dict[str, Any],
+        result: str,
+        effect_labels: list[str] | tuple[str, ...],
+    ) -> None:
+        self._insert_event(
+            turn_id=turn_id,
+            loop_sequence=loop_sequence,
+            event_kind="tool",
+            state="rejected",
+            tool_name=tool_name,
+            input_json=_safe_json(arguments, self.event_max_chars),
+            result_json=_safe_result(result, self.event_max_chars),
+            effect_labels=effect_labels,
+            increment_tool_count=True,
+        )
+
+    def record_send_started(self, turn_id: int, attempt: int) -> None:
+        self._insert_event(
+            turn_id=turn_id,
+            loop_sequence=SEND_LOOP_SEQUENCE_BASE + max(int(attempt), 1),
+            event_kind="tool",
+            state="started",
+            tool_name="reply_send",
+            input_json=_safe_json(
+                {"attempt": max(int(attempt), 1)},
+                self.event_max_chars,
+            ),
+            effect_labels=("send:conversation",),
+        )
+        self._refresh_digest(turn_id)
+
+    def record_send_finished(
+        self,
+        turn_id: int,
+        attempt: int,
+        state: Literal["committed", "failed", "outcome-unknown"],
+        result: dict[str, Any],
+    ) -> None:
+        self._insert_event(
+            turn_id=turn_id,
+            loop_sequence=SEND_LOOP_SEQUENCE_BASE + max(int(attempt), 1),
+            event_kind="tool",
+            state=state,
+            tool_name="reply_send",
+            result_json=_safe_json(result, self.event_max_chars),
+            effect_labels=("send:conversation",),
+        )
+        self._refresh_digest(turn_id)
+
+    def finish_turn(
+        self,
+        turn_id: int,
+        *,
+        status: TurnStatus,
+        final_text: str = "",
+        trace_payload: dict[str, Any] | None = None,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        total_tokens: int = 0,
+        finished_at: int | None = None,
+    ) -> TurnRecord | None:
+        if status == "running":
+            raise ValueError("finish_turn requires a terminal status")
+        now = int(finished_at or time.time())
+        with self._transaction() as cursor:
+            cursor.execute(
+                """
+                UPDATE agent_turns
+                SET status = ?, final_text = ?, finished_at = ?,
+                    input_tokens = ?, output_tokens = ?, total_tokens = ?
+                WHERE turn_id = ? AND status = 'running'
+                """,
+                (
+                    status,
+                    _safe_text(final_text, 4000),
+                    now,
+                    max(int(input_tokens), 0),
+                    max(int(output_tokens), 0),
+                    max(int(total_tokens), 0),
+                    int(turn_id),
+                ),
+            )
+            row = self._turn_row(cursor, int(turn_id))
+            if row is None:
+                return None
+            self._upsert_digest(cursor, row, now)
+            if trace_payload and not _contains_secret(trace_payload):
+                self._store_archive(cursor, row, trace_payload, now)
+            self._cleanup_archives(cursor, str(row["scope_key"]), now)
+            return self._row_to_turn(row)
+
+    def mark_running_turns_crashed(self) -> int:
+        now = int(time.time())
+        with self._transaction() as cursor:
+            rows = cursor.execute(
+                "SELECT turn_id FROM agent_turns WHERE status = 'running'"
+            ).fetchall()
+            cursor.execute(
+                """
+                UPDATE agent_turns
+                SET status = 'crashed', finished_at = ?
+                WHERE status = 'running'
+                """,
+                (now,),
+            )
+            for row in rows:
+                turn_row = self._turn_row(cursor, int(row["turn_id"]))
+                if turn_row is not None:
+                    self._upsert_digest(cursor, turn_row, now)
+            return len(rows)
+
+    def mark_started_effects_unknown(self) -> int:
+        now = int(time.time())
+        result = _safe_json(
+            {
+                "ok": False,
+                "error": "工具执行状态未知：服务在完成事件写入前中断。",
+            },
+            self.event_max_chars,
+        )
+        with self._transaction() as cursor:
+            rows = cursor.execute(
+                """
+                SELECT e.*
+                FROM turn_journal_events AS e
+                WHERE e.event_kind = 'tool'
+                  AND e.state = 'started'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM turn_journal_events AS done
+                      WHERE done.turn_id = e.turn_id
+                        AND done.node_id = e.node_id
+                        AND done.event_kind = 'tool'
+                        AND done.state != 'started'
+                  )
+                ORDER BY e.event_id ASC
+                """
+            ).fetchall()
+            for row in rows:
+                cursor.execute(
+                    """
+                    INSERT INTO turn_journal_events (
+                        turn_id, loop_sequence, node_id, event_kind, state,
+                        tool_name, input_json, result_json, detail,
+                        effect_labels_json, occurred_at
+                    ) VALUES (?, ?, ?, 'tool', 'outcome-unknown', ?, '', ?, '', ?, ?)
+                    """,
+                    (
+                        int(row["turn_id"]),
+                        int(row["loop_sequence"]),
+                        str(row["node_id"]),
+                        str(row["tool_name"]),
+                        result,
+                        str(row["effect_labels_json"]),
+                        now,
+                    ),
+                )
+            for turn_id in {int(row["turn_id"]) for row in rows}:
+                turn_row = self._turn_row(cursor, turn_id)
+                if turn_row is not None:
+                    self._upsert_digest(cursor, turn_row, now)
+            return len(rows)
+
+    def get_visible_turn(
+        self,
+        scope: ConversationScope,
+        turn_ordinal: int,
+    ) -> TurnRecord | None:
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT t.*
+                FROM agent_turns AS t
+                JOIN turn_visibility AS v ON v.scope_key = t.scope_key
+                WHERE t.scope_key = ? AND t.turn_ordinal = ?
+                  AND t.turn_ordinal >= v.min_turn_ordinal
+                """,
+                (scope.key, int(turn_ordinal)),
+            ).fetchone()
+        return self._row_to_turn(row) if row is not None else None
+
+    def get_turn_by_id(self, turn_id: int) -> TurnRecord | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM agent_turns WHERE turn_id = ?",
+                (int(turn_id),),
+            ).fetchone()
+        return self._row_to_turn(row) if row is not None else None
+
+    def events_for_turn(self, turn_id: int) -> list[TurnEventRecord]:
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT * FROM turn_journal_events
+                WHERE turn_id = ? ORDER BY event_id ASC
+                """,
+                (int(turn_id),),
+            ).fetchall()
+        return [self._row_to_event(row) for row in rows]
+
+    def render_recent_turns(
+        self,
+        scope: ConversationScope,
+        *,
+        hours: int = 24,
+        limit: int = 5,
+        exclude_turn_id: int | None = None,
+    ) -> str:
+        limit = min(max(int(limit), 1), 20)
+        cutoff = int(time.time()) - max(int(hours), 1) * 3600
+        parameters: list[Any] = [scope.key, cutoff]
+        exclusion = ""
+        if exclude_turn_id is not None:
+            exclusion = "AND t.turn_id != ?"
+            parameters.append(int(exclude_turn_id))
+        parameters.append(limit)
+        with self._lock:
+            rows = self._connection.execute(
+                f"""
+                SELECT t.*
+                FROM agent_turns AS t
+                JOIN turn_visibility AS v ON v.scope_key = t.scope_key
+                WHERE t.scope_key = ?
+                  AND t.started_at >= ?
+                  AND t.turn_ordinal >= v.min_turn_ordinal
+                  AND t.tool_call_count > 0
+                  AND t.status != 'running'
+                  {exclusion}
+                ORDER BY t.turn_ordinal DESC
+                LIMIT ?
+                """,
+                parameters,
+            ).fetchall()
+        if not rows:
+            return ""
+        lines = [
+            "[recent turns - 工作记录，需要细节时调用 context_expand]"
+        ]
+        lines.extend(self._render_standing_line(self._row_to_turn(row)) for row in rows)
+        return "\n".join(lines)
+
+    def render_turn(
+        self,
+        scope: ConversationScope,
+        turn_ordinal: int,
+        *,
+        max_chars: int = 10000,
+    ) -> str | None:
+        turn = self.get_visible_turn(scope, turn_ordinal)
+        if turn is None:
+            return None
+        events = self.events_for_turn(turn.turn_id)
+        status = _status_label(turn.status)
+        finished = (
+            datetime.fromtimestamp(turn.finished_at).strftime("%m-%d %H:%M")
+            if turn.finished_at
+            else "尚未结束"
+        )
+        lines = [
+            f"[{turn.handle} 规范工作记录]",
+            f"状态: {status}; 开始: {datetime.fromtimestamp(turn.started_at).strftime('%m-%d %H:%M')}; 结束: {finished}",
+            f"目标: {turn.objective or '未记录'}",
+            f"模型: {turn.model or '未知'}; 工具调用: {turn.tool_call_count}",
+        ]
+        for event in events:
+            if event.event_kind == "model_note":
+                lines.append(f"- 模型说明: {event.detail}")
+                continue
+            if event.state == "started":
+                arguments = _summarize_json(event.input_json, 600)
+                labels = ",".join(event.effect_labels) or "unspecified"
+                lines.append(
+                    f"- {event.node_id} START {event.tool_name}({arguments}) [{labels}]"
+                )
+            elif event.state == "rejected":
+                arguments = _summarize_json(event.input_json, 600)
+                result = _summarize_json(event.result_json, 900)
+                lines.append(
+                    f"- {event.node_id} REJECTED {event.tool_name}({arguments}): {result}"
+                )
+            else:
+                result = _summarize_json(event.result_json, 900)
+                lines.append(
+                    f"  -> {event.state.upper()} {event.tool_name}: {result}"
+                )
+        if turn.final_text:
+            lines.append(f"最终回复: {turn.final_text}")
+        rendered = "\n".join(lines)
+        return rendered[: max(int(max_chars), 1000)]
+
+    def link_send(
+        self,
+        turn_id: int,
+        canonical_message_id: int,
+        *,
+        node_id: str = "final",
+        chunk_index: int = 0,
+    ) -> None:
+        with self._transaction() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO turn_send_links (
+                    canonical_message_id, turn_id, node_id,
+                    chunk_index, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(canonical_message_id) DO UPDATE SET
+                    turn_id = excluded.turn_id,
+                    node_id = excluded.node_id,
+                    chunk_index = excluded.chunk_index
+                """,
+                (
+                    int(canonical_message_id),
+                    int(turn_id),
+                    node_id,
+                    max(int(chunk_index), 0),
+                    int(time.time()),
+                ),
+            )
+
+    def find_turn_for_reply(
+        self,
+        scope: ConversationScope,
+        canonical_message_id: int,
+    ) -> TurnRecord | None:
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT t.*
+                FROM turn_send_links AS l
+                JOIN agent_turns AS t ON t.turn_id = l.turn_id
+                JOIN turn_visibility AS v ON v.scope_key = t.scope_key
+                WHERE l.canonical_message_id = ?
+                  AND t.scope_key = ?
+                  AND t.turn_ordinal >= v.min_turn_ordinal
+                """,
+                (int(canonical_message_id), scope.key),
+            ).fetchone()
+        return self._row_to_turn(row) if row is not None else None
+
+    def add_fork_edge(
+        self,
+        from_turn_id: int,
+        to_turn_id: int,
+        *,
+        created_by_principal_id: int | None,
+    ) -> bool:
+        if int(from_turn_id) == int(to_turn_id):
+            return False
+        with self._transaction() as cursor:
+            rows = cursor.execute(
+                """
+                SELECT turn_id, scope_key FROM agent_turns
+                WHERE turn_id IN (?, ?)
+                """,
+                (int(from_turn_id), int(to_turn_id)),
+            ).fetchall()
+            scopes = {str(row["scope_key"]) for row in rows}
+            if len(rows) != 2 or len(scopes) != 1:
+                return False
+            cursor.execute(
+                """
+                INSERT OR IGNORE INTO turn_edges (
+                    from_turn_id, to_turn_id, kind,
+                    created_by_principal_id, created_at
+                ) VALUES (?, ?, 'fork-from', ?, ?)
+                """,
+                (
+                    int(from_turn_id),
+                    int(to_turn_id),
+                    created_by_principal_id,
+                    int(time.time()),
+                ),
+            )
+            return cursor.rowcount > 0
+
+    def hide_history(self, scope: ConversationScope) -> int:
+        with self._transaction() as cursor:
+            self._ensure_visibility(cursor, scope.key)
+            visibility = cursor.execute(
+                """
+                SELECT min_turn_ordinal FROM turn_visibility
+                WHERE scope_key = ?
+                """,
+                (scope.key,),
+            ).fetchone()
+            minimum = int(visibility[0])
+            aggregate = cursor.execute(
+                """
+                SELECT COUNT(*) AS count, MAX(turn_ordinal) AS maximum
+                FROM agent_turns
+                WHERE scope_key = ? AND turn_ordinal >= ?
+                """,
+                (scope.key, minimum),
+            ).fetchone()
+            count = int(aggregate["count"] or 0)
+            maximum = int(aggregate["maximum"] or (minimum - 1))
+            cursor.execute(
+                """
+                UPDATE turn_visibility
+                SET min_turn_ordinal = ?, cleared_at = ?
+                WHERE scope_key = ?
+                """,
+                (maximum + 1, int(time.time()), scope.key),
+            )
+            return count
+
+    def archive_payload(self, turn_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT payload, expires_at FROM turn_archives
+                WHERE turn_id = ?
+                """,
+                (int(turn_id),),
+            ).fetchone()
+        if row is None or int(row["expires_at"]) <= int(time.time()):
+            return None
+        try:
+            decoded = zlib.decompress(bytes(row["payload"])).decode("utf-8")
+            payload = json.loads(decoded)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def digest_for_turn(self, turn_id: int) -> str:
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT skeleton, approach FROM turn_digests
+                WHERE turn_id = ?
+                """,
+                (int(turn_id),),
+            ).fetchone()
+        if row is None:
+            with self._transaction() as cursor:
+                turn_row = self._turn_row(cursor, int(turn_id))
+                if turn_row is not None and str(turn_row["status"]) != "running":
+                    self._upsert_digest(cursor, turn_row, int(time.time()))
+                    row = cursor.execute(
+                        """
+                        SELECT skeleton, approach FROM turn_digests
+                        WHERE turn_id = ?
+                        """,
+                        (int(turn_id),),
+                    ).fetchone()
+        if row is None:
+            return ""
+        return "\n".join(
+            item for item in (str(row["skeleton"]), str(row["approach"])) if item
+        )
+
+    def _refresh_digest(self, turn_id: int) -> None:
+        with self._transaction() as cursor:
+            turn_row = self._turn_row(cursor, int(turn_id))
+            if turn_row is not None:
+                self._upsert_digest(cursor, turn_row, int(time.time()))
+
+    def fork_parent(
+        self,
+        scope: ConversationScope,
+        turn_id: int,
+    ) -> TurnRecord | None:
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT parent.*
+                FROM turn_edges AS edge
+                JOIN agent_turns AS child ON child.turn_id = edge.from_turn_id
+                JOIN agent_turns AS parent ON parent.turn_id = edge.to_turn_id
+                JOIN turn_visibility AS visibility
+                  ON visibility.scope_key = parent.scope_key
+                WHERE edge.from_turn_id = ? AND edge.kind = 'fork-from'
+                  AND child.scope_key = ? AND parent.scope_key = ?
+                  AND parent.turn_ordinal >= visibility.min_turn_ordinal
+                ORDER BY edge.edge_id ASC
+                LIMIT 1
+                """,
+                (int(turn_id), scope.key, scope.key),
+            ).fetchone()
+        return self._row_to_turn(row) if row is not None else None
+
+    def build_replay(
+        self,
+        scope: ConversationScope,
+        turn_ordinal: int,
+        *,
+        current_model: str,
+        prompt_version: str,
+        tool_catalog_version: str,
+        max_chars: int = 40000,
+        max_segments: int = 3,
+    ) -> ReplayBundle:
+        target = self.get_visible_turn(scope, turn_ordinal)
+        if target is None:
+            return ReplayBundle(
+                "digest", (), "", "target-not-visible", (), ()
+            )
+        chain = self._fork_chain(scope, target, limit=20)
+        admitted: list[tuple[TurnRecord, list[dict[str, Any]]]] = []
+        digest_turns: list[TurnRecord] = []
+        reason = "valid"
+        used_chars = 0
+        max_chars = max(int(max_chars), 1000)
+        max_segments = min(max(int(max_segments), 1), 10)
+        for index, turn in enumerate(chain):
+            if index >= max_segments:
+                digest_turns.extend(chain[index:])
+                reason = "segment-budget"
+                break
+            invalid_reason = self._replay_invalid_reason(
+                turn,
+                current_model=current_model,
+                prompt_version=prompt_version,
+                tool_catalog_version=tool_catalog_version,
+            )
+            if invalid_reason:
+                digest_turns.extend(chain[index:])
+                reason = invalid_reason
+                break
+            payload = self.archive_payload(turn.turn_id)
+            messages = _replay_messages(payload)
+            if not messages:
+                digest_turns.extend(chain[index:])
+                reason = "archive-missing"
+                break
+            size = len(
+                json.dumps(
+                    messages,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    default=str,
+                )
+            )
+            if used_chars + size > max_chars:
+                digest_turns.extend(chain[index:])
+                reason = "chain-budget"
+                break
+            admitted.append((turn, messages))
+            used_chars += size
+
+        digest_prefix = "\n\n".join(
+            digest
+            for turn in reversed(digest_turns)
+            if (digest := self.digest_for_turn(turn.turn_id))
+        )
+        replay_messages: list[dict[str, Any]] = []
+        for _turn, messages in reversed(admitted):
+            replay_messages.extend(messages)
+        covered_ids = self._covered_message_ids(
+            [turn.turn_id for turn, _messages in admitted]
+        )
+        return ReplayBundle(
+            mode="verbatim" if replay_messages else "digest",
+            messages=tuple(replay_messages),
+            digest_prefix=digest_prefix,
+            reason=reason,
+            turn_ordinals=tuple(turn.turn_ordinal for turn, _messages in admitted),
+            covered_canonical_message_ids=covered_ids,
+        )
+
+    def _insert_event(
+        self,
+        *,
+        turn_id: int,
+        loop_sequence: int,
+        event_kind: str,
+        state: str,
+        tool_name: str = "",
+        input_json: str = "",
+        result_json: str = "",
+        detail: str = "",
+        effect_labels: list[str] | tuple[str, ...] = (),
+        increment_tool_count: bool = False,
+    ) -> None:
+        labels = sorted({str(label) for label in effect_labels if str(label)})
+        node_id = (
+            f"turn:{int(turn_id)}:{int(loop_sequence)}"
+            if event_kind == "tool"
+            else f"turn:{int(turn_id)}:note:{int(loop_sequence)}"
+        )
+        with self._transaction() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO turn_journal_events (
+                    turn_id, loop_sequence, node_id, event_kind, state,
+                    tool_name, input_json, result_json, detail,
+                    effect_labels_json, occurred_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(turn_id),
+                    int(loop_sequence),
+                    node_id,
+                    event_kind,
+                    state,
+                    tool_name,
+                    input_json,
+                    result_json,
+                    detail,
+                    json.dumps(labels, separators=(",", ":")),
+                    int(time.time()),
+                ),
+            )
+            if increment_tool_count:
+                cursor.execute(
+                    """
+                    UPDATE agent_turns
+                    SET tool_call_count = tool_call_count + 1
+                    WHERE turn_id = ?
+                    """,
+                    (int(turn_id),),
+                )
+
+    def _store_archive(
+        self,
+        cursor: sqlite3.Cursor,
+        turn_row: sqlite3.Row,
+        trace_payload: dict[str, Any],
+        now: int,
+    ) -> None:
+        if self.archive_ttl_seconds <= 0 or self.archive_max_per_scope <= 0:
+            return
+        encoded = json.dumps(
+            trace_payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+        compressed = zlib.compress(encoded, level=6)
+        if len(compressed) > self.archive_max_bytes:
+            return
+        cursor.execute(
+            """
+            INSERT INTO turn_archives (
+                turn_id, provider, model, payload, byte_count,
+                created_at, expires_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(turn_id) DO UPDATE SET
+                provider = excluded.provider,
+                model = excluded.model,
+                payload = excluded.payload,
+                byte_count = excluded.byte_count,
+                created_at = excluded.created_at,
+                expires_at = excluded.expires_at
+            """,
+            (
+                int(turn_row["turn_id"]),
+                str(turn_row["provider"]),
+                str(turn_row["model"]),
+                compressed,
+                len(compressed),
+                now,
+                now + self.archive_ttl_seconds,
+            ),
+        )
+
+    def _upsert_digest(
+        self,
+        cursor: sqlite3.Cursor,
+        turn_row: sqlite3.Row,
+        now: int,
+    ) -> None:
+        events = cursor.execute(
+            """
+            SELECT * FROM turn_journal_events
+            WHERE turn_id = ? ORDER BY event_id ASC
+            """,
+            (int(turn_row["turn_id"]),),
+        ).fetchall()
+        tool_lines = []
+        notes = []
+        for event in events:
+            if str(event["event_kind"]) == "model_note":
+                detail = _first_line(str(event["detail"]), 300)
+                if detail:
+                    notes.append(detail)
+                continue
+            state = str(event["state"])
+            if state == "started":
+                arguments = _summarize_json(str(event["input_json"]), 300)
+                tool_lines.append(
+                    f"{str(event['tool_name'])} START {arguments}"
+                )
+            else:
+                result = _summarize_json(str(event["result_json"]), 500)
+                tool_lines.append(
+                    f"{str(event['tool_name'])} {state.upper()} {result}"
+                )
+        objective = _first_line(str(turn_row["objective"]), 500)
+        final_text = _first_line(str(turn_row["final_text"]), 700)
+        skeleton_lines = [
+            f"t#{int(turn_row['turn_ordinal'])} {str(turn_row['status']).upper()}: {objective}"
+        ]
+        skeleton_lines.extend(f"- {line}" for line in tool_lines[:80])
+        if final_text:
+            skeleton_lines.append(f"- final: {final_text}")
+        approach = "\n".join(f"- note: {note}" for note in notes[:12])
+        cursor.execute(
+            """
+            INSERT INTO turn_digests (
+                turn_id, skeleton, approach, created_at
+            ) VALUES (?, ?, ?, ?)
+            ON CONFLICT(turn_id) DO UPDATE SET
+                skeleton = excluded.skeleton,
+                approach = excluded.approach,
+                created_at = excluded.created_at
+            """,
+            (
+                int(turn_row["turn_id"]),
+                "\n".join(skeleton_lines)[:12000],
+                approach[:4000],
+                now,
+            ),
+        )
+
+    def _fork_chain(
+        self,
+        scope: ConversationScope,
+        target: TurnRecord,
+        *,
+        limit: int,
+    ) -> list[TurnRecord]:
+        chain = [target]
+        seen = {target.turn_id}
+        current = target
+        for _index in range(max(int(limit) - 1, 0)):
+            with self._lock:
+                row = self._connection.execute(
+                    """
+                    SELECT parent.*
+                    FROM turn_edges AS edge
+                    JOIN agent_turns AS parent
+                      ON parent.turn_id = edge.to_turn_id
+                    JOIN turn_visibility AS visibility
+                      ON visibility.scope_key = parent.scope_key
+                    WHERE edge.from_turn_id = ? AND edge.kind = 'fork-from'
+                      AND parent.scope_key = ?
+                      AND parent.turn_ordinal >= visibility.min_turn_ordinal
+                    ORDER BY edge.edge_id ASC
+                    LIMIT 1
+                    """,
+                    (current.turn_id, scope.key),
+                ).fetchone()
+            if row is None:
+                break
+            parent = self._row_to_turn(row)
+            if parent.turn_id in seen:
+                break
+            chain.append(parent)
+            seen.add(parent.turn_id)
+            current = parent
+        return chain
+
+    def _replay_invalid_reason(
+        self,
+        turn: TurnRecord,
+        *,
+        current_model: str,
+        prompt_version: str,
+        tool_catalog_version: str,
+    ) -> str:
+        if turn.status != "succeeded":
+            return "turn-not-succeeded"
+        if turn.tool_call_count <= 0:
+            return "chat-only"
+        if turn.model != current_model:
+            return "model-changed"
+        if not turn.prompt_version or turn.prompt_version != prompt_version:
+            return "prompt-version-changed"
+        if (
+            not turn.tool_catalog_version
+            or turn.tool_catalog_version != tool_catalog_version
+        ):
+            return "tool-catalog-changed"
+        if self.archive_payload(turn.turn_id) is None:
+            return "archive-missing"
+        return ""
+
+    def _covered_message_ids(
+        self,
+        turn_ids: list[int],
+    ) -> tuple[int, ...]:
+        if not turn_ids:
+            return ()
+        placeholders = ",".join("?" for _ in turn_ids)
+        with self._lock:
+            trigger_rows = self._connection.execute(
+                f"""
+                SELECT trigger_canonical_message_id FROM agent_turns
+                WHERE turn_id IN ({placeholders})
+                  AND trigger_canonical_message_id IS NOT NULL
+                """,
+                turn_ids,
+            ).fetchall()
+            send_rows = self._connection.execute(
+                f"""
+                SELECT canonical_message_id FROM turn_send_links
+                WHERE turn_id IN ({placeholders})
+                """,
+                turn_ids,
+            ).fetchall()
+        return tuple(
+            sorted(
+                {
+                    *(int(row[0]) for row in trigger_rows),
+                    *(int(row[0]) for row in send_rows),
+                }
+            )
+        )
+
+    def _cleanup_archives(
+        self,
+        cursor: sqlite3.Cursor,
+        scope_key: str,
+        now: int,
+    ) -> None:
+        cursor.execute("DELETE FROM turn_archives WHERE expires_at <= ?", (now,))
+        cursor.execute(
+            """
+            DELETE FROM turn_archives
+            WHERE turn_id IN (
+                SELECT a.turn_id
+                FROM turn_archives AS a
+                JOIN agent_turns AS t ON t.turn_id = a.turn_id
+                WHERE t.scope_key = ?
+                ORDER BY a.created_at DESC, a.turn_id DESC
+                LIMIT -1 OFFSET ?
+            )
+            """,
+            (scope_key, self.archive_max_per_scope),
+        )
+
+    def _configure(self) -> None:
+        with self._lock:
+            self._connection.execute("PRAGMA foreign_keys = ON")
+            self._connection.execute("PRAGMA busy_timeout = 10000")
+            if self.path is not None:
+                self._connection.execute("PRAGMA journal_mode = WAL")
+            self._connection.execute("PRAGMA synchronous = NORMAL")
+
+    def _migrate(self) -> None:
+        with self._transaction() as cursor:
+            cursor.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS turn_journal_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS agent_turns (
+                    turn_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    scope_key TEXT NOT NULL,
+                    turn_ordinal INTEGER NOT NULL,
+                    trigger_canonical_message_id INTEGER,
+                    status TEXT NOT NULL CHECK(status IN (
+                        'running', 'succeeded', 'silence', 'aborted', 'crashed'
+                    )),
+                    provider TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    profile TEXT NOT NULL,
+                    objective TEXT NOT NULL,
+                    final_text TEXT NOT NULL DEFAULT '',
+                    started_at INTEGER NOT NULL,
+                    finished_at INTEGER,
+                    tool_call_count INTEGER NOT NULL DEFAULT 0,
+                    input_tokens INTEGER NOT NULL DEFAULT 0,
+                    output_tokens INTEGER NOT NULL DEFAULT 0,
+                    total_tokens INTEGER NOT NULL DEFAULT 0,
+                    prompt_version TEXT NOT NULL DEFAULT '',
+                    tool_catalog_version TEXT NOT NULL DEFAULT '',
+                    UNIQUE(scope_key, turn_ordinal)
+                );
+
+                CREATE TABLE IF NOT EXISTS turn_journal_events (
+                    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    turn_id INTEGER NOT NULL REFERENCES agent_turns(turn_id) ON DELETE CASCADE,
+                    loop_sequence INTEGER NOT NULL,
+                    node_id TEXT NOT NULL,
+                    event_kind TEXT NOT NULL CHECK(event_kind IN ('tool', 'model_note')),
+                    state TEXT NOT NULL,
+                    tool_name TEXT NOT NULL DEFAULT '',
+                    input_json TEXT NOT NULL DEFAULT '',
+                    result_json TEXT NOT NULL DEFAULT '',
+                    detail TEXT NOT NULL DEFAULT '',
+                    effect_labels_json TEXT NOT NULL DEFAULT '[]',
+                    occurred_at INTEGER NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS turn_edges (
+                    edge_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    from_turn_id INTEGER NOT NULL REFERENCES agent_turns(turn_id),
+                    to_turn_id INTEGER NOT NULL REFERENCES agent_turns(turn_id),
+                    kind TEXT NOT NULL CHECK(kind IN ('fork-from')),
+                    created_by_principal_id INTEGER,
+                    created_at INTEGER NOT NULL,
+                    UNIQUE(from_turn_id, to_turn_id, kind)
+                );
+
+                CREATE TABLE IF NOT EXISTS turn_send_links (
+                    canonical_message_id INTEGER PRIMARY KEY,
+                    turn_id INTEGER NOT NULL REFERENCES agent_turns(turn_id),
+                    node_id TEXT NOT NULL,
+                    chunk_index INTEGER NOT NULL DEFAULT 0,
+                    created_at INTEGER NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS turn_archives (
+                    turn_id INTEGER PRIMARY KEY REFERENCES agent_turns(turn_id) ON DELETE CASCADE,
+                    provider TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    payload BLOB NOT NULL,
+                    byte_count INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    expires_at INTEGER NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS turn_visibility (
+                    scope_key TEXT PRIMARY KEY,
+                    min_turn_ordinal INTEGER NOT NULL DEFAULT 1,
+                    cleared_at INTEGER
+                );
+
+                CREATE TABLE IF NOT EXISTS turn_digests (
+                    turn_id INTEGER PRIMARY KEY REFERENCES agent_turns(turn_id) ON DELETE CASCADE,
+                    skeleton TEXT NOT NULL,
+                    approach TEXT NOT NULL DEFAULT '',
+                    created_at INTEGER NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_agent_turns_scope_time
+                    ON agent_turns(scope_key, started_at, turn_ordinal);
+                CREATE INDEX IF NOT EXISTS idx_turn_events_turn
+                    ON turn_journal_events(turn_id, event_id);
+                CREATE INDEX IF NOT EXISTS idx_turn_edges_from
+                    ON turn_edges(from_turn_id, kind);
+                CREATE INDEX IF NOT EXISTS idx_turn_send_links_turn
+                    ON turn_send_links(turn_id, chunk_index);
+                CREATE INDEX IF NOT EXISTS idx_turn_archives_expiry
+                    ON turn_archives(expires_at);
+                """
+            )
+            row = cursor.execute(
+                """
+                SELECT value FROM turn_journal_meta
+                WHERE key = 'schema_version'
+                """
+            ).fetchone()
+            if row is not None and int(row[0]) > TURN_SCHEMA_VERSION:
+                raise RuntimeError("turn journal schema is newer than this bot")
+            cursor.execute(
+                """
+                INSERT INTO turn_journal_meta(key, value)
+                VALUES ('schema_version', ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (str(TURN_SCHEMA_VERSION),),
+            )
+
+    @contextmanager
+    def _transaction(self) -> Iterator[sqlite3.Cursor]:
+        with self._lock:
+            cursor = self._connection.cursor()
+            try:
+                cursor.execute("BEGIN IMMEDIATE")
+                yield cursor
+            except Exception:
+                self._connection.rollback()
+                raise
+            else:
+                self._connection.commit()
+            finally:
+                cursor.close()
+
+    @staticmethod
+    def _ensure_visibility(cursor: sqlite3.Cursor, scope_key: str) -> None:
+        cursor.execute(
+            """
+            INSERT OR IGNORE INTO turn_visibility(scope_key, min_turn_ordinal)
+            VALUES (?, 1)
+            """,
+            (scope_key,),
+        )
+
+    @staticmethod
+    def _turn_row(
+        cursor: sqlite3.Cursor,
+        turn_id: int,
+    ) -> sqlite3.Row | None:
+        return cursor.execute(
+            "SELECT * FROM agent_turns WHERE turn_id = ?",
+            (int(turn_id),),
+        ).fetchone()
+
+    @staticmethod
+    def _row_to_turn(row: sqlite3.Row) -> TurnRecord:
+        return TurnRecord(
+            turn_id=int(row["turn_id"]),
+            scope_key=str(row["scope_key"]),
+            turn_ordinal=int(row["turn_ordinal"]),
+            trigger_canonical_message_id=(
+                int(row["trigger_canonical_message_id"])
+                if row["trigger_canonical_message_id"] is not None
+                else None
+            ),
+            status=str(row["status"]),
+            provider=str(row["provider"]),
+            model=str(row["model"]),
+            profile=str(row["profile"]),
+            objective=str(row["objective"]),
+            final_text=str(row["final_text"]),
+            started_at=int(row["started_at"]),
+            finished_at=(
+                int(row["finished_at"])
+                if row["finished_at"] is not None
+                else None
+            ),
+            tool_call_count=int(row["tool_call_count"]),
+            input_tokens=int(row["input_tokens"]),
+            output_tokens=int(row["output_tokens"]),
+            total_tokens=int(row["total_tokens"]),
+            prompt_version=str(row["prompt_version"]),
+            tool_catalog_version=str(row["tool_catalog_version"]),
+        )
+
+    @staticmethod
+    def _row_to_event(row: sqlite3.Row) -> TurnEventRecord:
+        try:
+            raw_labels = json.loads(str(row["effect_labels_json"]))
+        except json.JSONDecodeError:
+            raw_labels = []
+        labels = tuple(
+            str(label) for label in raw_labels if isinstance(label, str)
+        )
+        return TurnEventRecord(
+            event_id=int(row["event_id"]),
+            turn_id=int(row["turn_id"]),
+            loop_sequence=int(row["loop_sequence"]),
+            node_id=str(row["node_id"]),
+            event_kind=str(row["event_kind"]),
+            state=str(row["state"]),
+            tool_name=str(row["tool_name"]),
+            input_json=str(row["input_json"]),
+            result_json=str(row["result_json"]),
+            detail=str(row["detail"]),
+            effect_labels=labels,
+            occurred_at=int(row["occurred_at"]),
+        )
+
+    @staticmethod
+    def _render_standing_line(turn: TurnRecord) -> str:
+        stamp = datetime.fromtimestamp(turn.started_at).strftime("%H:%M")
+        status = {
+            "succeeded": "OK",
+            "silence": "SILENT",
+            "aborted": "ABORTED",
+            "crashed": "CRASHED",
+        }.get(turn.status, turn.status.upper())
+        summary = _first_line(turn.objective, 80)
+        final = _first_line(turn.final_text, 80)
+        suffix = f" -> {final}" if final else ""
+        return (
+            f"{turn.handle} {stamp} {status} \"{summary}\""
+            f" · {turn.tool_call_count} tools{suffix}"
+        )
+
+
+def tool_catalog_fingerprint(tools: list[dict[str, Any]]) -> str:
+    encoded = json.dumps(
+        tools,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:16]
+
+
+def tool_effect_labels(tool_name: str) -> tuple[str, ...]:
+    if tool_name in {
+        "web_search",
+        "read_image_text",
+        "transcribe_voice",
+        "get_message_by_id",
+        "search_messages",
+        "list_recent_files",
+        "sandbox_list",
+        "sandbox_read_file",
+        "memory_list",
+        "context_expand",
+        "context_search",
+    }:
+        return ("read",)
+    if tool_name in {"memory_add", "memory_remove"}:
+        return ("write:memory",)
+    if tool_name in {
+        "sandbox_create",
+        "sandbox_destroy",
+        "sandbox_exec",
+        "sandbox_write_file",
+        "import_file_to_sandbox",
+    }:
+        return ("write:sandbox",)
+    if tool_name in {
+        "send_file_from_sandbox",
+        "send_image_from_sandbox",
+        "say",
+        "send_sticker",
+        "send_qq_face",
+        "reply_with_voice",
+        "reply_send",
+    }:
+        return ("send:conversation",)
+    return ("unspecified",)
+
+
+def _safe_json(value: Any, max_chars: int) -> str:
+    sanitized = _sanitize_value(value)
+    encoded = json.dumps(
+        sanitized,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        default=str,
+    )
+    return encoded[:max_chars]
+
+
+def _safe_result(value: str, max_chars: int) -> str:
+    try:
+        parsed = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return _safe_text(str(value), max_chars)
+    return _safe_json(parsed, max_chars)
+
+
+def _sanitize_value(value: Any, key: str = "", depth: int = 0) -> Any:
+    if _secret_key(key):
+        return "[REDACTED]"
+    if depth >= 8:
+        return "[TRUNCATED_DEPTH]"
+    if isinstance(value, dict):
+        return {
+            str(item_key): _sanitize_value(
+                item,
+                str(item_key),
+                depth + 1,
+            )
+            for item_key, item in list(value.items())[:100]
+        }
+    if isinstance(value, (list, tuple)):
+        return [_sanitize_value(item, depth=depth + 1) for item in value[:100]]
+    if isinstance(value, str):
+        return _safe_text(value, 2000)
+    if value is None or isinstance(value, (int, float, bool)):
+        return value
+    return _safe_text(str(value), 500)
+
+
+def _safe_text(value: str, max_chars: int) -> str:
+    text = " ".join(str(value).split())
+    text = re.sub(r"\bsk-[A-Za-z0-9_-]{10,}\b", "[REDACTED]", text)
+    text = re.sub(
+        r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}",
+        "Bearer [REDACTED]",
+        text,
+    )
+    text = re.sub(
+        r"(?i)((?:api[_ -]?key|access[_ -]?token|auth[_ -]?token|"
+        r"authorization|cookie|password|secret|密码|验证码)"
+        r"\s*[:=：]\s*)(?:bearer\s+)?\S+",
+        r"\1[REDACTED]",
+        text,
+    )
+    return text[: max(int(max_chars), 1)]
+
+
+def _secret_key(key: str) -> bool:
+    folded = key.casefold().replace("-", "_").replace(" ", "_")
+    compact = folded.replace("_", "")
+    if any(
+        marker in folded
+        for marker in (
+            "password",
+            "secret",
+            "api_key",
+            "authorization",
+            "cookie",
+            "验证码",
+            "密码",
+        )
+    ):
+        return True
+    return compact == "apikey" or compact == "token" or compact.endswith("token")
+
+
+def _contains_secret(value: Any, depth: int = 0) -> bool:
+    if depth >= 12:
+        return True
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if _secret_key(str(key)) and item is not None and item != "":
+                return True
+            if _contains_secret(item, depth + 1):
+                return True
+        return False
+    if isinstance(value, (list, tuple)):
+        return any(_contains_secret(item, depth + 1) for item in value)
+    if not isinstance(value, str):
+        return False
+    if re.search(r"\bsk-[A-Za-z0-9_-]{10,}\b", value):
+        return True
+    if re.search(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}", value):
+        return True
+    if re.search(
+        r"(?i)(?:api[_ -]?key|access[_ -]?token|auth[_ -]?token|"
+        r"authorization|cookie|password|secret|密码|验证码)"
+        r"\s*[:=：]\s*(?:bearer\s+)?\S+",
+        value,
+    ):
+        return True
+    if value.lstrip().startswith(("{", "[")):
+        try:
+            nested = json.loads(value)
+        except json.JSONDecodeError:
+            return False
+        if nested != value:
+            return _contains_secret(nested, depth + 1)
+    return False
+
+
+def _summarize_json(value: str, max_chars: int) -> str:
+    if not value:
+        return "{}"
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return _first_line(value, max_chars)
+    if isinstance(parsed, dict):
+        parts = []
+        for key, item in list(parsed.items())[:12]:
+            if isinstance(item, (dict, list)):
+                rendered = json.dumps(item, ensure_ascii=False, separators=(",", ":"))
+            else:
+                rendered = str(item)
+            parts.append(f"{key}={_first_line(rendered, 160)}")
+        return _first_line(", ".join(parts), max_chars)
+    return _first_line(str(parsed), max_chars)
+
+
+def _first_line(value: str, max_chars: int) -> str:
+    return " ".join(str(value).split())[:max_chars]
+
+
+def _status_label(status: str) -> str:
+    return {
+        "running": "运行中",
+        "succeeded": "已完成",
+        "silence": "无可见回复",
+        "aborted": "已取消",
+        "crashed": "异常中断",
+    }.get(status, status)
+
+
+def _replay_messages(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    raw_messages = payload.get("messages")
+    if not isinstance(raw_messages, list):
+        return []
+    messages: list[dict[str, Any]] = []
+    for raw in raw_messages:
+        if not isinstance(raw, dict):
+            return []
+        role = raw.get("role")
+        if role == "system":
+            continue
+        if role == "user":
+            messages.append(
+                {"role": "user", "content": raw.get("content") or ""}
+            )
+            continue
+        if role == "assistant":
+            message: dict[str, Any] = {
+                "role": "assistant",
+                "content": raw.get("content") or "",
+            }
+            tool_calls = raw.get("tool_calls")
+            if tool_calls is not None:
+                if not isinstance(tool_calls, list):
+                    return []
+                message["tool_calls"] = tool_calls
+                reasoning = raw.get("reasoning_content")
+                if reasoning is not None:
+                    message["reasoning_content"] = reasoning
+            messages.append(message)
+            continue
+        if role == "tool":
+            tool_call_id = raw.get("tool_call_id")
+            if not isinstance(tool_call_id, str) or not tool_call_id:
+                return []
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": raw.get("content") or "",
+                }
+            )
+            continue
+        return []
+    if not messages or messages[0].get("role") != "user":
+        return []
+    return messages

@@ -16,26 +16,9 @@ from nonebot import logger
 from nonebot.adapters.onebot.v11 import Bot, Message, MessageSegment
 from nonebot.adapters.onebot.v11.exception import ActionFailed
 
-VOICE_REPLY_KEYWORDS = (
-    "语音回答",
-    "用语音",
-    "发语音",
-    "说出来",
-    "念出来",
-    "读出来",
-)
-VOICE_TRANSCRIBE_KEYWORDS = (
-    "语音识别",
-    "语音转文字",
-    "转成文字",
-    "听一下",
-    "听听",
-    "听语音",
-    "语音说了什么",
-    "说了什么",
-)
-PROJECT_ROOT = Path(__file__).parents[3]
-VOICE_CACHE_DIR = PROJECT_ROOT / ".cache" / "voice"
+from .paths import CACHE_DIR
+
+VOICE_CACHE_DIR = CACHE_DIR / "voice"
 
 
 class VoiceError(RuntimeError):
@@ -66,16 +49,6 @@ class RecentVoiceStore:
             self._items.pop(key, None)
             return None
         return message_id
-
-
-def wants_voice_reply(text: str) -> bool:
-    normalized = " ".join(text.lower().split())
-    return any(keyword in normalized for keyword in VOICE_REPLY_KEYWORDS)
-
-
-def wants_voice_transcription(text: str) -> bool:
-    normalized = " ".join(text.lower().split())
-    return any(keyword in normalized for keyword in VOICE_TRANSCRIBE_KEYWORDS)
 
 
 def contains_voice(message: Message) -> bool:

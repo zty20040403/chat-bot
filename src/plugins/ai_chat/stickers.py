@@ -8,8 +8,10 @@ from random import choice, sample
 from nonebot.adapters import Message
 from nonebot.adapters.onebot.v11 import MessageSegment
 
+from .paths import STATE_DIR
+
 STICKER_DIR = Path(__file__).parent / "assets" / "stickers"
-LEARNED_STICKERS_PATH = Path(__file__).parent / "assets" / "learned_stickers.json"
+LEARNED_STICKERS_PATH = STATE_DIR / "learned_stickers.json"
 STICKER_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 LEARNABLE_SEGMENT_TYPES = {"face", "image"}
 MAX_STABLE_FACE_ID = 348
@@ -115,19 +117,6 @@ QQ_FACE_KEYWORDS = (
     "小黄脸",
     "face",
 )
-STICKER_KEYWORDS = (
-    "表情",
-    "表情包",
-    "贴纸",
-    "发表情",
-    "发个表情",
-    "来个表情",
-    "来张表情",
-    "meme",
-    "sticker",
-)
-
-
 def _load_learned_stickers() -> list[dict[str, object]]:
     if not LEARNED_STICKERS_PATH.exists():
         return []
@@ -272,16 +261,6 @@ def list_stickers() -> list[Path]:
         for path in STICKER_DIR.iterdir()
         if path.is_file() and path.suffix.lower() in STICKER_EXTENSIONS
     )
-
-
-def wants_sticker(text: str) -> bool:
-    normalized = text.strip().lower()
-    return any(keyword in normalized for keyword in STICKER_KEYWORDS)
-
-
-def wants_qq_face(text: str) -> bool:
-    normalized = text.strip().lower()
-    return any(keyword in normalized for keyword in QQ_FACE_KEYWORDS)
 
 
 def random_sticker() -> Path | None:

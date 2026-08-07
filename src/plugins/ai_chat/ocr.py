@@ -14,26 +14,11 @@ from nonebot import logger
 from nonebot.adapters.onebot.v11 import Bot, Message, MessageSegment
 from nonebot.adapters.onebot.v11.exception import ActionFailed
 
-OCR_KEYWORDS = (
-    "ocr",
-    "识图",
-    "识别图片",
-    "识别文字",
-    "图片文字",
-    "截图文字",
-    "看看这张图",
-    "看看图片",
-    "看下这张图",
-    "看一下这张图",
-    "图里写了什么",
-    "图片里写了什么",
-    "读一下图片",
-    "分析截图",
-)
+from .paths import CACHE_DIR
+
 QQ_IMAGE_HOST_SUFFIXES = ("qq.com", "qq.com.cn", "qpic.cn")
 MACOS_OCR_SCRIPT = Path(__file__).with_name("macos_ocr.swift")
-PROJECT_ROOT = Path(__file__).parents[3]
-MACOS_OCR_BINARY = PROJECT_ROOT / ".cache" / "macos_ocr"
+MACOS_OCR_BINARY = CACHE_DIR / "macos_ocr"
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 _macos_compile_lock = asyncio.Lock()
 
@@ -68,11 +53,6 @@ class RecentImageStore:
             self._items.pop(key, None)
             return []
         return list(sources)
-
-
-def wants_image_ocr(text: str) -> bool:
-    normalized = " ".join(text.lower().split())
-    return any(keyword in normalized for keyword in OCR_KEYWORDS)
 
 
 def image_sources(message: Message, max_images: int = 2) -> list[str]:

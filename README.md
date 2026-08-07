@@ -1,11 +1,12 @@
 # QQ DeepSeek Bot
 
-这是一个最小可跑的 QQ 群聊 AI 机器人骨架：
+这是一个可长期运行的 QQ 群聊 AI 机器人：
 
 - 接入层：OneBot V11，推荐先用 NapCatQQ 做自用测试
 - 框架层：NoneBot2
 - 模型层：DeepSeek API
-- 当前功能：`/ai 问题`、`/ai_reset` 清空当前群/私聊记忆
+- 当前功能：对话、联网搜索、OCR、语音、模型切换、持久化上下文、
+  长期记忆、任务管理和项目沙箱
 
 ## 目录结构
 
@@ -19,8 +20,18 @@ bot/
     __init__.py
     config.py
     deepseek.py
+    agent_tools.py
+    context_store.py
+    conversation_scope.py
+    ledger.py
+    long_term_memory.py
+    message_ir.py
+    message_lowering.py
     memory.py
-    rate_limit.py
+    onebot_codec.py
+    sandbox.py
+    tool_policy.py
+    turn_journal.py
 ```
 
 ## 本地启动
@@ -66,13 +77,161 @@ ws://127.0.0.1:8080/onebot/v11/ws
 ```
 
 机器人正常回答 AI 问题时，会自动在结尾带一个合适的颜文字。
-普通提问会把联网搜索和可用图片 OCR 作为 DeepSeek Tool Call 提供给模型，
-由模型判断是否调用；工具结果会交回 DeepSeek 后再生成最终回答。
-机器人会引用触发它的原消息，并按“群号 + 用户QQ”隔离对话记忆；
-群成员的 QQ 号、昵称和群名片保存在本地，不会提交到 Git 仓库。
+普通 `@机器人` 提问统一进入 DeepSeek Tool Call 循环，不再按“看图”、
+“听语音”或“发表情”等关键词提前走固定回复。联网搜索、可用图片 OCR、
+语音、表情和授权用户的沙箱工具都会按现场条件提供给模型，由模型判断是否调用；
+工具结果会交回 DeepSeek 后再生成最终回答。
+机器人会引用触发它的原消息。QQ 消息进入机器人后，会先转换成统一的
+Message IR，再存入本地 SQLite 规范消息账本。模型在群聊上下文和消息工具里
+只看到 `msg#12`、`@#3` 这类机器人内部句柄；原始群号、QQ 号和 NapCat
+消息 ID 只留在本地适配层，不直接交给模型，也不会提交到 Git 仓库。
 群聊累计一定数量的普通消息后，机器人会低概率参考上下文主动接一句。
 群成员连续 30 分钟没有发言时，机器人会主动暖场；每个群每天最多暖场 2 次，
 凌晨 1 点到 8 点保持安静。
+会话历史和最近群聊会写入 `AI_STATE_DIR`。规范消息位于
+`bot_state.sqlite3`，并使用 WAL 和按会话可见性边界；同一个 OneBot 消息重复
+到达只会命中原记录，不会覆盖原文。较旧聊天按 token 水位压成带精确来源范围、
+源哈希和 `episode#` 句柄的 P1/P2/P3 分段，最近消息保留为原文尾部。摘要只是可
+重建投影，原始 Message IR 才是事实来源。投影失败时会退回有界原始消息，不会
+推进覆盖游标。群聊、私聊和用户长期记忆严格按 `ConversationScope` 隔离。
+
+## 工作回合与连续任务
+
+每个 AI 请求现在都会留下一个当前会话内可见的回合编号，例如
+`t#3`。机器人会把模型说明、工具开始、成功、失败或已实际发送等事件写入
+`turn_journal.sqlite3`，而不是只保留最后一句回答。普通闲聊仍会记录为回合，
+但不会挤进提供给模型的 recent turns 工作摘要。
+
+你可以自然地说：
+
+```text
+@机器人 继续 t#3，把刚才的项目再加一个登录页
+@机器人 展开 t#3，告诉我上次执行到了哪里
+```
+
+DeepSeek 会按需调用 `context_search` 查找当前会话的 `msg#` 和 `episode#`，再用
+`context_expand` 展开 `t#` 或 `episode#` 的证据。所有句柄都必须连同宿主给定的
+当前 `ConversationScope` 查询；猜中其他群的编号或 UUID 也读不到内容。
+
+机器人成功发出的最终回复、`say` 进度消息和沙箱图片会绑定到对应回合。群友
+直接引用这些消息继续提问时，机器人会新建一个 `fork-from` 回合，并自动注入
+旧回合摘要、经过时间以及期间新增的少量群聊消息；它不会恢复已经结束的 Python
+协程。旧回合只有在成功完成、包含工具工作、归档仍在、模型、提示词版本和工具
+目录完全匹配且链预算足够时，才会原样重放 provider 消息段。任一条件不满足就
+自动降级到永久保存的确定性摘要，当前 system prompt 永远不会从归档恢复。
+
+为了排查中断，模型和工具之间的短期 trace 默认压缩保留 14 天，每个会话最多
+50 份；检测到密码、Token、API Key 或验证码的 trace 不会归档。`/ai_reset`
+和 `/clear` 会立刻移动当前会话的可见性边界，让旧 `t#` 不再进入模型上下文。
+底层审计行仍保留在本机 SQLite 中，不会上传 Git。机器人启动时会把没有完成行
+的 `started` 工具效果标记为 `outcome-unknown`，并把未结束回合标为异常中断，
+避免把“可能已经执行过”误当成“肯定没执行”。最终 QQ 回复也按发送尝试记录
+`started`、`committed`、`failed` 或 `outcome-unknown`；NapCat 超时不会被伪装成
+明确失败，若启用短回复重试，两次尝试会分别留下记录。
+
+## 长期记忆和任务管理
+
+自然聊天时 DeepSeek 可以调用：
+
+```text
+memory_add / memory_list / memory_remove
+context_search / context_expand
+```
+
+它只应保存稳定偏好、身份事实和长期约定，不保存临时聊天、密码、Token、
+API Key 或验证码。所有记忆都可以手动审计：
+
+```text
+/记忆
+/记忆 添加 我喜欢简洁回答
+/记忆 群 项目统一使用 Python 3.12
+/记忆 删除 3
+/记忆 清空
+/记忆 清空 群
+/记忆 审计
+```
+
+个人记忆只能用于“当前群 + 当前 QQ 用户”；群记忆只有群管理员或
+`AI_SANDBOX_ALLOWED_USERS` 中明确授权的用户可以修改。每条记忆记录版本、创建者
+`@#principal`、来源 `msg#` 和更新时间；新增、更新、删除、清空与容量淘汰都会
+写入 mutation 审计记录，更新接口使用版本比较避免静默覆盖。
+
+长时间执行沙盒任务时，可以查看或取消自己的当前任务：
+
+```text
+/任务
+/停止
+/停止 t2
+```
+
+私聊消息现在也复用同一套 AI、长期记忆、工具和任务管理流程。
+
+按用户和会话切换 DeepSeek 模型：
+
+```text
+/模型
+/模型 flash
+/模型 pro
+/模型 默认
+```
+
+模型选择会保存在本地，不影响同群其他用户，也不会提交到 Git 仓库。
+
+## 项目沙箱和群文件工具
+
+开启 Docker Desktop 后，可以直接在群里让机器人完成代码任务：
+
+```text
+@机器人 创建一个 Python 记账 CLI，运行测试后打包发到群里
+@机器人 用 Node.js 做一个静态网页，把源码压缩包发给我
+@机器人 看看群里最近上传的文件，把 CSV 导入沙箱后做个统计
+@机器人 搜一下最近群聊里谁提到过“比赛”
+```
+
+DeepSeek 可以按任务自动调用：
+
+```text
+get_message_by_id / search_messages
+sandbox_create / sandbox_list / sandbox_destroy / sandbox_exec
+sandbox_write_file / sandbox_read_file
+send_file_from_sandbox / send_image_from_sandbox
+list_recent_files / import_file_to_sandbox
+say / send_sticker / send_qq_face
+memory_add / memory_list / memory_remove
+context_search / context_expand
+```
+
+`search_messages` 返回当前群的完整 `msg#` 句柄。后续读取消息或导入该消息
+中的附件时，把它原样放进 `message_handle`；消息附件使用 `file#消息.段号`，
+群文件列表使用 Scope 绑定的 `groupfile#...`。执行器会在当前群 Scope 内映射回
+NapCat 原始消息和文件 ID，模型不能直接看到或提交这些原生 ID。
+
+所有模型工具调用先经过宿主维护的工具目录和 JSON Schema 校验；不存在的工具、
+缺少必填参数、越界值和多余字段都会在执行前拒绝，并记为 `rejected`，模型不能
+靠自己声明一个新工具来获得权限。每轮和每回合分别有调用预算。
+
+沙箱以“群 + 发起用户”隔离，不挂载宿主机目录；每个容器限制为
+1GB 内存、1.5 CPU 和 128 个进程。它可以联网安装依赖、构建、测试、
+打包并把产物发到当前群。这里的“部署”是把项目在临时沙箱中构建并运行验证；
+发布成公网服务仍需要对应云平台的账号、密钥和部署配置。
+每次 `sandbox_exec` 还会返回并记入观测清单：完整命令、耗时、退出码、原始
+stdout/stderr 的长度与 SHA-256、`/workspace` 变更路径、`docker diff` 和容器
+网络模式。它说明命令实际碰过什么，但不会因此扩大沙箱权限。
+
+建议先在 `.env` 中只允许自己的 QQ 使用：
+
+```text
+AI_SANDBOX_ENABLED=true
+AI_SANDBOX_ALLOWED_USERS=你的QQ号
+AI_SANDBOX_MAX_PER_USER=2
+AI_SANDBOX_MAX_TOTAL=8
+AI_SANDBOX_TIMEOUT_SECONDS=120
+AI_SANDBOX_MAX_FILE_MB=20
+```
+
+`AI_SANDBOX_ALLOWED_USERS` 留空时，所有已启用群的成员都能创建沙箱，
+会占用本机内存和磁盘。机器人关闭后，已创建容器仍会保留，之后可让机器人
+调用 `sandbox_list` 和 `sandbox_destroy` 清理。
 
 手动联网搜索：
 
@@ -81,19 +240,23 @@ ws://127.0.0.1:8080/onebot/v11/ws
 /搜索 Arch Linux 新闻
 ```
 
-`/搜` 会强制调用 `web_search` 工具，并在回答末尾列出完整来源链接。
+`/搜` 会把原始关键词直接交给 DuckDuckGo，返回标题、摘要和完整链接；
+它不经过 DeepSeek，也不会写入 AI 对话上下文。普通 `/ai` 和 `@机器人`
+仍可由 DeepSeek 自动调用 `web_search` 工具并整理回答。
+DuckDuckGo 返回人机验证、空结果或请求失败时，会自动改用 Bing RSS
+作为备用搜索入口。
 
 识别截图中的文字并交给 AI 分析：
 
 ```text
-先发送图片，5 分钟内再发送：看看这张图
-回复一张图片并发送：识图
+先发送图片，5 分钟内再发送：@机器人 看看这张图
+回复一张图片并发送：@机器人 识别并总结
 /ocr [可与图片分开发送]
 @机器人 看看这张图
 ```
 
-`/ocr`、回复图片说“识图”以及先发图后说“看看这张图”会强制调用
-`read_image_text` 工具。
+`/ocr` 会强制调用 `read_image_text` 工具；普通 `@机器人` 消息由
+DeepSeek 根据问题和图片是否可用自行决定是否调用，不再使用关键词匹配。
 机器人优先识别当前消息中的图片，其次识别被回复的图片，最后使用同一用户
 5 分钟内最近发送的图片。Windows 使用 NapCat OCR；macOS 使用系统 Vision OCR，
 图片不会上传到第三方视觉服务。
@@ -108,9 +271,9 @@ ws://127.0.0.1:8080/onebot/v11/ws
 读取群友发出的 QQ 语音：
 
 ```text
-先发送语音，5 分钟内再发送：听一下
+先发送语音，5 分钟内再发送：@机器人 听一下
 回复一条语音并发送：/听
-回复一条语音并发送：语音识别
+回复一条语音并发送：@机器人 帮我理解这段内容
 ```
 
 `/语音` 强制调用 `reply_with_voice`，`/听` 强制调用
@@ -130,6 +293,7 @@ ws://127.0.0.1:8080/onebot/v11/ws
 
 ```text
 /表情
+@机器人 发个适合现在气氛的表情包
 ```
 
 发送 QQ 自带表情：
@@ -138,7 +302,11 @@ ws://127.0.0.1:8080/onebot/v11/ws
 /qq表情
 /qq表情 14
 /qq表情 微笑
+@机器人 发一个可爱的 QQ 自带表情
 ```
+
+斜杠命令是手动快捷入口；自然语言请求会由 DeepSeek 调用
+`send_sticker` 或 `send_qq_face`，不会再靠关键词直接发送。
 
 清空当前群的上下文：
 
@@ -152,9 +320,37 @@ ws://127.0.0.1:8080/onebot/v11/ws
 DEEPSEEK_MODEL=deepseek-v4-flash
 DEEPSEEK_THINKING=disabled
 AI_MAX_CONTEXT_TURNS=6
-AI_RATE_LIMIT_SECONDS=8
+AI_GROUP_CONTEXT_MESSAGES=40
+AI_GROUP_CONTEXT_CHARS=4000
+AI_LEDGER_ENABLED=true
+AI_CONTEXT_LIFECYCLE_ENABLED=true
+AI_CONTEXT_INPUT_BUDGET_TOKENS=6000
+AI_CONTEXT_HIGH_WATERMARK_TOKENS=4500
+AI_CONTEXT_LOW_WATERMARK_TOKENS=2200
+AI_CONTEXT_COMPARTMENT_TARGET_TOKENS=1200
+AI_CONTEXT_RAW_TAIL_MIN_MESSAGES=8
+AI_CONTEXT_MAX_COMPARTMENTS=12
+AI_TURN_JOURNAL_ENABLED=true
+AI_TURN_RECENT_HOURS=24
+AI_TURN_RECENT_LIMIT=5
+AI_TURN_ARCHIVE_TTL_DAYS=14
+AI_TURN_ARCHIVE_MAX_PER_SCOPE=50
+AI_TURN_ARCHIVE_MAX_KB=512
+AI_TURN_EVENT_MAX_CHARS=12000
+AI_TURN_EXPAND_MAX_CHARS=10000
+AI_TURN_REPLAY_ENABLED=true
+AI_TURN_REPLAY_MAX_CHARS=40000
+AI_TURN_REPLAY_MAX_SEGMENTS=3
+AI_MEMORY_MAX_ENTRIES=30
+AI_MEMORY_MAX_CHARS=300
 AI_MAX_INPUT_CHARS=1500
 AI_MAX_REPLY_CHARS=3000
+AI_TOOL_MAX_ROUNDS=30
+AI_TOOL_SIMPLE_MAX_ROUNDS=3
+AI_TOOL_MAX_CALLS_PER_ROUND=4
+AI_TOOL_MAX_TOTAL_CALLS=60
+AI_TOOL_MAX_RESULT_CHARS=12000
+AI_TOOL_MAX_CONTEXT_CHARS=60000
 AI_SEARCH_ENABLED=true
 AI_SEARCH_AUTO_ENABLED=true
 AI_SEARCH_MAX_RESULTS=5
@@ -177,6 +373,12 @@ AI_WARMUP_CHECK_SECONDS=60
 AI_WARMUP_MAX_REPLY_CHARS=80
 AI_WARMUP_QUIET_START_HOUR=1
 AI_WARMUP_QUIET_END_HOUR=8
+AI_SANDBOX_ENABLED=false
+AI_SANDBOX_ALLOWED_USERS=
+AI_SANDBOX_MAX_PER_USER=2
+AI_SANDBOX_MAX_TOTAL=8
+AI_SANDBOX_TIMEOUT_SECONDS=120
+AI_SANDBOX_MAX_FILE_MB=20
 ```
 
 只允许某些群使用，填 QQ 群号，逗号分隔：
@@ -186,3 +388,20 @@ AI_ENABLED_GROUPS=123456789,987654321
 ```
 
 留空则所有群都可以用。
+
+## 五份 ADR 的落地范围
+
+本项目参考了 [HCHogan/max 的 ADR](https://github.com/HCHogan/max/tree/main/docs/adr)
+（MIT），但继续使用 NoneBot2、OneBot V11、DeepSeek 和 SQLite：
+
+| ADR | 本项目中的对应实现 |
+| --- | --- |
+| 001 Context/Memory | 不可变规范账本、token 水位、无缝 `episode#` 分段、来源哈希、独立记忆审计、按 Scope 读取 |
+| 002 Partial Plans | 已实现其 v1.0 journal slice：宿主 schema 校验、规范效果事件、崩溃后的 `outcome-unknown`、沙箱观测清单；参考文件标为 post-1.0 的动态 Plan/Hole 执行机没有冒进启用 |
+| 003 Message IR | 富 Message IR 只存一次；提示词和 OneBot 都从 IR 在边缘渲染；统一 capability lowering、文本降级、媒体预算和 UTF-8 分块 |
+| 004 Canonical Handles | 模型只使用 `msg#`、`image#/file#消息.段序号`、`groupfile#`、`@#principal`、`episode#`、`t#`；原生 QQ ID 留在适配层，所有读取重新校验 Scope |
+| 005 Turn Continuity | durable turn、`fork-from`、Level 0/1/2、trace TTL/LRU、有效性判定、原样回放、ledger 去重和 digest 退化 |
+
+更细的模块和数据流见 [`docs/architecture-five-adrs.md`](docs/architecture-five-adrs.md)。
+SQLite 中保留 embedding 记录表，但在配置实际 embedding 模型前不会生成向量或
+启用向量检索；当前 `context_search` 使用本地词面检索。
