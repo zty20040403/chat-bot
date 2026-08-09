@@ -17,6 +17,15 @@ from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, Message, Message
 from nonebot.adapters.onebot.v11.exception import ActionFailed
 
 from .ai_tools import (
+    BROWSER_CLICK_TOOL_NAME,
+    BROWSER_CLEAR_TOOL_NAME,
+    BROWSER_CLOSE_TOOL_NAME,
+    BROWSER_NAVIGATE_TOOL_NAME,
+    BROWSER_PRESS_KEY_TOOL_NAME,
+    BROWSER_SCROLL_TOOL_NAME,
+    BROWSER_SNAPSHOT_TOOL_NAME,
+    BROWSER_TYPE_TOOL_NAME,
+    BROWSER_WAIT_FOR_TOOL_NAME,
     GET_MESSAGE_BY_ID_TOOL_NAME,
     IMPORT_FILE_TO_SANDBOX_TOOL_NAME,
     LIST_RECENT_FILES_TOOL_NAME,
@@ -30,11 +39,16 @@ from .ai_tools import (
     SEARCH_MESSAGES_TOOL_NAME,
     SEND_FILE_FROM_SANDBOX_TOOL_NAME,
     SEND_IMAGE_FROM_SANDBOX_TOOL_NAME,
+    VIEW_BILIBILI_TOOL_NAME,
+    VIEW_FORWARD_TOOL_NAME,
 )
+from .browser_tools import BrowserManager, BrowserPolicyError, BrowserUnavailable
 from .conversation_scope import ConversationScope
 from .ledger import CanonicalMessage, MessageLedger
-from .message_ir import MediaNode, MessageBody, TextNode
+from .media_tools import BilibiliClient, BilibiliError
+from .message_ir import ForwardNode, MediaNode, MessageBody, TextNode, render_fallback_text
 from .onebot_codec import (
+    decode_onebot_message,
     record_onebot_api_message,
     render_api_attachments,
 )
@@ -144,6 +158,7 @@ class AgentToolExecutor:
         scope: ConversationScope | None = None,
         turn_journal: TurnJournal | None = None,
         turn_id: int | None = None,
+        browser_manager: BrowserManager | None = None,
     ) -> None:
         self.bot = bot
         self.event = event
@@ -154,6 +169,7 @@ class AgentToolExecutor:
         self.scope = scope
         self.turn_journal = turn_journal
         self.turn_id = turn_id
+        self.browser_manager = browser_manager
 
     @property
     def canonical_messages_enabled(self) -> bool:
@@ -210,6 +226,17 @@ class AgentToolExecutor:
             LIST_RECENT_FILES_TOOL_NAME: self._list_recent_files,
             IMPORT_FILE_TO_SANDBOX_TOOL_NAME: self._import_file_to_sandbox,
             SAY_TOOL_NAME: self._say,
+            VIEW_FORWARD_TOOL_NAME: self._view_forward,
+            VIEW_BILIBILI_TOOL_NAME: self._view_bilibili,
+            BROWSER_NAVIGATE_TOOL_NAME: self._browser_navigate,
+            BROWSER_SNAPSHOT_TOOL_NAME: self._browser_snapshot,
+            BROWSER_CLICK_TOOL_NAME: self._browser_click,
+            BROWSER_TYPE_TOOL_NAME: self._browser_type,
+            BROWSER_PRESS_KEY_TOOL_NAME: self._browser_press_key,
+            BROWSER_WAIT_FOR_TOOL_NAME: self._browser_wait_for,
+            BROWSER_SCROLL_TOOL_NAME: self._browser_scroll,
+            BROWSER_CLOSE_TOOL_NAME: self._browser_close,
+            BROWSER_CLEAR_TOOL_NAME: self._browser_clear,
         }
         handler = handlers.get(name)
         if handler is None:
@@ -219,10 +246,12 @@ class AgentToolExecutor:
             return await handler(arguments)
         except SandboxError as exc:
             return _json_result(ok=False, error=str(exc))
+        except (BrowserUnavailable, BrowserPolicyError, BilibiliError) as exc:
+            return _json_result(ok=False, error=str(exc))
         except ActionFailed as exc:
             logger.warning(f"NapCat agent tool {name} failed: {exc}")
             return _json_result(ok=False, error="NapCat 执行这个操作失败。")
-        except (httpx.HTTPError, OSError, ValueError, sqlite3.Error) as exc:
+        except (httpx.HTTPError, OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
             logger.warning(f"Agent tool {name} failed: {exc}")
             return _json_result(ok=False, error="工具执行失败。")
 
@@ -308,6 +337,150 @@ class AgentToolExecutor:
                 for message in matches
             ],
         )
+
+    async def _view_forward(self, arguments: dict[str, object]) -> str:
+        message_id = _parse_message_handle(arguments.get("message_handle"))
+        if message_id is None:
+            return _json_result(ok=False, error="message_handle 格式无效。")
+        if not self.canonical_messages_enabled:
+            return _json_result(ok=False, error="规范消息账本不可用。")
+        assert self.ledger is not None
+        assert self.scope is not None
+        canonical = self.ledger.get_in_scope(self.scope, message_id)
+        if canonical is None:
+            return _json_result(ok=False, error="当前群看不到这条消息。")
+        forwards = [
+            node for node in canonical.body.nodes if isinstance(node, ForwardNode)
+        ]
+        if not forwards:
+            return _json_result(ok=False, error="这条消息不是合并转发。")
+        forward_id = forwards[0].native_id or canonical.native_message_id
+        if not forward_id:
+            return _json_result(ok=False, error="这条转发缺少平台读取句柄。")
+        response = await self.bot.call_api("get_forward_msg", id=forward_id)
+        if isinstance(response, dict):
+            raw_children = response.get("messages") or response.get("message") or []
+        else:
+            raw_children = response
+        if not isinstance(raw_children, list):
+            return _json_result(ok=False, error="NapCat 没有返回转发子消息。")
+        children: list[dict[str, object]] = []
+        for raw in raw_children[:100]:
+            if not isinstance(raw, dict):
+                continue
+            sender = raw.get("sender") if isinstance(raw.get("sender"), dict) else {}
+            sender_native_id = str(
+                sender.get("user_id") or raw.get("user_id") or ""
+            )
+            sender_principal_id = (
+                self.ledger.principal_id_for_native(
+                    "onebot-v11",
+                    sender_native_id,
+                )
+                if sender_native_id
+                else None
+            )
+            decoded = decode_onebot_message(
+                raw.get("message") or raw.get("content") or []
+            )
+            children.append(
+                {
+                    "sender_display": str(
+                        sender.get("card")
+                        or sender.get("nickname")
+                        or raw.get("nickname")
+                        or "未知用户"
+                    ),
+                    "sender_handle": (
+                        f"@#{sender_principal_id}"
+                        if sender_principal_id is not None
+                        else None
+                    ),
+                    "time": int(raw.get("time") or 0),
+                    "text": render_fallback_text(decoded.body)[:2000],
+                    "has_nested_forward": any(
+                        isinstance(node, ForwardNode)
+                        for node in decoded.body.nodes
+                    ),
+                }
+            )
+        return _json_result(
+            ok=True,
+            message_handle=f"msg#{message_id}",
+            children=children,
+            truncated=len(raw_children) > len(children),
+        )
+
+    async def _view_bilibili(self, arguments: dict[str, object]) -> str:
+        url = str(arguments.get("url") or "").strip()
+        comments = min(max(int(arguments.get("comment_count") or 10), 0), 20)
+        client = BilibiliClient()
+        try:
+            result = await client.inspect(url, comment_count=comments)
+        finally:
+            await client.close()
+        return _json_result(ok=True, video=result)
+
+    def _require_browser(self) -> BrowserManager:
+        if self.browser_manager is None:
+            raise BrowserUnavailable("持久浏览器没有开启。")
+        return self.browser_manager
+
+    async def _browser_navigate(self, arguments: dict[str, object]) -> str:
+        result = await self._require_browser().navigate(
+            self.owner, str(arguments.get("url") or "")
+        )
+        return _json_result(ok=True, page=result)
+
+    async def _browser_snapshot(self, arguments: dict[str, object]) -> str:
+        del arguments
+        result = await self._require_browser().snapshot(self.owner)
+        return _json_result(ok=True, page=result)
+
+    async def _browser_click(self, arguments: dict[str, object]) -> str:
+        result = await self._require_browser().click(
+            self.owner, str(arguments.get("ref") or "")
+        )
+        return _json_result(ok=True, page=result)
+
+    async def _browser_type(self, arguments: dict[str, object]) -> str:
+        result = await self._require_browser().type_text(
+            self.owner,
+            str(arguments.get("ref") or ""),
+            str(arguments.get("text") or ""),
+            submit=bool(arguments.get("submit", False)),
+        )
+        return _json_result(ok=True, page=result)
+
+    async def _browser_press_key(self, arguments: dict[str, object]) -> str:
+        result = await self._require_browser().press_key(
+            self.owner, str(arguments.get("key") or "")
+        )
+        return _json_result(ok=True, page=result)
+
+    async def _browser_wait_for(self, arguments: dict[str, object]) -> str:
+        result = await self._require_browser().wait_for(
+            self.owner,
+            str(arguments.get("text") or ""),
+            int(arguments.get("timeout_seconds") or 15),
+        )
+        return _json_result(ok=True, page=result)
+
+    async def _browser_scroll(self, arguments: dict[str, object]) -> str:
+        result = await self._require_browser().scroll(
+            self.owner, int(arguments.get("amount") or 700)
+        )
+        return _json_result(ok=True, page=result)
+
+    async def _browser_close(self, arguments: dict[str, object]) -> str:
+        del arguments
+        closed = await self._require_browser().close_session(self.owner)
+        return _json_result(ok=True, closed=closed)
+
+    async def _browser_clear(self, arguments: dict[str, object]) -> str:
+        del arguments
+        cleared = await self._require_browser().clear_profile(self.owner)
+        return _json_result(ok=True, cleared=cleared)
 
     async def _sandbox_create(
         self,

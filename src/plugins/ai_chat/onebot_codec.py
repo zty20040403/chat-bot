@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
@@ -23,6 +24,7 @@ from .message_ir import (
     TextNode,
     UnsupportedNode,
     fallback_text,
+    render_fallback_text,
 )
 from .message_lowering import ONEBOT_V11_CAPABILITIES, lower_message
 
@@ -274,6 +276,8 @@ def scope_from_event(event: MessageEvent) -> ConversationScope:
 def record_onebot_event(
     ledger: "MessageLedger",
     event: MessageEvent,
+    *,
+    scope: ConversationScope | None = None,
 ) -> "CanonicalMessage":
     decoded = decode_onebot_message(event.original_message)
     sender = getattr(event, "sender", None)
@@ -282,7 +286,7 @@ def record_onebot_event(
         or getattr(sender, "nickname", "")
         or ("群成员" if isinstance(event, GroupMessageEvent) else "用户")
     )
-    scope = scope_from_event(event)
+    scope = scope or scope_from_event(event)
     return ledger.record_message(
         scope,
         native_message_id=str(event.message_id),
@@ -291,11 +295,13 @@ def record_onebot_event(
         body=decoded.body,
         occurred_at=int(event.time),
         direction=("outbound" if event.user_id == event.self_id else "inbound"),
+        message_kind=_message_kind(event.original_message.extract_plain_text()),
         reply_to_native_message_id=decoded.reply_to_native_message_id,
         raw_event={
             "message_type": getattr(event, "message_type", ""),
             "sub_type": getattr(event, "sub_type", ""),
         },
+        identity_platform="onebot-v11",
     )
 
 
@@ -337,6 +343,7 @@ def record_onebot_api_message(
             and sender_native_user_id == str(bot_native_user_id)
             else "inbound"
         ),
+        message_kind=_message_kind(render_fallback_text(decoded.body)),
         reply_to_native_message_id=decoded.reply_to_native_message_id,
         raw_event={"source": "onebot-api"},
     )
@@ -359,9 +366,28 @@ def record_onebot_outgoing(
         body=decoded.body,
         occurred_at=occurred_at,
         direction="outbound",
+        message_kind="chat",
         reply_to_native_message_id=decoded.reply_to_native_message_id,
         raw_event={"source": "onebot-outbound"},
     )
+
+
+def _message_kind(text: str) -> str:
+    stripped = text.strip()
+    if stripped.startswith("/"):
+        return "command"
+    matched = re.match(
+        r"^!([A-Za-z]+)(?:\s+(.*))?$",
+        stripped,
+        re.DOTALL,
+    )
+    if matched is None:
+        return "chat"
+    verb = matched.group(1).casefold()
+    body = (matched.group(2) or "").strip()
+    if verb in {"feedback", "fb", "btw"} and body:
+        return "chat"
+    return "command"
 
 
 def render_api_attachments(

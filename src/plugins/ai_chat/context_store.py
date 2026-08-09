@@ -49,6 +49,14 @@ class ContextProjection:
     degraded: bool = False
 
 
+@dataclass(frozen=True)
+class CaptureCandidate:
+    scope_key: str
+    expected_cursor: int
+    messages: tuple[CanonicalMessage, ...]
+    source_hash: str
+
+
 class ContextStore:
     """Rebuildable chronological projections over the canonical ledger."""
 
@@ -103,13 +111,18 @@ class ContextStore:
         exclude_native_message_id: str | int | None = None,
         protected_message_ids: tuple[int, ...] = (),
         exclude_canonical_message_ids: tuple[int, ...] = (),
+        materialize: bool = True,
     ) -> ContextProjection:
         floor = ledger.visible_message_floor(scope)
         self._sync_visibility(scope.key, floor)
-        materialized = self._materialize_backlog(
-            ledger,
-            scope,
-            set(int(item) for item in protected_message_ids),
+        materialized = (
+            self._materialize_backlog(
+                ledger,
+                scope,
+                set(int(item) for item in protected_message_ids),
+            )
+            if materialize
+            else 0
         )
         cursor = self._cursor(scope.key, floor)
         raw_messages = ledger.visible_messages_after(
@@ -263,6 +276,93 @@ class ContextStore:
         ]
         return matches[:limit]
 
+    def active_compartments(self, *, limit: int = 5000) -> list[CompartmentRecord]:
+        bounded = min(max(int(limit), 1), 20000)
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT * FROM context_compartments
+                WHERE active = 1
+                ORDER BY compartment_id DESC LIMIT ?
+                """,
+                (bounded,),
+            ).fetchall()
+        return [self._row_to_compartment(row) for row in reversed(rows)]
+
+    def capture_candidate(
+        self,
+        ledger: MessageLedger,
+        scope: ConversationScope,
+        *,
+        protected_message_ids: tuple[int, ...] = (),
+    ) -> CaptureCandidate | None:
+        floor = ledger.visible_message_floor(scope)
+        self._sync_visibility(scope.key, floor)
+        cursor = self._cursor(scope.key, floor)
+        messages = ledger.visible_messages_after(scope, cursor, limit=5000)
+        if len(messages) <= self.raw_tail_min_messages:
+            return None
+        total_tokens = sum(
+            estimate_tokens(self._message_line(message))
+            for message in messages
+        )
+        if total_tokens <= self.high_watermark_tokens:
+            return None
+        maximum = len(messages) - self.raw_tail_min_messages
+        protected = {int(item) for item in protected_message_ids}
+        first_protected = next(
+            (
+                index
+                for index, message in enumerate(messages)
+                if message.canonical_message_id in protected
+            ),
+            maximum,
+        )
+        maximum = min(maximum, first_protected)
+        if maximum <= 0:
+            return None
+        prefix: list[CanonicalMessage] = []
+        used_tokens = 0
+        for message in messages[:maximum]:
+            cost = estimate_tokens(self._message_line(message))
+            if prefix and used_tokens + cost > self.compartment_target_tokens:
+                break
+            prefix.append(message)
+            used_tokens += cost
+        if not prefix:
+            return None
+        return CaptureCandidate(
+            scope_key=scope.key,
+            expected_cursor=cursor,
+            messages=tuple(prefix),
+            source_hash=self._source_hash(prefix),
+        )
+
+    def publish_generated(
+        self,
+        candidate: CaptureCandidate,
+        summaries: tuple[str, str, str],
+    ) -> CompartmentRecord:
+        normalized = tuple(" ".join(item.split()).strip() for item in summaries)
+        if len(normalized) != 3 or any(not item for item in normalized):
+            raise ValueError("historian summaries must contain non-empty P1/P2/P3")
+        if self._source_hash(list(candidate.messages)) != candidate.source_hash:
+            raise RuntimeError("historian source changed before publication")
+        compartment_id = self._publish(
+            candidate.scope_key,
+            candidate.expected_cursor,
+            list(candidate.messages),
+            summaries=(normalized[0][:3200], normalized[1][:1600], normalized[2][:800]),
+        )
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM context_compartments WHERE compartment_id = ?",
+                (compartment_id,),
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("historian compartment publication disappeared")
+        return self._row_to_compartment(row)
+
     def hide_history(self, scope: ConversationScope, ledger_floor: int) -> int:
         with self._transaction() as cursor:
             rows = cursor.execute(
@@ -388,13 +488,15 @@ class ContextStore:
         scope_key: str,
         expected_cursor: int,
         messages: list[CanonicalMessage],
-    ) -> None:
+        *,
+        summaries: tuple[str, str, str] | None = None,
+    ) -> int:
         source_ids = tuple(
             message.canonical_message_id for message in messages
         )
         if not source_ids:
-            return
-        summaries = self._summaries(messages)
+            raise ValueError("cannot publish an empty context compartment")
+        generated = summaries or self._summaries(messages)
         source_hash = self._source_hash(messages)
         with self._transaction() as cursor:
             state = cursor.execute(
@@ -432,12 +534,13 @@ class ContextStore:
                         estimate_tokens(self._message_line(message))
                         for message in messages
                     ),
-                    summaries[0],
-                    summaries[1],
-                    summaries[2],
+                    generated[0],
+                    generated[1],
+                    generated[2],
                     int(time.time()),
                 ),
             )
+            compartment_id = int(cursor.lastrowid)
             cursor.execute(
                 """
                 UPDATE context_state
@@ -447,6 +550,7 @@ class ContextStore:
                 """,
                 (source_ids[-1], ordinal + 1, int(time.time()), scope_key),
             )
+            return compartment_id
 
     def _fit_raw_tail(
         self,
@@ -477,7 +581,7 @@ class ContextStore:
         chosen_lines = [lines[index] for index in ordered]
         chosen_ids = [messages[index].canonical_message_id for index in ordered]
         return (
-            "\n".join(chosen_lines),
+            "\n".join(line for line in chosen_lines if line),
             chosen_ids,
             used,
             len(ordered) < len(messages),
@@ -489,11 +593,12 @@ class ContextStore:
     ) -> tuple[str, str, str]:
         p1 = self._bounded_summary_lines(messages, per_message=260, cap=3200)
         p2 = self._bounded_summary_lines(messages, per_message=110, cap=1600)
+        prompt_messages = [message for message in messages if message.prompt_text]
         participants: list[str] = []
-        for message in messages:
+        for message in prompt_messages:
             if message.sender_display not in participants:
                 participants.append(message.sender_display)
-        keywords = _keywords(" ".join(message.rendered_text for message in messages))
+        keywords = _keywords(" ".join(message.prompt_text for message in prompt_messages))
         start = datetime.fromtimestamp(messages[0].occurred_at).strftime(
             "%m-%d %H:%M"
         )
@@ -516,7 +621,9 @@ class ContextStore:
     ) -> str:
         lines = []
         for message in messages:
-            text = " ".join(message.rendered_text.split())[:per_message]
+            text = " ".join(message.prompt_text.split())[:per_message]
+            if not text:
+                continue
             lines.append(
                 f"msg#{message.canonical_message_id} "
                 f"{message.sender_display}: {text or '[非文本消息]'}"
@@ -526,6 +633,8 @@ class ContextStore:
 
     @staticmethod
     def _message_line(message: CanonicalMessage) -> str:
+        if not message.prompt_text:
+            return ""
         sender = (
             f"@#{message.sender_principal_id} {message.sender_display}"
             if message.sender_principal_id is not None
@@ -541,7 +650,7 @@ class ContextStore:
         )
         return (
             f"[msg#{message.canonical_message_id}{reply} | {stamp} | "
-            f"{sender}] {message.rendered_text}"
+            f"{sender}] {message.prompt_text}"
         )
 
     @staticmethod

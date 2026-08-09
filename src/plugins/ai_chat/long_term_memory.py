@@ -139,6 +139,12 @@ class LongTermMemoryStore:
             key=lambda entry: entry.id,
         )
 
+    def all_entries(self) -> list[MemoryEntry]:
+        return sorted(self._entries, key=lambda entry: entry.id)
+
+    def scope_keys(self) -> list[str]:
+        return sorted({entry.scope_key for entry in self._entries})
+
     def update(
         self,
         entry_id: int,

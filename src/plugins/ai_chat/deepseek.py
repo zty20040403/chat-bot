@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import date
+from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, Literal, Optional
 
 from openai import APIConnectionError, APIStatusError, AsyncOpenAI, RateLimitError
@@ -15,6 +17,8 @@ from .tool_policy import ToolCatalog
 
 ChatMessage = dict[str, Any]
 ToolExecutor = Callable[[str, dict[str, Any]], Awaitable[str]]
+FeedbackProvider = Callable[[], Awaitable[list[str]]]
+FinalTextSink = Callable[[str], Awaitable[None]]
 LoopEventKind = Literal[
     "model_note",
     "tool_started",
@@ -67,6 +71,12 @@ class DeepSeekTrace:
             },
             "messages": self.messages,
         }
+
+
+@dataclass
+class FinalStreamState:
+    sent_prefix: str = ""
+    streamed_calls: int = 0
 
 
 LoopEventSink = Callable[[AgentLoopEvent], Awaitable[None]]
@@ -230,7 +240,29 @@ def _model_dump(value: Any) -> dict[str, Any]:
             return dumped
     if isinstance(value, dict):
         return value
+    if hasattr(value, "__dict__"):
+        return {
+            str(key): _jsonable(item)
+            for key, item in vars(value).items()
+            if item is not None
+        }
     return {}
+
+
+def _jsonable(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    if hasattr(value, "model_dump"):
+        return _jsonable(value.model_dump(exclude_none=True))
+    if hasattr(value, "__dict__"):
+        return {
+            str(key): _jsonable(item)
+            for key, item in vars(value).items()
+            if item is not None
+        }
+    return value
 
 
 def _assistant_tool_message(message: Any) -> ChatMessage:
@@ -278,8 +310,11 @@ async def ask_deepseek(
     model: str | None = None,
     tool_context: str = "",
     replay_prefix: list[ChatMessage] | None = None,
+    final_text_sink: FinalTextSink | None = None,
+    final_stream_state: FinalStreamState | None = None,
 ) -> str:
-    response = await _create_completion(
+    response, emitted = await _completion_with_optional_stream(
+        final_text_sink,
         **_completion_kwargs(
             _build_messages(
                 user_text,
@@ -293,10 +328,47 @@ async def ask_deepseek(
                 replay_prefix,
             ),
             model,
-        )
+        ),
     )
     content = response.choices[0].message.content
+    if final_stream_state is not None:
+        final_stream_state.sent_prefix = emitted
+        final_stream_state.streamed_calls += int(bool(emitted))
     return (content or "").strip()
+
+
+async def ask_deepseek_json(
+    system_prompt: str,
+    user_text: str,
+    *,
+    model: str | None = None,
+    trace: DeepSeekTrace | None = None,
+) -> dict[str, Any]:
+    messages: list[ChatMessage] = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_text},
+    ]
+    response = await _create_completion(
+        **_completion_kwargs(messages, model),
+        response_format={"type": "json_object"},
+    )
+    if trace is not None:
+        trace.add_usage(response)
+        trace.messages.extend(messages)
+    content = (response.choices[0].message.content or "").strip()
+    if trace is not None:
+        trace.messages.append(_assistant_final_message(response.choices[0].message))
+    if content.startswith("```"):
+        content = content.split("\n", 1)[-1]
+        if content.rstrip().endswith("```"):
+            content = content.rstrip()[:-3].rstrip()
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("DeepSeek background job returned invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("DeepSeek background job must return a JSON object")
+    return payload
 
 
 async def ask_deepseek_with_tools(
@@ -314,6 +386,9 @@ async def ask_deepseek_with_tools(
     trace: DeepSeekTrace | None = None,
     event_sink: LoopEventSink | None = None,
     replay_prefix: list[ChatMessage] | None = None,
+    feedback_provider: FeedbackProvider | None = None,
+    final_text_sink: FinalTextSink | None = None,
+    final_stream_state: FinalStreamState | None = None,
 ) -> str:
     if not tools:
         return await ask_deepseek(
@@ -325,6 +400,8 @@ async def ask_deepseek_with_tools(
             model=model,
             tool_context=tool_context,
             replay_prefix=replay_prefix,
+            final_text_sink=final_text_sink,
+            final_stream_state=final_stream_state,
         )
 
     messages = _build_messages(
@@ -349,7 +426,9 @@ async def ask_deepseek_with_tools(
 
     while max_tool_rounds is None or tool_round < max_tool_rounds:
         tool_round += 1
-        response = await _create_completion(
+        await _append_pending_feedback(messages, trace, feedback_provider)
+        response, emitted = await _completion_with_optional_stream(
+            final_text_sink,
             **_completion_kwargs(messages, model),
             tools=tools,
             tool_choice=next_tool_choice,
@@ -360,8 +439,27 @@ async def ask_deepseek_with_tools(
         tool_calls = list(getattr(message, "tool_calls", None) or [])
         if not tool_calls:
             content = (message.content or "").strip()
+            raced_feedback = (
+                [] if emitted else await _drain_feedback(feedback_provider)
+            )
+            if raced_feedback and (
+                max_tool_rounds is None or tool_round < max_tool_rounds
+            ):
+                assistant_message = _assistant_final_message(message)
+                messages.append(assistant_message)
+                feedback_message = _feedback_message(raced_feedback)
+                messages.append(feedback_message)
+                if trace is not None:
+                    trace.messages.extend(
+                        [dict(assistant_message), dict(feedback_message)]
+                    )
+                next_tool_choice = "auto"
+                continue
             if trace is not None:
                 trace.messages.append(_assistant_final_message(message))
+            if final_stream_state is not None:
+                final_stream_state.sent_prefix = emitted
+                final_stream_state.streamed_calls += int(bool(emitted))
             return content
 
         assistant_message = _assistant_tool_message(message)
@@ -531,7 +629,8 @@ async def ask_deepseek_with_tools(
     messages.append(stop_message)
     if trace is not None:
         trace.messages.append(dict(stop_message))
-    response = await _create_completion(
+    response, emitted = await _completion_with_optional_stream(
+        final_text_sink,
         **_completion_kwargs(messages, model),
     )
     if trace is not None:
@@ -542,8 +641,125 @@ async def ask_deepseek_with_tools(
             trace.messages.append(
                 _assistant_final_message(response.choices[0].message)
             )
+        if final_stream_state is not None:
+            final_stream_state.sent_prefix = emitted
+            final_stream_state.streamed_calls += int(bool(emitted))
         return content.strip()
     raise RuntimeError("DeepSeek did not finish after reaching the tool limit.")
+
+
+async def _completion_with_optional_stream(
+    sink: FinalTextSink | None,
+    **kwargs: Any,
+) -> tuple[Any, str]:
+    if sink is None or not settings.stream_enabled:
+        return await _create_completion(**kwargs), ""
+    return await _create_streaming_completion(sink, **kwargs)
+
+
+async def _create_streaming_completion(
+    sink: FinalTextSink,
+    **kwargs: Any,
+) -> tuple[Any, str]:
+    stream = await _create_completion(
+        **kwargs,
+        stream=True,
+        stream_options={"include_usage": True},
+    )
+    content = ""
+    reasoning = ""
+    emitted_length = 0
+    finish_reason: str | None = None
+    usage: Any = None
+    calls: dict[int, dict[str, str]] = {}
+    try:
+        async for chunk in stream:
+            if getattr(chunk, "usage", None) is not None:
+                usage = chunk.usage
+            choices = list(getattr(chunk, "choices", None) or [])
+            if not choices:
+                continue
+            choice = choices[0]
+            finish_reason = getattr(choice, "finish_reason", None) or finish_reason
+            delta = getattr(choice, "delta", None)
+            if delta is None:
+                continue
+            piece = getattr(delta, "content", None)
+            if isinstance(piece, str):
+                content += piece
+            dumped_delta = _model_dump(delta)
+            reasoning_piece = dumped_delta.get("reasoning_content")
+            if isinstance(reasoning_piece, str):
+                reasoning += reasoning_piece
+            for raw_call in list(getattr(delta, "tool_calls", None) or []):
+                index = int(getattr(raw_call, "index", 0) or 0)
+                current = calls.setdefault(
+                    index,
+                    {"id": "", "type": "function", "name": "", "arguments": ""},
+                )
+                raw_id = getattr(raw_call, "id", None)
+                if isinstance(raw_id, str):
+                    current["id"] += raw_id
+                raw_type = getattr(raw_call, "type", None)
+                if isinstance(raw_type, str):
+                    current["type"] = raw_type
+                function = getattr(raw_call, "function", None)
+                if function is not None:
+                    name = getattr(function, "name", None)
+                    arguments = getattr(function, "arguments", None)
+                    if isinstance(name, str):
+                        current["name"] += name
+                    if isinstance(arguments, str):
+                        current["arguments"] += arguments
+            safe, _held = ready_stream_prefix(content)
+            if len(safe) > emitted_length:
+                await sink(safe[emitted_length:])
+                emitted_length = len(safe)
+    finally:
+        close = getattr(stream, "close", None)
+        if callable(close):
+            result = close()
+            if hasattr(result, "__await__"):
+                await result
+    tool_calls = [
+        SimpleNamespace(
+            id=value["id"],
+            type=value["type"],
+            function=SimpleNamespace(
+                name=value["name"],
+                arguments=value["arguments"],
+            ),
+        )
+        for _index, value in sorted(calls.items())
+    ]
+    message = SimpleNamespace(
+        role="assistant",
+        content=content,
+        tool_calls=tool_calls,
+        reasoning_content=reasoning or None,
+    )
+    response = SimpleNamespace(
+        choices=[SimpleNamespace(message=message, finish_reason=finish_reason)],
+        usage=usage,
+    )
+    return response, content[:emitted_length]
+
+
+def ready_stream_prefix(text: str) -> tuple[str, str]:
+    """Return only the prefix whose paragraph boundaries cannot still change."""
+    boundary = text.rfind("\n\n")
+    if boundary < 0:
+        return "", text
+    safe = text[: boundary + 2]
+    first_paragraph = safe.split("\n\n", 1)[0].strip()
+    if re.fullmatch(r"\[(?:silence|沉默)(?:[:：][^\]]+)?\]", first_paragraph):
+        return "", text
+    fence_count = sum(
+        1 for line in safe.splitlines() if line.lstrip().startswith("```")
+    )
+    if fence_count % 2:
+        return "", text
+    return safe, text[len(safe) :]
 
 
 def _bounded_tool_result(tool_result: object, max_chars: int) -> str:
@@ -585,6 +801,40 @@ async def _emit_loop_event(
         _logger.warning("Turn journal event sink failed: %s", exc)
 
 
+async def _append_pending_feedback(
+    messages: list[ChatMessage],
+    trace: DeepSeekTrace | None,
+    provider: FeedbackProvider | None,
+) -> None:
+    notes = await _drain_feedback(provider)
+    if not notes:
+        return
+    message = _feedback_message(notes)
+    messages.append(message)
+    if trace is not None:
+        trace.messages.append(dict(message))
+
+
+async def _drain_feedback(
+    provider: FeedbackProvider | None,
+) -> list[str]:
+    if provider is None:
+        return []
+    try:
+        notes = await provider()
+    except Exception as exc:
+        _logger.warning("Turn feedback provider failed: %s", exc)
+        return []
+    return [str(note).strip()[:1000] for note in notes if str(note).strip()]
+
+
+def _feedback_message(notes: list[str]) -> ChatMessage:
+    return {
+        "role": "user",
+        "content": "[feedback]: " + " | ".join(notes),
+    }
+
+
 def _tool_completion_state(tool_name: str, result: str) -> str:
     try:
         payload = json.loads(result)
@@ -599,6 +849,12 @@ def _tool_completion_state(tool_name: str, result: str) -> str:
         "send_file_from_sandbox",
         "send_image_from_sandbox",
         "say",
+        "memory_add",
+        "memory_remove",
+        "pin_message",
+        "unpin_message",
+        "reminder_set",
+        "reminder_cancel",
     }:
         return "committed"
     return "succeeded"

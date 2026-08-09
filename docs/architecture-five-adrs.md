@@ -5,17 +5,20 @@
 ## 总体数据流
 
 ```text
-QQ / NapCat
-  -> OneBot V11 事件
-  -> onebot_codec.py 解码
+QQ / NapCat ─┐
+Matrix ──────┼─> bridges.py / onebot_codec.py 解码与来源去重
+iMessage ────┘
   -> MessageBody 规范 IR
   -> ledger.py 不可变消息账本
-  -> context_store.py / long_term_memory.py / turn_journal.py 投影
+  -> context_store.py / historian.py / semantic_recall.py 投影
+  -> long_term_memory.py / turn_journal.py 可审计状态
   -> deepseek.py 组装当前 system + 历史证据 + 用户消息
   -> tool_policy.py 校验模型提出的 tool call
   -> 工具执行并把规范事件写入 turn_journal.py
-  -> message_lowering.py 按 OneBot 能力降级
-  -> onebot_codec.py 只负责发出已降低的消息
+  -> output_planner.py / browser_tools.py 规划文本、控制标记和富截图
+  -> delivery.py 持久投递、租约、回执与结果不明停放
+  -> message_lowering.py 按 OneBot / Matrix / iMessage 能力降级
+  -> 各平台 adapter 发出并由 echo 对账
 ```
 
 ## ADR 001：上下文与记忆
@@ -34,6 +37,13 @@ QQ / NapCat
 版本、创建账号、规范 principal、来源 `msg#` 和 mutation 审计。记忆不能替代某段
 聊天覆盖，也不能跨群读取。
 
+`historian.py` 是模型驱动但证据受限的后台投影器。它只接收一段确定的连续消息，
+生成结果必须引用 capture 内的 `msg#`，发布时再次比较 cursor；并发期间上下文发生
+变化就放弃。Dream 只对长期记忆执行带 `expected_version` 的更新或删除。
+
+`semantic_recall.py` 把消息、episode 和记忆送到可选 embedding provider，并写入
+PostgreSQL/pgvector HNSW 索引。向量仅用于混合召回，SQLite 原文仍是事实源。
+
 ## ADR 002：工具执行内核的基础层
 
 参考 ADR 明确把完整 Plan/Hole 自适应执行机列为 post-1.0。本项目先实现它要求的
@@ -48,6 +58,9 @@ QQ / NapCat
   重试可能已经产生副作用的操作。
 - 最终 QQ 回复也是两阶段效果；每次发送尝试分别记录，回执成功后再链接规范
   `msg#`，超时则保留 `outcome-unknown` 供后续审计。
+- `delivery.py` 进一步把所有出站效果放进 lease-based outbox。进程中断或租约过期
+  不能证明没发出去，因此停成 `ambiguous`；Matrix 的稳定 transaction id 才允许
+  自动安全重试。
 - 现有 horizon-1 DeepSeek tool loop 保留为稳定执行策略；完整动态 Plan IR 只有在
   validator、审批和回放评测都具备后才适合开启。
 
@@ -58,8 +71,12 @@ QQ / NapCat
 
 `message_lowering.py` 是唯一的出站降级位置。它根据目标能力决定保留原生节点、
 转为文字还是明确丢弃，并记录 `LowerNote`。它还处理 sourceless media、原生媒体
-数量预算和按 UTF-8 字节安全分块。`onebot_codec.py` 的发送端只把降低后的节点变成
-OneBot `MessageSegment`，不再散落平台降级分支。
+数量预算和按 UTF-8 字节安全分块。`onebot_codec.py`、`MatrixClient` 和
+`BlueBubblesClient` 只发已经降低的内容，不再各自解释规范语义。
+
+`browser_tools.py` 给代码块和 Markdown 表格生成 PNG；浏览失败会回退到原始文本，
+不会让表现层故障改变消息事实。持久网页会话使用宿主生成的 `b#` 元素引用，模型
+不能提供任意 selector。
 
 ## ADR 004：规范句柄与 Scope
 
@@ -104,6 +121,13 @@ bot_state.sqlite3       原始规范消息、会话、principal、identity
 context_store.sqlite3   compartment 和覆盖 cursor
 turn_journal.sqlite3    turn、规范事件、fork 边、digest、trace cache
 long_term_memory.json   长期记忆和 mutation 审计
+delivery_outbox.sqlite3 投递、租约、尝试和结果状态
+bridge_state.sqlite3    平台来源、原生副本映射和同步 cursor
+usage.sqlite3           token 用量与 Scope 配额覆盖
+semantic_index_state.sqlite3 语义派生数据的本地 checkpoint
+maintenance_state.sqlite3    Historian/Dream 最近成功周期
+browser_profiles/       按发起者哈希隔离的 Playwright 持久 profile
 ```
 
-这些运行状态已被 `.gitignore` 排除，不应提交到 GitHub。
+PostgreSQL 中的 `semantic_documents` 只保存可重建向量投影。这些本地运行状态已被
+`.gitignore` 排除，不应提交到 GitHub。

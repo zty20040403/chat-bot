@@ -188,6 +188,51 @@ class MessageLedgerTests(unittest.TestCase):
         self.assertIn(f"@#{message.sender_principal_id}", rendered)
         self.assertNotIn("987654", rendered)
 
+    def test_commands_are_audited_but_excluded_from_prompt_projection(self) -> None:
+        command = self.ledger.record_message(
+            self.group_a,
+            native_message_id="cmd-1",
+            sender_native_user_id="1",
+            sender_display="Alice",
+            body=MessageBody((TextNode(0, "/clear"),)),
+            message_kind="command",
+        )
+        feedback = self.ledger.record_message(
+            self.group_a,
+            native_message_id="note-1",
+            sender_native_user_id="1",
+            sender_display="Alice",
+            body=MessageBody((TextNode(0, "!feedback 改成方案 B"),)),
+            message_kind="chat",
+        )
+
+        self.assertEqual(command.rendered_text, "/clear")
+        self.assertEqual(command.prompt_text, "")
+        self.assertEqual(feedback.prompt_text, "改成方案 B")
+        rendered = self.ledger.render_recent(self.group_a)
+        self.assertNotIn("/clear", rendered)
+        self.assertNotIn("!feedback", rendered)
+        self.assertIn("改成方案 B", rendered)
+        self.assertEqual(self.ledger.search_in_scope(self.group_a, "clear"), [])
+
+    def test_global_index_projection_respects_visibility_and_command_kind(self) -> None:
+        hidden = self.record_text(self.group_a, "1", "hidden")
+        self.ledger.hide_history(self.group_a)
+        visible = self.record_text(self.group_a, "2", "visible")
+        self.ledger.record_message(
+            self.group_b,
+            native_message_id="cmd",
+            sender_native_user_id="7",
+            sender_display="Alice",
+            body=MessageBody((TextNode(0, "/clear"),)),
+            message_kind="command",
+        )
+
+        indexed = self.ledger.all_visible_messages()
+        self.assertNotIn(hidden.canonical_message_id, [item.canonical_message_id for item in indexed])
+        self.assertEqual([item.canonical_message_id for item in indexed], [visible.canonical_message_id])
+        self.assertEqual({scope.key for scope in self.ledger.list_scopes()}, {self.group_a.key, self.group_b.key})
+
 
 if __name__ == "__main__":
     unittest.main()

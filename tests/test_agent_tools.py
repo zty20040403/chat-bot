@@ -15,6 +15,7 @@ nonebot.init()
 from src.plugins.ai_chat.agent_tools import AgentToolExecutor
 from src.plugins.ai_chat.conversation_scope import ConversationScope
 from src.plugins.ai_chat.ledger import MessageLedger
+from src.plugins.ai_chat.message_ir import ForwardNode, MessageBody
 
 
 class FakeBot:
@@ -83,6 +84,20 @@ class FakeBot:
                         "file_size": 5,
                         "upload_time": 123,
                         "uploader": 7,
+                    }
+                ]
+            }
+        if api == "get_forward_msg":
+            return {
+                "messages": [
+                    {
+                        "user_id": 7,
+                        "time": 126,
+                        "sender": {"user_id": 7, "nickname": "Alice"},
+                        "message": [
+                            {"type": "text", "data": {"text": "inside"}},
+                            {"type": "forward", "data": {"id": "nested-native"}},
+                        ],
                     }
                 ]
             }
@@ -315,6 +330,33 @@ class AgentToolExecutorTests(unittest.IsolatedAsyncioTestCase):
             self.bot.uploads[0]["file"],
             "base64://" + base64.b64encode(b"done").decode("ascii"),
         )
+
+    async def test_forward_expansion_never_exposes_native_user_or_forward_ids(self) -> None:
+        await self.executor.ensure_canonical_message(1)
+        stored = self.ledger.record_message(
+            self.scope,
+            native_message_id="forward-parent",
+            sender_native_user_id="7",
+            sender_display="Alice",
+            body=MessageBody((ForwardNode(0, "forward-native"),)),
+            occurred_at=126,
+        )
+        result = json.loads(
+            await self.executor.execute(
+                "view_forward",
+                {"message_handle": f"msg#{stored.canonical_message_id}"},
+            )
+            or "{}"
+        )
+
+        self.assertTrue(result["ok"])
+        child = result["children"][0]
+        self.assertEqual(child["sender_handle"], "@#1")
+        self.assertTrue(child["has_nested_forward"])
+        encoded = json.dumps(result, ensure_ascii=False)
+        self.assertNotIn("forward-native", encoded)
+        self.assertNotIn("nested-native", encoded)
+        self.assertNotIn('"user_id"', encoded)
 
 
 if __name__ == "__main__":

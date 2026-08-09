@@ -3,6 +3,10 @@ from __future__ import annotations
 import asyncio
 import unittest
 
+import nonebot
+
+nonebot.init()
+
 from src.plugins.ai_chat.tasks import RunningTaskRegistry
 
 
@@ -71,6 +75,44 @@ class RunningTaskRegistryTests(unittest.IsolatedAsyncioTestCase):
         first_task.cancel()
         with self.assertRaises(asyncio.CancelledError):
             await first_task
+
+    async def test_feedback_can_target_replied_task_across_group_users(self) -> None:
+        registry = RunningTaskRegistry()
+        ready: asyncio.Queue[object] = asyncio.Queue()
+
+        async def worker(conversation: str, user_id: int, message_id: int) -> None:
+            info = registry.register_current(
+                conversation_id=conversation,
+                user_id=user_id,
+                group_id=9,
+                message_id=message_id,
+                summary="work",
+            )
+            await ready.put(info)
+            try:
+                await asyncio.Event().wait()
+            finally:
+                registry.finish(info.task_id)
+
+        first_task = asyncio.create_task(worker("group:9:user:1", 1, 101))
+        first = await ready.get()
+        second_task = asyncio.create_task(worker("group:9:user:2", 2, 102))
+        second = await ready.get()
+
+        selected = registry.push_feedback(
+            "改成方案 B",
+            group_id=9,
+            reply_message_id=101,
+        )
+        self.assertEqual(selected.task_id, first.task_id)
+        self.assertEqual(registry.drain_feedback(first.task_id), ["改成方案 B"])
+        self.assertEqual(registry.drain_feedback(second.task_id), [])
+
+        first_task.cancel()
+        second_task.cancel()
+        for task in (first_task, second_task):
+            with self.assertRaises(asyncio.CancelledError):
+                await task
 
 
 if __name__ == "__main__":

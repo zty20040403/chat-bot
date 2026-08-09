@@ -59,7 +59,7 @@ class FakeMatcher:
     @classmethod
     async def send(cls, message):
         cls.sent.append(message)
-        return {"message_id": 20}
+        return {"message_id": 19 + len(cls.sent)}
 
 
 class TimeoutMatcher:
@@ -182,6 +182,67 @@ class TurnContinuityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [item.state for item in send_events],
             ["started", "outcome-unknown"],
+        )
+
+    async def test_final_reply_is_split_without_requoting_every_chunk(self) -> None:
+        event = group_event(10, Message("explain"))
+        bot = AsyncMock()
+        with (
+            patch.object(ai_chat, "message_ledger", self.ledger),
+            patch.object(ai_chat, "turn_journal", self.journal),
+            patch.object(
+                ai_chat,
+                "_run_tracked_ai",
+                new=AsyncMock(
+                    return_value=ai_chat.TrackedAIResult(
+                        reply="第一段\n\n第二段",
+                        turn_id=None,
+                    )
+                ),
+            ),
+        ):
+            with self.assertRaises(FinishedException):
+                await ai_chat._finish_tracked_ai(
+                    FakeMatcher,
+                    bot,
+                    event,
+                    "explain",
+                    label="test",
+                )
+
+        self.assertEqual(len(FakeMatcher.sent), 2)
+        self.assertEqual(FakeMatcher.sent[0][0].type, "reply")
+        self.assertEqual(FakeMatcher.sent[0][1].type, "at")
+        self.assertTrue(all(segment.type != "reply" for segment in FakeMatcher.sent[1]))
+        self.assertEqual(FakeMatcher.sent[1].extract_plain_text(), "第二段")
+
+    async def test_silence_sends_no_message_and_reacts_to_trigger(self) -> None:
+        event = group_event(10, Message("ambient ping"))
+        bot = AsyncMock()
+        with patch.object(
+            ai_chat,
+            "_run_tracked_ai",
+            new=AsyncMock(
+                return_value=ai_chat.TrackedAIResult(
+                    reply="[silence:吃瓜]",
+                    turn_id=None,
+                    status="silence",
+                )
+            ),
+        ):
+            with self.assertRaises(FinishedException):
+                await ai_chat._finish_tracked_ai(
+                    FakeMatcher,
+                    bot,
+                    event,
+                    "ambient ping",
+                    label="test",
+                )
+
+        self.assertEqual(FakeMatcher.sent, [])
+        calls = bot.call_api.await_args_list
+        self.assertTrue(
+            any(call.args[0] == "set_msg_emoji_like" and call.kwargs["emoji_id"] == 271 for call in calls)
         )
 
     async def test_reply_target_injects_previous_turn_and_ambient_delta(self) -> None:

@@ -439,6 +439,36 @@ class TurnJournal:
             ).fetchone()
         return self._row_to_turn(row) if row is not None else None
 
+    def usage_summary(
+        self,
+        scope: ConversationScope,
+        *,
+        since_timestamp: int = 0,
+    ) -> dict[str, int]:
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT
+                    COUNT(*) AS turns,
+                    COALESCE(SUM(t.input_tokens), 0) AS input_tokens,
+                    COALESCE(SUM(t.output_tokens), 0) AS output_tokens,
+                    COALESCE(SUM(t.total_tokens), 0) AS total_tokens
+                FROM agent_turns AS t
+                JOIN turn_visibility AS v ON v.scope_key = t.scope_key
+                WHERE t.scope_key = ?
+                  AND t.turn_ordinal >= v.min_turn_ordinal
+                  AND t.status != 'running'
+                  AND t.started_at >= ?
+                """,
+                (scope.key, max(int(since_timestamp), 0)),
+            ).fetchone()
+        return {
+            "turns": int(row["turns"] if row is not None else 0),
+            "input_tokens": int(row["input_tokens"] if row is not None else 0),
+            "output_tokens": int(row["output_tokens"] if row is not None else 0),
+            "total_tokens": int(row["total_tokens"] if row is not None else 0),
+        }
+
     def events_for_turn(self, turn_id: int) -> list[TurnEventRecord]:
         with self._lock:
             rows = self._connection.execute(
@@ -1340,9 +1370,20 @@ def tool_effect_labels(tool_name: str) -> tuple[str, ...]:
         "memory_list",
         "context_expand",
         "context_search",
+        "inspect_source",
+        "use_skill",
+        "group_members",
+        "reminder_list",
     }:
         return ("read",)
-    if tool_name in {"memory_add", "memory_remove"}:
+    if tool_name in {
+        "memory_add",
+        "memory_remove",
+        "pin_message",
+        "unpin_message",
+        "reminder_set",
+        "reminder_cancel",
+    }:
         return ("write:memory",)
     if tool_name in {
         "sandbox_create",

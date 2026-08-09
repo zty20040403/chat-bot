@@ -29,6 +29,25 @@ MEMORY_LIST_TOOL_NAME = "memory_list"
 MEMORY_REMOVE_TOOL_NAME = "memory_remove"
 CONTEXT_EXPAND_TOOL_NAME = "context_expand"
 CONTEXT_SEARCH_TOOL_NAME = "context_search"
+PIN_MESSAGE_TOOL_NAME = "pin_message"
+UNPIN_MESSAGE_TOOL_NAME = "unpin_message"
+USE_SKILL_TOOL_NAME = "use_skill"
+INSPECT_SOURCE_TOOL_NAME = "inspect_source"
+GROUP_MEMBERS_TOOL_NAME = "group_members"
+REMINDER_SET_TOOL_NAME = "reminder_set"
+REMINDER_LIST_TOOL_NAME = "reminder_list"
+REMINDER_CANCEL_TOOL_NAME = "reminder_cancel"
+VIEW_FORWARD_TOOL_NAME = "view_forward"
+VIEW_BILIBILI_TOOL_NAME = "view_bilibili"
+BROWSER_NAVIGATE_TOOL_NAME = "browser_navigate"
+BROWSER_SNAPSHOT_TOOL_NAME = "browser_snapshot"
+BROWSER_CLICK_TOOL_NAME = "browser_click"
+BROWSER_TYPE_TOOL_NAME = "browser_type"
+BROWSER_PRESS_KEY_TOOL_NAME = "browser_press_key"
+BROWSER_WAIT_FOR_TOOL_NAME = "browser_wait_for"
+BROWSER_SCROLL_TOOL_NAME = "browser_scroll"
+BROWSER_CLOSE_TOOL_NAME = "browser_close"
+BROWSER_CLEAR_TOOL_NAME = "browser_clear"
 
 WEB_SEARCH_TOOL: ToolDefinition = {
     "type": "function",
@@ -546,7 +565,7 @@ CONTEXT_SEARCH_TOOL: ToolDefinition = {
     "function": {
         "name": CONTEXT_SEARCH_TOOL_NAME,
         "description": (
-            "在当前群或当前私聊的规范消息与历史 episode 摘要中检索。"
+            "统一检索当前会话的规范消息、固定消息、长期记忆与 episode 摘要。"
             "用户询问以前聊过什么、谁提到某事、旧决定或旧任务时调用。"
             "返回的 msg# 和 episode# 仍只能在当前会话使用。"
         ),
@@ -572,11 +591,349 @@ CONTEXT_SEARCH_TOOL: ToolDefinition = {
     },
 }
 
+PIN_MESSAGE_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": PIN_MESSAGE_TOOL_NAME,
+        "description": (
+            "把当前会话的一条 msg# 长期固定到上下文。适合重要决定、约定、"
+            "项目状态或用户明确要求保留的消息；固定消息不会被 /clear 删除。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "message_handle": {
+                    "type": "string",
+                    "pattern": "^msg#[1-9][0-9]*$",
+                    "description": "当前会话中的完整 msg# 句柄。",
+                }
+            },
+            "required": ["message_handle"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+UNPIN_MESSAGE_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": UNPIN_MESSAGE_TOOL_NAME,
+        "description": "取消当前会话中过时或不再需要的一条固定消息。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "message_handle": {
+                    "type": "string",
+                    "pattern": "^msg#[1-9][0-9]*$",
+                }
+            },
+            "required": ["message_handle"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+USE_SKILL_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": USE_SKILL_TOOL_NAME,
+        "description": "读取技能目录中某项工作的完整宿主流程，开始对应任务前调用。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 80,
+                    "description": "技能目录中的名称，例如 sandbox。",
+                }
+            },
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+INSPECT_SOURCE_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": INSPECT_SOURCE_TOOL_NAME,
+        "description": (
+            "只读检查机器人随仓库发布的白名单源码。回答自身实现、架构、"
+            "命令或默认配置问题时用于取证；不能读取 .env、状态数据或宿主机任意路径。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "search", "read", "identity"],
+                },
+                "path": {"type": "string", "maxLength": 300},
+                "query": {"type": "string", "maxLength": 200},
+                "start_line": {"type": "integer", "minimum": 1},
+                "end_line": {"type": "integer", "minimum": 1},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+            },
+            "required": ["action"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+GROUP_MEMBERS_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": GROUP_MEMBERS_TOOL_NAME,
+        "description": (
+            "按需读取当前 QQ 群成员名单。平时使用上下文中的精简成员记录；"
+            "只有需要确认成员、群名片、角色或搜索某人时调用。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "maxLength": 100,
+                    "description": "可选的昵称或群名片子串。",
+                },
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+            },
+            "additionalProperties": False,
+        },
+    },
+}
+
+VIEW_FORWARD_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": VIEW_FORWARD_TOOL_NAME,
+        "description": (
+            "展开当前群里一条合并转发消息。传上下文中的 msg# 规范句柄，"
+            "返回子消息的发送者、时间和正文；嵌套转发可以继续展开。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "message_handle": {
+                    "type": "string",
+                    "pattern": "^msg#[1-9][0-9]*$",
+                }
+            },
+            "required": ["message_handle"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+VIEW_BILIBILI_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": VIEW_BILIBILI_TOOL_NAME,
+        "description": (
+            "读取 B站视频的标题、UP主、简介、时长、播放互动数据和热评。"
+            "接受 BV号、av链接、完整视频链接或 b23.tv 短链。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "maxLength": 1000},
+                "comment_count": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 20,
+                    "default": 10,
+                },
+            },
+            "required": ["url"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+BROWSER_NAVIGATE_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": BROWSER_NAVIGATE_TOOL_NAME,
+        "description": "在当前会话的持久浏览器里打开一个公开 http/https 页面并返回可见文字。",
+        "parameters": {
+            "type": "object",
+            "properties": {"url": {"type": "string", "maxLength": 2000}},
+            "required": ["url"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+BROWSER_SNAPSHOT_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": BROWSER_SNAPSHOT_TOOL_NAME,
+        "description": "读取当前浏览器页面的可见文字和可交互元素引用。",
+        "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+}
+
+BROWSER_CLICK_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": BROWSER_CLICK_TOOL_NAME,
+        "description": "点击 browser_snapshot 返回的元素引用，例如 b3。",
+        "parameters": {
+            "type": "object",
+            "properties": {"ref": {"type": "string", "pattern": "^b[1-9][0-9]*$"}},
+            "required": ["ref"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+BROWSER_TYPE_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": BROWSER_TYPE_TOOL_NAME,
+        "description": "向浏览器输入框元素填写文字，可选择按 Enter 提交。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "ref": {"type": "string", "pattern": "^b[1-9][0-9]*$"},
+                "text": {"type": "string", "maxLength": 10000},
+                "submit": {"type": "boolean", "default": False},
+            },
+            "required": ["ref", "text"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+BROWSER_PRESS_KEY_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": BROWSER_PRESS_KEY_TOOL_NAME,
+        "description": "在浏览器中按一个导航键，例如 Enter、Escape、Tab 或 PageDown。",
+        "parameters": {
+            "type": "object",
+            "properties": {"key": {"type": "string", "maxLength": 30}},
+            "required": ["key"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+BROWSER_WAIT_FOR_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": BROWSER_WAIT_FOR_TOOL_NAME,
+        "description": "等待页面出现指定文字，再返回新快照。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "maxLength": 500},
+                "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 60},
+            },
+            "required": ["text"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+BROWSER_SCROLL_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": BROWSER_SCROLL_TOOL_NAME,
+        "description": "滚动当前浏览器页面；正数向下，负数向上。",
+        "parameters": {
+            "type": "object",
+            "properties": {"amount": {"type": "integer", "minimum": -5000, "maximum": 5000}},
+            "required": ["amount"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+BROWSER_CLOSE_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": BROWSER_CLOSE_TOOL_NAME,
+        "description": "关闭当前会话浏览器，释放内存；登录资料仍保留在持久目录。",
+        "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+}
+
+BROWSER_CLEAR_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": BROWSER_CLEAR_TOOL_NAME,
+        "description": "关闭浏览器并删除当前发起者自己的 cookie、缓存和持久登录资料。",
+        "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+}
+
+REMINDER_SET_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": REMINDER_SET_TOOL_NAME,
+        "description": (
+            "创建重启后仍保留的提醒。用户明确要求稍后、明天或某个时间提醒时调用；"
+            "due_at 必须先按 Asia/Shanghai 当前日期换算成绝对时间。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "due_at": {
+                    "type": "string",
+                    "minLength": 10,
+                    "maxLength": 40,
+                    "description": "带时区 ISO 8601，例如 2026-08-10T09:00:00+08:00。",
+                },
+                "message": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1000,
+                    "description": "到点后发送的独立可读提醒内容。",
+                },
+            },
+            "required": ["due_at", "message"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+REMINDER_LIST_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": REMINDER_LIST_TOOL_NAME,
+        "description": "列出当前群或当前私聊仍待触发的持久提醒。",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+    },
+}
+
+REMINDER_CANCEL_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": REMINDER_CANCEL_TOOL_NAME,
+        "description": "取消当前会话中一个尚未触发的持久提醒。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "reminder_handle": {
+                    "type": "string",
+                    "pattern": "^reminder#[1-9][0-9]*$",
+                }
+            },
+            "required": ["reminder_handle"],
+            "additionalProperties": False,
+        },
+    },
+}
+
 MEMORY_TOOLS = [MEMORY_ADD_TOOL, MEMORY_LIST_TOOL, MEMORY_REMOVE_TOOL]
 
-AGENT_TOOLS = [
-    GET_MESSAGE_BY_ID_TOOL,
-    SEARCH_MESSAGES_TOOL,
+SANDBOX_TOOLS = [
     SANDBOX_CREATE_TOOL,
     SANDBOX_LIST_TOOL,
     SANDBOX_DESTROY_TOOL,
@@ -587,7 +944,26 @@ AGENT_TOOLS = [
     SEND_IMAGE_FROM_SANDBOX_TOOL,
     LIST_RECENT_FILES_TOOL,
     IMPORT_FILE_TO_SANDBOX_TOOL,
+]
+
+CONVERSATION_TOOLS = [
+    GET_MESSAGE_BY_ID_TOOL,
+    SEARCH_MESSAGES_TOOL,
+    VIEW_FORWARD_TOOL,
+    VIEW_BILIBILI_TOOL,
     SAY_TOOL,
+]
+
+BROWSER_TOOLS = [
+    BROWSER_NAVIGATE_TOOL,
+    BROWSER_SNAPSHOT_TOOL,
+    BROWSER_CLICK_TOOL,
+    BROWSER_TYPE_TOOL,
+    BROWSER_PRESS_KEY_TOOL,
+    BROWSER_WAIT_FOR_TOOL,
+    BROWSER_SCROLL_TOOL,
+    BROWSER_CLOSE_TOOL,
+    BROWSER_CLEAR_TOOL,
 ]
 
 
@@ -600,7 +976,13 @@ def available_tools(
     include_stickers: bool = False,
     include_memory_tools: bool = False,
     include_agent_tools: bool = False,
+    include_conversation_tools: bool = False,
+    include_browser_tools: bool = False,
     include_turn_tools: bool = False,
+    include_pin_tools: bool = False,
+    include_self_tools: bool = False,
+    include_group_tools: bool = False,
+    include_reminder_tools: bool = False,
 ) -> list[ToolDefinition]:
     tools: list[ToolDefinition] = []
     if include_web_search:
@@ -616,9 +998,23 @@ def available_tools(
     if include_memory_tools:
         tools.extend(MEMORY_TOOLS)
     if include_agent_tools:
-        tools.extend(AGENT_TOOLS)
+        tools.extend(SANDBOX_TOOLS)
+    if include_conversation_tools:
+        tools.extend(CONVERSATION_TOOLS)
+    if include_browser_tools:
+        tools.extend(BROWSER_TOOLS)
     if include_turn_tools:
         tools.extend([CONTEXT_EXPAND_TOOL, CONTEXT_SEARCH_TOOL])
+    if include_pin_tools:
+        tools.extend([PIN_MESSAGE_TOOL, UNPIN_MESSAGE_TOOL])
+    if include_self_tools:
+        tools.extend([USE_SKILL_TOOL, INSPECT_SOURCE_TOOL])
+    if include_group_tools:
+        tools.append(GROUP_MEMBERS_TOOL)
+    if include_reminder_tools:
+        tools.extend(
+            [REMINDER_SET_TOOL, REMINDER_LIST_TOOL, REMINDER_CANCEL_TOOL]
+        )
     return tools
 
 

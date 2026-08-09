@@ -6,7 +6,9 @@
 - 框架层：NoneBot2
 - 模型层：DeepSeek API
 - 当前功能：对话、联网搜索、OCR、语音、模型切换、持久化上下文、
-  长期记忆、任务管理和项目沙箱
+  长期记忆、语义召回、固定消息、提醒、并发任务、项目沙箱和持久浏览器
+- Max 风格交互：消息拆分、指定引用、静默反应、运行中反馈、旁路提问、
+  渐进式技能、受限源码自省、规范句柄、流式段落、持久 outbox、管理页和跨平台镜像
 
 ## 目录结构
 
@@ -23,15 +25,35 @@ bot/
     agent_tools.py
     context_store.py
     conversation_scope.py
+    delivery.py
+    bridges.py
+    semantic_recall.py
+    historian.py
+    quota.py
+    admin.py
+    browser_tools.py
+    media_tools.py
     ledger.py
     long_term_memory.py
     message_ir.py
     message_lowering.py
     memory.py
     onebot_codec.py
+    output_planner.py
+    pins.py
+    reminders.py
     sandbox.py
+    self_source.py
+    skills.py
     tool_policy.py
     turn_journal.py
+  skills/
+    browser.md
+    qq-chat.md
+    reminders.md
+    sandbox.md
+    self-knowledge.md
+    web.md
 ```
 
 ## 本地启动
@@ -81,6 +103,9 @@ ws://127.0.0.1:8080/onebot/v11/ws
 “听语音”或“发表情”等关键词提前走固定回复。联网搜索、可用图片 OCR、
 语音、表情和授权用户的沙箱工具都会按现场条件提供给模型，由模型判断是否调用；
 工具结果会交回 DeepSeek 后再生成最终回答。
+模型还可以按需展开 Bilibili 视频、QQ 合并转发和持久网页会话。浏览器默认关闭；
+启用方法及 PostgreSQL、Matrix、iMessage 等可选基础设施见
+[`docs/operations-v3.md`](docs/operations-v3.md)。
 机器人会引用触发它的原消息。QQ 消息进入机器人后，会先转换成统一的
 Message IR，再存入本地 SQLite 规范消息账本。模型在群聊上下文和消息工具里
 只看到 `msg#12`、`@#3` 这类机器人内部句柄；原始群号、QQ 号和 NapCat
@@ -94,6 +119,42 @@ Message IR，再存入本地 SQLite 规范消息账本。模型在群聊上下�
 源哈希和 `episode#` 句柄的 P1/P2/P3 分段，最近消息保留为原文尾部。摘要只是可
 重建投影，原始 Message IR 才是事实来源。投影失败时会退回有界原始消息，不会
 推进覆盖游标。群聊、私聊和用户长期记忆严格按 `ConversationScope` 隔离。
+
+## Max 风格交互
+
+机器人现在会先把模型回答交给宿主侧输出规划器，再发给 QQ。规划器能够：
+
+- 按空行或模型给出的 `[split]` 把长回答拆成最多 10 条，代码块不会从中间截断。
+- 用 `[reply#编号]` 把某一段引用到当前会话内的指定 `msg#`；句柄在发送前重新校验 Scope。
+- 把严格的 `[silence]` 变成 QQ 反应，不把控制标记泄漏到聊天文本。
+- 开始处理时临时添加“正在想”反应，成功、失败和静默都有各自的宿主侧状态。
+- 第一段默认引用并 @ 提问者，后续拆分段不重复刷引用；语音仍作为独立消息发送。
+- DeepSeek 原生流式返回时，闭合的完整段落会先发；代码围栏和 `[silence]` 会等到
+  完整答案确定，`/停止` 会取消底层 HTTP stream。
+- fenced code 和 Markdown 表格可渲染为 PNG；Playwright 不可用时自动退回原文本。
+
+常用控制命令：
+
+```text
+!ps                         查看当前群正在运行的任务
+!kill [tID]                 停止指定任务或最新任务
+!feedback 补充内容          把新要求送进仍在运行的任务
+!btw 另一个问题             并行开启一个不打断原任务的新回合
+回复消息并发送 !pin         固定重要消息
+!unpin msg#12               取消固定
+!pins                       查看当前会话的固定消息
+!usage                      查看当前会话 token 用量
+!version                    查看机器人版本
+```
+
+固定消息按群聊或私聊 Scope 隔离，`/clear` 只清上下文和记忆，不会误删 Pins。
+模型还可以通过 `reminder_set`、`reminder_list`、`reminder_cancel` 创建、查看和取消
+持久提醒；机器人重启后提醒仍在，发送失败会重试，发送结果不确定时不会盲目重复。
+
+宿主只把简短技能目录放进 system prompt。模型需要某项能力时再调用 `use_skill`
+读取完整说明，避免所有操作手册永久占用上下文。`inspect_source` 只允许查看本仓库
+白名单目录，禁止访问 `.env`、状态数据库、隐藏文件、绝对路径、符号链接和目录
+穿越；`group_members` 只返回 `@#principal`，不会把原始 QQ 号交给模型。
 
 ## 工作回合与连续任务
 
@@ -136,6 +197,9 @@ DeepSeek 会按需调用 `context_search` 查找当前会话的 `msg#` 和 `epis
 ```text
 memory_add / memory_list / memory_remove
 context_search / context_expand
+pin_message / unpin_message
+reminder_set / reminder_list / reminder_cancel
+use_skill / inspect_source / group_members
 ```
 
 它只应保存稳定偏好、身份事实和长期约定，不保存临时聊天、密码、Token、
@@ -191,18 +255,25 @@ API Key 或验证码。所有记忆都可以手动审计：
 DeepSeek 可以按任务自动调用：
 
 ```text
-get_message_by_id / search_messages
+get_message_by_id / context_search / context_expand
+search_messages / view_forward / view_bilibili
 sandbox_create / sandbox_list / sandbox_destroy / sandbox_exec
 sandbox_write_file / sandbox_read_file
 send_file_from_sandbox / send_image_from_sandbox
 list_recent_files / import_file_to_sandbox
 say / send_sticker / send_qq_face
 memory_add / memory_list / memory_remove
-context_search / context_expand
+pin_message / unpin_message
+reminder_set / reminder_list / reminder_cancel
+use_skill / inspect_source / group_members
+browser_navigate / browser_snapshot / browser_click / browser_type
+browser_press_key / browser_wait_for / browser_scroll / browser_close
+browser_clear
 ```
 
-`search_messages` 返回当前群的完整 `msg#` 句柄。后续读取消息或导入该消息
-中的附件时，把它原样放进 `message_handle`；消息附件使用 `file#消息.段号`，
+`context_search` 会统一搜索当前会话的消息、摘要片段、Pins 和长期记忆，并返回
+完整规范句柄。后续读取消息或导入该消息中的附件时，把 `msg#` 原样放进
+`message_handle`；消息附件使用 `file#消息.段号`，
 群文件列表使用 Scope 绑定的 `groupfile#...`。执行器会在当前群 Scope 内映射回
 NapCat 原始消息和文件 ID，模型不能直接看到或提交这些原生 ID。
 
@@ -345,6 +416,7 @@ AI_MEMORY_MAX_ENTRIES=30
 AI_MEMORY_MAX_CHARS=300
 AI_MAX_INPUT_CHARS=1500
 AI_MAX_REPLY_CHARS=3000
+AI_REPLY_CHUNK_DELAY_SECONDS=0.6
 AI_TOOL_MAX_ROUNDS=30
 AI_TOOL_SIMPLE_MAX_ROUNDS=3
 AI_TOOL_MAX_CALLS_PER_ROUND=4
@@ -373,6 +445,22 @@ AI_WARMUP_CHECK_SECONDS=60
 AI_WARMUP_MAX_REPLY_CHARS=80
 AI_WARMUP_QUIET_START_HOUR=1
 AI_WARMUP_QUIET_END_HOUR=8
+AI_REMINDERS_ENABLED=true
+AI_REMINDER_CHECK_SECONDS=20
+AI_REMINDER_MAX_PER_SCOPE=50
+AI_OUTBOX_ENABLED=true
+AI_STREAM_ENABLED=true
+AI_QUOTA_ENABLED=true
+AI_QUOTA_DAILY_CALLS=0
+AI_QUOTA_DAILY_INPUT_TOKENS=0
+AI_QUOTA_DAILY_OUTPUT_TOKENS=0
+AI_RICH_RENDER_ENABLED=true
+AI_BROWSER_ENABLED=false
+AI_SEMANTIC_ENABLED=false
+AI_HISTORIAN_ENABLED=false
+AI_DREAM_ENABLED=false
+AI_ADMIN_ENABLED=false
+AI_MIRROR_ROUTES_JSON=[]
 AI_SANDBOX_ENABLED=false
 AI_SANDBOX_ALLOWED_USERS=
 AI_SANDBOX_MAX_PER_USER=2
@@ -392,16 +480,21 @@ AI_ENABLED_GROUPS=123456789,987654321
 ## 五份 ADR 的落地范围
 
 本项目参考了 [HCHogan/max 的 ADR](https://github.com/HCHogan/max/tree/main/docs/adr)
-（MIT），但继续使用 NoneBot2、OneBot V11、DeepSeek 和 SQLite：
+（MIT），但继续使用 NoneBot2、OneBot V11 和 DeepSeek；SQLite 保存规范事实，
+PostgreSQL/pgvector 仅作为可选的语义派生索引：
 
 | ADR | 本项目中的对应实现 |
 | --- | --- |
-| 001 Context/Memory | 不可变规范账本、token 水位、无缝 `episode#` 分段、来源哈希、独立记忆审计、按 Scope 读取 |
-| 002 Partial Plans | 已实现其 v1.0 journal slice：宿主 schema 校验、规范效果事件、崩溃后的 `outcome-unknown`、沙箱观测清单；参考文件标为 post-1.0 的动态 Plan/Hole 执行机没有冒进启用 |
-| 003 Message IR | 富 Message IR 只存一次；提示词和 OneBot 都从 IR 在边缘渲染；统一 capability lowering、文本降级、媒体预算和 UTF-8 分块 |
+| 001 Context/Memory | 不可变账本、token 水位、`episode#`、来源哈希、pgvector 混合召回、Historian 与 Dream CAS |
+| 002 Partial Plans | 宿主 schema、规范效果事件、outbox 租约与 `outcome-unknown`、沙箱观测清单；ADR 标为未来工作的完整 Plan/Hole 执行机仍未伪装启用 |
+| 003 Message IR | 富 IR 只存一次；OneBot/Matrix/iMessage 从 IR 降级；统一 outbox、echo、镜像、富截图和 UTF-8 分块 |
 | 004 Canonical Handles | 模型只使用 `msg#`、`image#/file#消息.段序号`、`groupfile#`、`@#principal`、`episode#`、`t#`；原生 QQ ID 留在适配层，所有读取重新校验 Scope |
 | 005 Turn Continuity | durable turn、`fork-from`、Level 0/1/2、trace TTL/LRU、有效性判定、原样回放、ledger 去重和 digest 退化 |
 
 更细的模块和数据流见 [`docs/architecture-five-adrs.md`](docs/architecture-five-adrs.md)。
-SQLite 中保留 embedding 记录表，但在配置实际 embedding 模型前不会生成向量或
-启用向量检索；当前 `context_search` 使用本地词面检索。
+本轮与 Max 的功能对照及有意保留的差异见
+[`docs/max-compatibility.md`](docs/max-compatibility.md)。引用或改编部分的许可见
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
+默认 `context_search` 使用本地词面检索；配置 embedding provider 和 pgvector 后，
+会合并 Scope 受限的语义结果。完整启用与故障边界见
+[`docs/operations-v3.md`](docs/operations-v3.md)。

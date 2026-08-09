@@ -110,6 +110,25 @@ class ContextStoreTests(unittest.TestCase):
         valid, detail = self.context.verify_scope(self.ledger, self.group_a)
         self.assertTrue(valid, detail)
 
+    def test_historian_publication_uses_cursor_cas(self) -> None:
+        self.seed()
+        candidate = self.context.capture_candidate(self.ledger, self.group_a)
+        self.assertIsNotNone(candidate)
+        episode = self.context.publish_generated(
+            candidate,  # type: ignore[arg-type]
+            ("详细摘要", "中等摘要", "短摘要"),
+        )
+        self.assertEqual(episode.summary_p1, "详细摘要")
+        self.assertEqual(
+            episode.source_hash,
+            candidate.source_hash,  # type: ignore[union-attr]
+        )
+        with self.assertRaises(RuntimeError):
+            self.context.publish_generated(
+                candidate,  # type: ignore[arg-type]
+                ("再次摘要", "再次中等摘要", "再次短摘要"),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

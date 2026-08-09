@@ -9,11 +9,213 @@ import nonebot
 
 nonebot.init()
 
-from src.plugins.ai_chat.deepseek import DeepSeekTrace, ask_deepseek_with_tools
+from src.plugins.ai_chat.deepseek import (
+    DeepSeekTrace,
+    FinalStreamState,
+    _create_streaming_completion,
+    ask_deepseek_with_tools,
+    ready_stream_prefix,
+)
 from src.plugins.ai_chat.config import settings
 
 
 class DeepSeekToolLoopTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stream_releases_only_complete_paragraphs(self) -> None:
+        class Stream:
+            def __init__(self):
+                self.items = iter(
+                    [
+                        SimpleNamespace(
+                            choices=[
+                                SimpleNamespace(
+                                    delta=SimpleNamespace(
+                                        content="第一段。\n",
+                                        tool_calls=[],
+                                    ),
+                                    finish_reason=None,
+                                )
+                            ],
+                            usage=None,
+                        ),
+                        SimpleNamespace(
+                            choices=[
+                                SimpleNamespace(
+                                    delta=SimpleNamespace(
+                                        content="\n第二段。",
+                                        tool_calls=[],
+                                    ),
+                                    finish_reason="stop",
+                                )
+                            ],
+                            usage=None,
+                        ),
+                    ]
+                )
+                self.closed = False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                try:
+                    return next(self.items)
+                except StopIteration:
+                    raise StopAsyncIteration
+
+            async def close(self):
+                self.closed = True
+
+        stream = Stream()
+        emitted = []
+        state = FinalStreamState()
+
+        async def sink(text):
+            emitted.append(text)
+
+        with patch(
+            "src.plugins.ai_chat.deepseek._create_completion",
+            new=AsyncMock(return_value=stream),
+        ):
+            answer = await ask_deepseek_with_tools(
+                "answer",
+                [],
+                [],
+                AsyncMock(),
+                final_text_sink=sink,
+                final_stream_state=state,
+            )
+
+        self.assertEqual(answer, "第一段。\n\n第二段。")
+        self.assertEqual(emitted, ["第一段。\n\n"])
+        self.assertEqual(state.sent_prefix, "第一段。\n\n")
+        self.assertTrue(stream.closed)
+        self.assertEqual(ready_stream_prefix("```py\na\n\n"), ("", "```py\na\n\n"))
+        self.assertEqual(
+            ready_stream_prefix("[silence]\n\n"),
+            ("", "[silence]\n\n"),
+        )
+
+    async def test_stream_reassembles_fragmented_tool_call_arguments(self) -> None:
+        def chunk(content="", calls=None, finish=None):
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(
+                            content=content,
+                            tool_calls=calls or [],
+                        ),
+                        finish_reason=finish,
+                    )
+                ],
+                usage=None,
+            )
+
+        call_a = SimpleNamespace(
+            index=0,
+            id="call-1",
+            type="function",
+            function=SimpleNamespace(name="lookup", arguments='{"query":'),
+        )
+        call_b = SimpleNamespace(
+            index=0,
+            id=None,
+            type=None,
+            function=SimpleNamespace(name=None, arguments='"x"}'),
+        )
+
+        class Stream:
+            def __init__(self, items):
+                self.items = iter(items)
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                try:
+                    return next(self.items)
+                except StopIteration:
+                    raise StopAsyncIteration
+
+            async def close(self):
+                return None
+
+        first = Stream(
+            [
+                chunk("我先查一下。\n\n", [call_a]),
+                chunk(calls=[call_b], finish="tool_calls"),
+            ]
+        )
+        second = Stream([chunk("结果是 x。", finish="stop")])
+        execute = AsyncMock(return_value='{"ok":true}')
+        progress = []
+
+        async def progress_sink(text):
+            progress.append(text)
+
+        with patch(
+            "src.plugins.ai_chat.deepseek._create_completion",
+            new=AsyncMock(side_effect=[first, second]),
+        ) as create_completion:
+            answer = await ask_deepseek_with_tools(
+                "lookup",
+                [],
+                [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "lookup",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"query": {"type": "string"}},
+                                "required": ["query"],
+                            },
+                        },
+                    }
+                ],
+                execute,
+                final_text_sink=progress_sink,
+            )
+
+        self.assertEqual(answer, "结果是 x。")
+        execute.assert_awaited_once_with("lookup", {"query": "x"})
+        self.assertEqual(progress, ["我先查一下。\n\n"])
+        assistant = create_completion.await_args_list[1].kwargs["messages"][-2]
+        self.assertEqual(assistant["tool_calls"][0]["function"]["name"], "lookup")
+        self.assertEqual(
+            assistant["tool_calls"][0]["function"]["arguments"],
+            '{"query":"x"}',
+        )
+
+    async def test_cancelling_stream_closes_transport(self) -> None:
+        import asyncio
+
+        class BlockingStream:
+            def __init__(self):
+                self.closed = False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                await asyncio.Event().wait()
+
+            async def close(self):
+                self.closed = True
+
+        stream = BlockingStream()
+        with patch(
+            "src.plugins.ai_chat.deepseek._create_completion",
+            new=AsyncMock(return_value=stream),
+        ):
+            task = asyncio.create_task(
+                _create_streaming_completion(AsyncMock(), messages=[], model="x")
+            )
+            await asyncio.sleep(0)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        self.assertTrue(stream.closed)
+
     async def test_no_tool_fallback_keeps_replay_and_tool_context(self) -> None:
         final_response = SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))]
@@ -372,6 +574,57 @@ class DeepSeekToolLoopTests(unittest.IsolatedAsyncioTestCase):
             "用户偏好简短回答",
             create_completion.await_args_list[0].kwargs["messages"][0]["content"],
         )
+
+    async def test_feedback_racing_final_answer_is_injected_and_revised(self) -> None:
+        first_response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="方案 A", tool_calls=[])
+                )
+            ]
+        )
+        revised_response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="方案 B", tool_calls=[])
+                )
+            ]
+        )
+        feedback_batches = [[], ["改成方案 B"], [], []]
+
+        async def feedback_provider() -> list[str]:
+            return feedback_batches.pop(0) if feedback_batches else []
+
+        with patch(
+            "src.plugins.ai_chat.deepseek._create_completion",
+            new=AsyncMock(side_effect=[first_response, revised_response]),
+        ) as create_completion:
+            answer = await ask_deepseek_with_tools(
+                "给我一个方案",
+                [],
+                [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "noop",
+                            "description": "noop",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {},
+                                "additionalProperties": False,
+                            },
+                        },
+                    }
+                ],
+                AsyncMock(return_value='{"ok": true}'),
+                max_tool_rounds=3,
+                feedback_provider=feedback_provider,
+            )
+
+        self.assertEqual(answer, "方案 B")
+        second_messages = create_completion.await_args_list[1].kwargs["messages"]
+        self.assertEqual(second_messages[-2]["content"], "方案 A")
+        self.assertEqual(second_messages[-1]["content"], "[feedback]: 改成方案 B")
 
 
 if __name__ == "__main__":

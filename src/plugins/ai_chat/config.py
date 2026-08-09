@@ -14,6 +14,16 @@ def _get_int(name: str, default: int) -> int:
         return default
 
 
+def _get_float(name: str, default: float) -> float:
+    value = os.getenv(name, "").strip()
+    if not value:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
 def _get_bool(name: str, default: bool) -> bool:
     value = os.getenv(name, "").strip().lower()
     if not value:
@@ -71,6 +81,8 @@ class Settings:
     memory_max_chars: int
     max_input_chars: int
     max_reply_chars: int
+    reply_chunk_delay_seconds: float
+    stream_enabled: bool
     tool_max_rounds: int
     tool_simple_max_rounds: int
     tool_max_calls_per_round: int
@@ -109,6 +121,60 @@ class Settings:
     warmup_max_reply_chars: int
     warmup_quiet_start_hour: int
     warmup_quiet_end_hour: int
+    reminders_enabled: bool
+    reminder_check_seconds: int
+    reminder_max_per_scope: int
+    outbox_enabled: bool
+    outbox_check_seconds: int
+    outbox_lease_seconds: int
+    outbox_max_attempts: int
+    quota_enabled: bool
+    quota_daily_calls: int
+    quota_daily_input_tokens: int
+    quota_daily_output_tokens: int
+    semantic_enabled: bool
+    postgres_dsn: str
+    embedding_base_url: str
+    embedding_api_key: str
+    embedding_model: str
+    embedding_dimensions: int
+    embedding_timeout_seconds: int
+    semantic_index_seconds: int
+    semantic_batch_size: int
+    historian_enabled: bool
+    historian_model: str
+    historian_check_seconds: int
+    historian_max_scopes: int
+    dream_enabled: bool
+    dream_model: str
+    dream_hour: int
+    dream_min_entries: int
+    dream_check_seconds: int
+    admin_enabled: bool
+    admin_token: str
+    admin_path: str
+    mirror_routes_json: str
+    bridge_path: str
+    matrix_enabled: bool
+    matrix_homeserver: str
+    matrix_access_token: str
+    matrix_user_id: str
+    matrix_appservice_token: str
+    matrix_sync_timeout_ms: int
+    matrix_sync_retry_seconds: int
+    imessage_enabled: bool
+    imessage_base_url: str
+    imessage_password: str
+    imessage_webhook_token: str
+    imessage_chat_guid: str
+    imessage_bot_handle: str
+    browser_enabled: bool
+    browser_timeout_seconds: int
+    browser_max_sessions: int
+    browser_idle_seconds: int
+    browser_executable_path: str
+    browser_allow_private_network: bool
+    rich_render_enabled: bool
     sandbox_enabled: bool
     sandbox_allowed_users: set[int]
     sandbox_max_per_user: int
@@ -207,6 +273,11 @@ class Settings:
             ),
             max_input_chars=_get_int("AI_MAX_INPUT_CHARS", 1500),
             max_reply_chars=_get_int("AI_MAX_REPLY_CHARS", 3000),
+            reply_chunk_delay_seconds=max(
+                _get_float("AI_REPLY_CHUNK_DELAY_SECONDS", 0.6),
+                0.0,
+            ),
+            stream_enabled=_get_bool("AI_STREAM_ENABLED", True),
             tool_max_rounds=min(
                 max(_get_int("AI_TOOL_MAX_ROUNDS", 30), 1), 100
             ),
@@ -306,6 +377,146 @@ class Settings:
             warmup_quiet_end_hour=min(
                 max(_get_int("AI_WARMUP_QUIET_END_HOUR", 8), 0), 23
             ),
+            reminders_enabled=_get_bool("AI_REMINDERS_ENABLED", True),
+            reminder_check_seconds=max(
+                _get_int("AI_REMINDER_CHECK_SECONDS", 20),
+                5,
+            ),
+            reminder_max_per_scope=min(
+                max(_get_int("AI_REMINDER_MAX_PER_SCOPE", 50), 1),
+                200,
+            ),
+            outbox_enabled=_get_bool("AI_OUTBOX_ENABLED", True),
+            outbox_check_seconds=max(
+                _get_int("AI_OUTBOX_CHECK_SECONDS", 5),
+                1,
+            ),
+            outbox_lease_seconds=max(
+                _get_int("AI_OUTBOX_LEASE_SECONDS", 90),
+                10,
+            ),
+            outbox_max_attempts=min(
+                max(_get_int("AI_OUTBOX_MAX_ATTEMPTS", 5), 1),
+                50,
+            ),
+            quota_enabled=_get_bool("AI_QUOTA_ENABLED", True),
+            quota_daily_calls=max(
+                _get_int("AI_QUOTA_DAILY_CALLS", 0),
+                0,
+            ),
+            quota_daily_input_tokens=max(
+                _get_int("AI_QUOTA_DAILY_INPUT_TOKENS", 0),
+                0,
+            ),
+            quota_daily_output_tokens=max(
+                _get_int("AI_QUOTA_DAILY_OUTPUT_TOKENS", 0),
+                0,
+            ),
+            semantic_enabled=_get_bool("AI_SEMANTIC_ENABLED", False),
+            postgres_dsn=os.getenv("AI_POSTGRES_DSN", "").strip(),
+            embedding_base_url=os.getenv(
+                "AI_EMBEDDING_BASE_URL",
+                "https://api.openai.com/v1",
+            ).strip(),
+            embedding_api_key=os.getenv(
+                "AI_EMBEDDING_API_KEY",
+                "",
+            ).strip(),
+            embedding_model=os.getenv(
+                "AI_EMBEDDING_MODEL",
+                "text-embedding-3-small",
+            ).strip(),
+            embedding_dimensions=min(
+                max(_get_int("AI_EMBEDDING_DIMENSIONS", 1536), 8),
+                8192,
+            ),
+            embedding_timeout_seconds=max(
+                _get_int("AI_EMBEDDING_TIMEOUT_SECONDS", 30),
+                5,
+            ),
+            semantic_index_seconds=max(
+                _get_int("AI_SEMANTIC_INDEX_SECONDS", 60),
+                10,
+            ),
+            semantic_batch_size=min(
+                max(_get_int("AI_SEMANTIC_BATCH_SIZE", 32), 1),
+                100,
+            ),
+            historian_enabled=_get_bool("AI_HISTORIAN_ENABLED", False),
+            historian_model=os.getenv("AI_HISTORIAN_MODEL", "").strip(),
+            historian_check_seconds=max(
+                _get_int("AI_HISTORIAN_CHECK_SECONDS", 60),
+                15,
+            ),
+            historian_max_scopes=min(
+                max(_get_int("AI_HISTORIAN_MAX_SCOPES", 20), 1),
+                200,
+            ),
+            dream_enabled=_get_bool("AI_DREAM_ENABLED", False),
+            dream_model=os.getenv("AI_DREAM_MODEL", "").strip(),
+            dream_hour=min(
+                max(_get_int("AI_DREAM_HOUR", 4), 0),
+                23,
+            ),
+            dream_min_entries=min(
+                max(_get_int("AI_DREAM_MIN_ENTRIES", 15), 2),
+                100,
+            ),
+            dream_check_seconds=max(
+                _get_int("AI_DREAM_CHECK_SECONDS", 300),
+                30,
+            ),
+            admin_enabled=_get_bool("AI_ADMIN_ENABLED", False),
+            admin_token=os.getenv("AI_ADMIN_TOKEN", "").strip(),
+            admin_path=(
+                os.getenv("AI_ADMIN_PATH", "/bot-admin").strip()
+                or "/bot-admin"
+            ),
+            mirror_routes_json=os.getenv("AI_MIRROR_ROUTES_JSON", "").strip(),
+            bridge_path=(
+                os.getenv("AI_BRIDGE_PATH", "/bot-bridge").strip()
+                or "/bot-bridge"
+            ),
+            matrix_enabled=_get_bool("AI_MATRIX_ENABLED", False),
+            matrix_homeserver=os.getenv("AI_MATRIX_HOMESERVER", "").strip(),
+            matrix_access_token=os.getenv("AI_MATRIX_ACCESS_TOKEN", "").strip(),
+            matrix_user_id=os.getenv("AI_MATRIX_USER_ID", "").strip(),
+            matrix_appservice_token=os.getenv(
+                "AI_MATRIX_APPSERVICE_TOKEN", ""
+            ).strip(),
+            matrix_sync_timeout_ms=min(
+                max(_get_int("AI_MATRIX_SYNC_TIMEOUT_MS", 30000), 1000),
+                120000,
+            ),
+            matrix_sync_retry_seconds=min(
+                max(_get_int("AI_MATRIX_SYNC_RETRY_SECONDS", 5), 1),
+                300,
+            ),
+            imessage_enabled=_get_bool("AI_IMESSAGE_ENABLED", False),
+            imessage_base_url=os.getenv("AI_IMESSAGE_BASE_URL", "").strip(),
+            imessage_password=os.getenv("AI_IMESSAGE_PASSWORD", "").strip(),
+            imessage_webhook_token=os.getenv(
+                "AI_IMESSAGE_WEBHOOK_TOKEN", ""
+            ).strip(),
+            imessage_chat_guid=os.getenv("AI_IMESSAGE_CHAT_GUID", "").strip(),
+            imessage_bot_handle=os.getenv("AI_IMESSAGE_BOT_HANDLE", "").strip(),
+            browser_enabled=_get_bool("AI_BROWSER_ENABLED", False),
+            browser_timeout_seconds=min(
+                max(_get_int("AI_BROWSER_TIMEOUT_SECONDS", 30), 5), 120
+            ),
+            browser_max_sessions=min(
+                max(_get_int("AI_BROWSER_MAX_SESSIONS", 3), 1), 10
+            ),
+            browser_idle_seconds=max(
+                _get_int("AI_BROWSER_IDLE_SECONDS", 1800), 60
+            ),
+            browser_executable_path=os.getenv(
+                "AI_BROWSER_EXECUTABLE_PATH", ""
+            ).strip(),
+            browser_allow_private_network=_get_bool(
+                "AI_BROWSER_ALLOW_PRIVATE_NETWORK", False
+            ),
+            rich_render_enabled=_get_bool("AI_RICH_RENDER_ENABLED", True),
             sandbox_enabled=_get_bool("AI_SANDBOX_ENABLED", False),
             sandbox_allowed_users=_get_group_ids(
                 "AI_SANDBOX_ALLOWED_USERS"

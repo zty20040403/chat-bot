@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 import time
@@ -22,7 +23,8 @@ from .message_ir import (
 
 
 Direction = Literal["inbound", "outbound", "system"]
-SCHEMA_VERSION = 1
+MessageKind = Literal["chat", "command", "system"]
+SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -34,11 +36,25 @@ class CanonicalMessage:
     sender_principal_id: int | None
     sender_display: str
     direction: str
+    message_kind: str
     body: MessageBody
     rendered_text: str
     occurred_at: int
     reply_to_native_message_id: str | None
     reply_to_canonical_message_id: int | None
+
+    @property
+    def prompt_text(self) -> str:
+        if self.message_kind == "command":
+            return ""
+        matched = re.match(
+            r"^!(?:feedback|fb|btw)(?:\s+(.*))?$",
+            self.rendered_text.strip(),
+            re.IGNORECASE | re.DOTALL,
+        )
+        if matched is not None:
+            return (matched.group(1) or "").strip()
+        return self.rendered_text
 
 
 class MessageLedger:
@@ -60,6 +76,43 @@ class MessageLedger:
         with self._lock:
             self._connection.close()
 
+    def list_scopes(self) -> list[ConversationScope]:
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT platform, kind, native_conversation_id
+                FROM conversations ORDER BY conversation_id ASC
+                """
+            ).fetchall()
+        return [
+            ConversationScope(
+                str(row["platform"]),
+                str(row["kind"]),  # type: ignore[arg-type]
+                str(row["native_conversation_id"]),
+            )
+            for row in rows
+        ]
+
+    def all_visible_messages(self, *, limit: int = 5000) -> list[CanonicalMessage]:
+        bounded = min(max(int(limit), 1), 20000)
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT m.*, c.scope_key
+                FROM messages AS m
+                JOIN conversations AS c
+                  ON c.conversation_id = m.conversation_id
+                JOIN conversation_visibility AS v
+                  ON v.conversation_id = m.conversation_id
+                WHERE m.canonical_message_id >= v.min_canonical_message_id
+                  AND m.message_kind != 'command'
+                ORDER BY m.canonical_message_id DESC
+                LIMIT ?
+                """,
+                (bounded,),
+            ).fetchall()
+        return [self._row_to_message(row) for row in reversed(rows)]
+
     def record_message(
         self,
         scope: ConversationScope,
@@ -70,11 +123,15 @@ class MessageLedger:
         body: MessageBody,
         occurred_at: int = 0,
         direction: Direction = "inbound",
+        message_kind: MessageKind = "chat",
         reply_to_native_message_id: str | None = None,
         raw_event: dict[str, Any] | None = None,
+        identity_platform: str | None = None,
     ) -> CanonicalMessage:
         if direction not in {"inbound", "outbound", "system"}:
             raise ValueError("unsupported message direction")
+        if message_kind not in {"chat", "command", "system"}:
+            raise ValueError("unsupported message kind")
         native_message_id = str(native_message_id).strip()
         sender_native_user_id = str(sender_native_user_id).strip()
         sender_display = sender_display.strip() or (
@@ -89,12 +146,13 @@ class MessageLedger:
 
         with self._transaction() as cursor:
             conversation_id = self._ensure_conversation(cursor, scope)
+            identity_platform = (identity_platform or scope.platform).strip()
             identity_id: int | None = None
             principal_id: int | None = None
             if sender_native_user_id:
                 identity_id, principal_id = self._ensure_identity(
                     cursor,
-                    scope.platform,
+                    identity_platform,
                     sender_native_user_id,
                     sender_display,
                     occurred_at,
@@ -104,7 +162,7 @@ class MessageLedger:
                 canonicalize_for_storage(body),
                 lambda native_id, display: self._resolve_mention(
                     cursor,
-                    scope.platform,
+                    identity_platform,
                     native_id,
                     display,
                     occurred_at,
@@ -137,13 +195,14 @@ class MessageLedger:
                         sender_native_user_id,
                         sender_display,
                         direction,
+                        message_kind,
                         body_json,
                         rendered_text,
                         occurred_at,
                         reply_to_native_message_id,
                         reply_to_canonical_message_id,
                         raw_event_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?)
                     """,
                     (
                         conversation_id,
@@ -153,6 +212,7 @@ class MessageLedger:
                         sender_native_user_id,
                         sender_display,
                         direction,
+                        message_kind,
                         body_to_json(resolved_body),
                         occurred_at,
                         reply_to_native_message_id,
@@ -219,6 +279,30 @@ class MessageLedger:
                 WHERE c.scope_key = ?
                   AND m.canonical_message_id = ?
                   AND m.canonical_message_id >= v.min_canonical_message_id
+                """,
+                (scope.key, int(canonical_message_id)),
+            ).fetchone()
+        return self._row_to_message(row) if row is not None else None
+
+    def get_any_in_scope(
+        self,
+        scope: ConversationScope,
+        canonical_message_id: int,
+    ) -> CanonicalMessage | None:
+        """Resolve an immutable message in a scope, including pre-clear rows.
+
+        This is intentionally separate from normal context visibility. Durable
+        references such as pins may survive a clear, but callers still cannot
+        cross the conversation boundary.
+        """
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT m.*, c.scope_key
+                FROM messages AS m
+                JOIN conversations AS c
+                  ON c.conversation_id = m.conversation_id
+                WHERE c.scope_key = ? AND m.canonical_message_id = ?
                 """,
                 (scope.key, int(canonical_message_id)),
             ).fetchone()
@@ -390,10 +474,12 @@ class MessageLedger:
                 (scope.key,),
             ).fetchall()
         folded_query = query.casefold()
+        messages = [self._row_to_message(row) for row in rows]
         matches = [
-            self._row_to_message(row)
-            for row in rows
-            if folded_query in str(row["rendered_text"]).casefold()
+            message
+            for message in messages
+            if message.message_kind != "command"
+            and folded_query in message.prompt_text.casefold()
         ]
         return matches[:limit]
 
@@ -426,7 +512,7 @@ class MessageLedger:
         lines: list[str] = []
         used_chars = 0
         for message in reversed(messages):
-            if not message.rendered_text:
+            if not message.prompt_text:
                 continue
             sender = (
                 f"@#{message.sender_principal_id} {message.sender_display}"
@@ -443,7 +529,7 @@ class MessageLedger:
             )
             line = (
                 f"[msg#{message.canonical_message_id}{reply} | {timestamp} | "
-                f"{sender}] {message.rendered_text}"
+                f"{sender}] {message.prompt_text}"
             )
             if lines and used_chars + len(line) + 1 > max_chars:
                 break
@@ -669,6 +755,7 @@ class MessageLedger:
                     sender_native_user_id TEXT NOT NULL,
                     sender_display TEXT NOT NULL,
                     direction TEXT NOT NULL CHECK(direction IN ('inbound', 'outbound', 'system')),
+                    message_kind TEXT NOT NULL DEFAULT 'chat' CHECK(message_kind IN ('chat', 'command', 'system')),
                     body_json TEXT NOT NULL,
                     rendered_text TEXT NOT NULL,
                     occurred_at INTEGER NOT NULL,
@@ -708,6 +795,21 @@ class MessageLedger:
                     ON embeddings(scope_key, source_type, source_id);
                 """
             )
+            columns = {
+                str(row[1])
+                for row in cursor.execute("PRAGMA table_info(messages)").fetchall()
+            }
+            if "message_kind" not in columns:
+                try:
+                    cursor.execute(
+                        "ALTER TABLE messages ADD COLUMN message_kind TEXT NOT NULL DEFAULT 'chat'"
+                    )
+                except sqlite3.OperationalError as exc:
+                    # executescript may release SQLite's transaction between
+                    # CREATE checks. Two bot workers can therefore race this
+                    # additive migration; the second worker is already done.
+                    if "duplicate column name" not in str(exc).lower():
+                        raise
             row = cursor.execute(
                 "SELECT value FROM ledger_meta WHERE key = 'schema_version'"
             ).fetchone()
@@ -915,6 +1017,7 @@ class MessageLedger:
             ),
             sender_display=str(row["sender_display"] or ""),
             direction=str(row["direction"]),
+            message_kind=str(row["message_kind"] or "chat"),
             body=body,
             # rendered_text is a rebuildable search cache. The canonical IR is
             # the runtime authority for every prompt projection.

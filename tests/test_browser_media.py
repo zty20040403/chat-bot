@@ -1,0 +1,134 @@
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import tempfile
+import unittest
+
+import httpx
+import nonebot
+
+nonebot.init()
+
+from src.plugins.ai_chat.ai_tools import (
+    BROWSER_CLEAR_TOOL_NAME,
+    BROWSER_NAVIGATE_TOOL_NAME,
+    VIEW_BILIBILI_TOOL_NAME,
+    VIEW_FORWARD_TOOL_NAME,
+    available_tools,
+)
+from src.plugins.ai_chat.browser_tools import (
+    BrowserManager,
+    BrowserPolicyError,
+    parse_rich_block,
+)
+from src.plugins.ai_chat.media_tools import BilibiliClient, find_bilibili_ref
+
+
+class BrowserAndMediaTests(unittest.TestCase):
+    def test_rich_block_parser_distinguishes_code_table_and_plain_text(self) -> None:
+        self.assertEqual(
+            parse_rich_block("```python\nprint('ok')\n```")[0:2],  # type: ignore[index]
+            ("code", "python"),
+        )
+        self.assertEqual(
+            parse_rich_block("| a | b |\n| --- | :---: |\n| 1 | 2 |")[0],  # type: ignore[index]
+            "table",
+        )
+        self.assertIsNone(parse_rich_block("ordinary reply"))
+
+    def test_browser_policy_blocks_loopback_before_launching_playwright(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            manager = BrowserManager(temp)
+
+            async def run() -> None:
+                with self.assertRaises(BrowserPolicyError):
+                    await manager.navigate("group:1", "http://127.0.0.1/private")
+
+            asyncio.run(run())
+
+    def test_browser_profile_clear_is_owner_scoped(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            manager = BrowserManager(temp)
+            alice_key = hashlib.sha256(b"alice").hexdigest()[:24]
+            bob_key = hashlib.sha256(b"bob").hexdigest()[:24]
+            alice = manager.profile_root / alice_key
+            bob = manager.profile_root / bob_key
+            alice.mkdir()
+            bob.mkdir()
+            (alice / "cookie").write_text("private")
+            (bob / "cookie").write_text("keep")
+
+            self.assertTrue(asyncio.run(manager.clear_profile("alice")))
+            self.assertFalse(alice.exists())
+            self.assertTrue(bob.exists())
+
+    def test_bilibili_metadata_and_comments_are_parsed(self) -> None:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/x/web-interface/view"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "code": 0,
+                        "data": {
+                            "bvid": "BV1xx411c7mD",
+                            "aid": 42,
+                            "cid": 99,
+                            "title": "Test video",
+                            "desc": "Description",
+                            "owner": {"name": "UP"},
+                            "duration": 123,
+                            "pubdate": 100,
+                            "videos": 1,
+                            "stat": {"view": 10, "like": 2},
+                        },
+                    },
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "replies": [
+                            {
+                                "member": {"uname": "Alice"},
+                                "like": 3,
+                                "content": {"message": "nice"},
+                            }
+                        ]
+                    },
+                },
+            )
+
+        async def run():
+            http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+            client = BilibiliClient(client=http)
+            result = await client.inspect("BV1xx411c7mD")
+            await http.aclose()
+            return result
+
+        result = asyncio.run(run())
+        self.assertEqual(result["title"], "Test video")
+        self.assertEqual(result["top_comments"][0]["text"], "nice")  # type: ignore[index]
+        self.assertEqual(find_bilibili_ref("https://b23.tv/AbCd").short_url, "https://b23.tv/AbCd")  # type: ignore[union-attr]
+
+    def test_tool_catalog_exposes_conversation_and_browser_tools_separately(self) -> None:
+        tools = available_tools(
+            include_web_search=False,
+            include_image_ocr=False,
+            include_conversation_tools=True,
+            include_browser_tools=True,
+        )
+        names = {
+            item["function"]["name"]
+            for item in tools
+        }
+        self.assertIn(VIEW_FORWARD_TOOL_NAME, names)
+        self.assertIn(VIEW_BILIBILI_TOOL_NAME, names)
+        self.assertIn(BROWSER_NAVIGATE_TOOL_NAME, names)
+        self.assertIn(BROWSER_CLEAR_TOOL_NAME, names)
+
+
+if __name__ == "__main__":
+    unittest.main()

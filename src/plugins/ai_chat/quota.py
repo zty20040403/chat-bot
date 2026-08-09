@@ -1,0 +1,278 @@
+from __future__ import annotations
+
+import sqlite3
+import threading
+import time
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Iterator
+from zoneinfo import ZoneInfo
+
+
+SHANGHAI = ZoneInfo("Asia/Shanghai")
+
+
+@dataclass(frozen=True)
+class QuotaStatus:
+    scope_key: str
+    day: str
+    calls: int
+    input_tokens: int
+    output_tokens: int
+    call_limit: int
+    input_limit: int
+    output_limit: int
+
+    @property
+    def allowed(self) -> bool:
+        return not (
+            (self.call_limit > 0 and self.calls >= self.call_limit)
+            or (self.input_limit > 0 and self.input_tokens >= self.input_limit)
+            or (
+                self.output_limit > 0
+                and self.output_tokens >= self.output_limit
+            )
+        )
+
+
+class UsageStore:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        daily_call_limit: int = 0,
+        daily_input_token_limit: int = 0,
+        daily_output_token_limit: int = 0,
+    ) -> None:
+        self.path = Path(path) if str(path) != ":memory:" else None
+        if self.path is not None:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.daily_call_limit = max(int(daily_call_limit), 0)
+        self.daily_input_token_limit = max(int(daily_input_token_limit), 0)
+        self.daily_output_token_limit = max(int(daily_output_token_limit), 0)
+        self._lock = threading.RLock()
+        self._connection = sqlite3.connect(
+            str(path),
+            timeout=10.0,
+            check_same_thread=False,
+        )
+        self._connection.row_factory = sqlite3.Row
+        self._configure()
+        self._migrate()
+
+    def close(self) -> None:
+        with self._lock:
+            self._connection.close()
+
+    def record(
+        self,
+        *,
+        scope_key: str,
+        source: str,
+        provider: str,
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        cached_tokens: int = 0,
+        turn_id: int | None = None,
+        occurred_at: int | None = None,
+    ) -> int:
+        timestamp = int(time.time() if occurred_at is None else occurred_at)
+        with self._transaction() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO usage_events (
+                    scope_key, source, provider, model,
+                    input_tokens, output_tokens, cached_tokens,
+                    turn_id, occurred_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    scope_key,
+                    str(source)[:50],
+                    str(provider)[:100],
+                    str(model)[:200],
+                    max(int(input_tokens), 0),
+                    max(int(output_tokens), 0),
+                    max(int(cached_tokens), 0),
+                    turn_id,
+                    timestamp,
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    def status(
+        self,
+        scope_key: str,
+        *,
+        now: int | None = None,
+    ) -> QuotaStatus:
+        start, end, day = _day_bounds(now)
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT COUNT(*) AS calls,
+                       COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                       COALESCE(SUM(output_tokens), 0) AS output_tokens
+                FROM usage_events
+                WHERE scope_key = ? AND occurred_at >= ? AND occurred_at < ?
+                """,
+                (scope_key, start, end),
+            ).fetchone()
+            override = self._connection.execute(
+                "SELECT * FROM quota_overrides WHERE scope_key = ?",
+                (scope_key,),
+            ).fetchone()
+        return QuotaStatus(
+            scope_key=scope_key,
+            day=day,
+            calls=int(row["calls"] if row is not None else 0),
+            input_tokens=int(row["input_tokens"] if row is not None else 0),
+            output_tokens=int(row["output_tokens"] if row is not None else 0),
+            call_limit=int(
+                override["call_limit"]
+                if override is not None
+                else self.daily_call_limit
+            ),
+            input_limit=int(
+                override["input_limit"]
+                if override is not None
+                else self.daily_input_token_limit
+            ),
+            output_limit=int(
+                override["output_limit"]
+                if override is not None
+                else self.daily_output_token_limit
+            ),
+        )
+
+    def set_override(
+        self,
+        scope_key: str,
+        *,
+        call_limit: int,
+        input_limit: int,
+        output_limit: int,
+    ) -> None:
+        with self._transaction() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO quota_overrides (
+                    scope_key, call_limit, input_limit, output_limit, updated_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(scope_key) DO UPDATE SET
+                    call_limit = excluded.call_limit,
+                    input_limit = excluded.input_limit,
+                    output_limit = excluded.output_limit,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    scope_key,
+                    max(int(call_limit), 0),
+                    max(int(input_limit), 0),
+                    max(int(output_limit), 0),
+                    int(time.time()),
+                ),
+            )
+
+    def daily_summary(self, *, days: int = 14) -> list[dict[str, object]]:
+        bounded = min(max(int(days), 1), 365)
+        cutoff = int(time.time()) - bounded * 86400
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT scope_key, source, occurred_at,
+                       input_tokens, output_tokens, cached_tokens
+                FROM usage_events
+                WHERE occurred_at >= ?
+                ORDER BY occurred_at DESC
+                """,
+                (cutoff,),
+            ).fetchall()
+        buckets: dict[tuple[str, str, str], dict[str, object]] = {}
+        for row in rows:
+            day = datetime.fromtimestamp(int(row["occurred_at"]), SHANGHAI).date().isoformat()
+            key = (day, str(row["scope_key"]), str(row["source"]))
+            bucket = buckets.setdefault(
+                key,
+                {
+                    "day": day,
+                    "scope_key": key[1],
+                    "source": key[2],
+                    "calls": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cached_tokens": 0,
+                },
+            )
+            bucket["calls"] = int(bucket["calls"]) + 1
+            for field in ("input_tokens", "output_tokens", "cached_tokens"):
+                bucket[field] = int(bucket[field]) + int(row[field])
+        return sorted(
+            buckets.values(),
+            key=lambda item: (str(item["day"]), str(item["scope_key"])),
+            reverse=True,
+        )
+
+    def _configure(self) -> None:
+        with self._lock:
+            self._connection.execute("PRAGMA busy_timeout = 10000")
+            if self.path is not None:
+                self._connection.execute("PRAGMA journal_mode = WAL")
+            self._connection.execute("PRAGMA synchronous = NORMAL")
+
+    def _migrate(self) -> None:
+        with self._transaction() as cursor:
+            cursor.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS usage_events (
+                    usage_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    scope_key TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    input_tokens INTEGER NOT NULL,
+                    output_tokens INTEGER NOT NULL,
+                    cached_tokens INTEGER NOT NULL DEFAULT 0,
+                    turn_id INTEGER,
+                    occurred_at INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_usage_scope_time
+                    ON usage_events(scope_key, occurred_at);
+                CREATE INDEX IF NOT EXISTS idx_usage_time
+                    ON usage_events(occurred_at);
+
+                CREATE TABLE IF NOT EXISTS quota_overrides (
+                    scope_key TEXT PRIMARY KEY,
+                    call_limit INTEGER NOT NULL,
+                    input_limit INTEGER NOT NULL,
+                    output_limit INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+                """
+            )
+
+    @contextmanager
+    def _transaction(self) -> Iterator[sqlite3.Cursor]:
+        with self._lock:
+            cursor = self._connection.cursor()
+            try:
+                cursor.execute("BEGIN IMMEDIATE")
+                yield cursor
+            except Exception:
+                self._connection.rollback()
+                raise
+            else:
+                self._connection.commit()
+            finally:
+                cursor.close()
+
+
+def _day_bounds(now: int | None) -> tuple[int, int, str]:
+    timestamp = int(time.time() if now is None else now)
+    local = datetime.fromtimestamp(timestamp, SHANGHAI)
+    start_local = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_local = start_local.fromtimestamp(start_local.timestamp() + 86400, SHANGHAI)
+    return int(start_local.timestamp()), int(end_local.timestamp()), start_local.date().isoformat()
