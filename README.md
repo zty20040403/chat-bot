@@ -94,6 +94,40 @@ python bot.py
 127.0.0.1:8080
 ```
 
+## Nix 打包与 NixOS 服务
+
+仓库根目录的 `flake.nix` 会根据 `uv.lock` 构建固定版本的 Python 依赖和机器人源码：
+
+```bash
+nix build
+nix run
+```
+
+机器人仓库同时导出 `nixosModules.qq-deepseek-bot`。在另一份 NixOS flake 中引用：
+
+```nix
+inputs.qq-bot = {
+  url = "github:zty20040403/chat-bot";
+  inputs.nixpkgs.follows = "nixpkgs";
+};
+```
+
+把 `inputs.qq-bot.nixosModules.qq-deepseek-bot` 加入目标主机模块后即可配置：
+
+```nix
+services.qq-deepseek-bot = {
+  enable = true;
+  environmentFile = "/run/secrets/qq-deepseek-bot.env";
+  host = "172.17.0.1";
+  port = 18080;
+  browser.enable = true;
+};
+```
+
+API Key 只应放在服务器上的 `environmentFile`，不能直接写进 Nix 配置，否则会进入
+可被本机用户读取的 Nix store。Docker 沙箱和独立 NapCat 分别通过
+`sandbox.enable`、`napcat.enable` 开启。
+
 ## 连接 NapCatQQ
 
 在 NapCatQQ 里配置 OneBot V11 反向 WebSocket，连接到本机 NoneBot：

@@ -17,6 +17,9 @@ dependencies = [
   "Pygments>=2.18.0,<3.0.0",
 ]
 
+[tool.uv]
+package = false
+
 [tool.nonebot]
 plugins = ["src.plugins.ai_chat"]
 plugin_dirs = []
