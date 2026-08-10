@@ -8,8 +8,15 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Iterator, Literal
+
+from src.bot_storage import (
+    DatabaseSource,
+    PostgresDatabase,
+    StoreCursor,
+    StoreRow,
+    open_store_connection,
+)
 
 from .conversation_scope import ConversationScope
 from .message_ir import (
@@ -58,19 +65,13 @@ class CanonicalMessage:
 
 
 class MessageLedger:
-    def __init__(self, path: str | Path) -> None:
-        self.path = Path(path) if str(path) != ":memory:" else None
-        if self.path is not None:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self, path: DatabaseSource) -> None:
+        self._legacy_sqlite = not isinstance(path, PostgresDatabase)
+        self.path, self._connection = open_store_connection(path)
         self._lock = threading.RLock()
-        self._connection = sqlite3.connect(
-            str(path),
-            timeout=10.0,
-            check_same_thread=False,
-        )
-        self._connection.row_factory = sqlite3.Row
-        self._configure()
-        self._migrate()
+        if self._legacy_sqlite:
+            self._configure()
+            self._migrate()
 
     def close(self) -> None:
         with self._lock:
@@ -145,6 +146,11 @@ class MessageLedger:
         )
 
         with self._transaction() as cursor:
+            if not self._legacy_sqlite:
+                cursor.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext(?))",
+                    (f"ledger:{scope.key}",),
+                )
             conversation_id = self._ensure_conversation(cursor, scope)
             identity_platform = (identity_platform or scope.platform).strip()
             identity_id: int | None = None
@@ -824,7 +830,7 @@ class MessageLedger:
             )
 
     @contextmanager
-    def _transaction(self) -> Iterator[sqlite3.Cursor]:
+    def _transaction(self) -> Iterator[StoreCursor]:
         with self._lock:
             cursor = self._connection.cursor()
             try:
@@ -840,7 +846,7 @@ class MessageLedger:
 
     def _ensure_conversation(
         self,
-        cursor: sqlite3.Cursor,
+        cursor: StoreCursor,
         scope: ConversationScope,
     ) -> int:
         row = cursor.execute(
@@ -879,13 +885,18 @@ class MessageLedger:
 
     def _ensure_identity(
         self,
-        cursor: sqlite3.Cursor,
+        cursor: StoreCursor,
         platform: str,
         native_user_id: str,
         display: str,
         seen_at: int,
     ) -> tuple[int, int]:
         display = display.strip()
+        if not self._legacy_sqlite:
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(hashtext(?))",
+                (f"identity:{platform}:{native_user_id}",),
+            )
         row = cursor.execute(
             """
             SELECT identity_id, principal_id
@@ -951,7 +962,7 @@ class MessageLedger:
 
     def _resolve_mention(
         self,
-        cursor: sqlite3.Cursor,
+        cursor: StoreCursor,
         platform: str,
         native_user_id: str,
         display: str,
@@ -970,7 +981,7 @@ class MessageLedger:
 
     @staticmethod
     def _canonical_for_native(
-        cursor: sqlite3.Cursor,
+        cursor: StoreCursor,
         conversation_id: int,
         native_message_id: str | None,
     ) -> int | None:
@@ -987,9 +998,9 @@ class MessageLedger:
 
     @staticmethod
     def _message_row(
-        cursor: sqlite3.Cursor,
+        cursor: StoreCursor,
         canonical_message_id: int,
-    ) -> sqlite3.Row | None:
+    ) -> StoreRow | sqlite3.Row | None:
         return cursor.execute(
             """
             SELECT m.*, c.scope_key
@@ -1002,7 +1013,7 @@ class MessageLedger:
         ).fetchone()
 
     @staticmethod
-    def _row_to_message(row: sqlite3.Row) -> CanonicalMessage:
+    def _row_to_message(row: StoreRow | sqlite3.Row) -> CanonicalMessage:
         canonical_message_id = int(row["canonical_message_id"])
         body = body_from_json(str(row["body_json"]))
         return CanonicalMessage(

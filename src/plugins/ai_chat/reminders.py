@@ -5,8 +5,9 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Iterator, Literal
+
+from src.bot_storage import DatabaseSource, PostgresDatabase, open_store_connection
 
 from .conversation_scope import ConversationScope
 
@@ -38,20 +39,14 @@ class Reminder:
 
 
 class ReminderStore:
-    def __init__(self, path: str | Path, *, max_per_scope: int = 50) -> None:
-        self.path = Path(path) if str(path) != ":memory:" else None
-        if self.path is not None:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self, path: DatabaseSource, *, max_per_scope: int = 50) -> None:
+        self._legacy_sqlite = not isinstance(path, PostgresDatabase)
+        self.path, self._connection = open_store_connection(path)
         self.max_per_scope = max(int(max_per_scope), 1)
         self._lock = threading.RLock()
-        self._connection = sqlite3.connect(
-            str(path),
-            timeout=10.0,
-            check_same_thread=False,
-        )
-        self._connection.row_factory = sqlite3.Row
-        self._configure()
-        self._migrate()
+        if self._legacy_sqlite:
+            self._configure()
+            self._migrate()
 
     def close(self) -> None:
         with self._lock:
@@ -165,12 +160,14 @@ class ReminderStore:
                 """,
                 (timestamp,),
             )
+            lock_clause = "" if self._legacy_sqlite else "FOR UPDATE SKIP LOCKED"
             rows = cursor.execute(
-                """
+                f"""
                 SELECT * FROM reminders
                 WHERE status = 'pending' AND next_attempt_at <= ?
                 ORDER BY next_attempt_at ASC, reminder_id ASC
                 LIMIT ?
+                {lock_clause}
                 """,
                 (timestamp, bounded),
             ).fetchall()

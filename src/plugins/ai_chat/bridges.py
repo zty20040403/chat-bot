@@ -8,12 +8,12 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Iterator, Optional
 from urllib.parse import quote
 
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Query, Request
+from src.bot_storage import DatabaseSource, PostgresDatabase, open_store_connection
 
 from .conversation_scope import ConversationScope
 from .delivery import Delivery, DeliveryStore
@@ -245,22 +245,18 @@ class BridgeIngestResult:
 class MirrorStateStore:
     """Persistent transport evidence for bridge dedupe and native reply mapping."""
 
-    def __init__(self, path: str | Path) -> None:
-        self.path = Path(path) if str(path) != ":memory:" else None
-        if self.path is not None:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self, path: DatabaseSource) -> None:
+        self._legacy_sqlite = not isinstance(path, PostgresDatabase)
+        self.path, self._connection = open_store_connection(path)
         self._lock = threading.RLock()
-        self._connection = sqlite3.connect(
-            str(path), timeout=10.0, check_same_thread=False
-        )
-        self._connection.row_factory = sqlite3.Row
-        with self._lock:
-            self._connection.execute("PRAGMA foreign_keys = ON")
-            self._connection.execute("PRAGMA busy_timeout = 10000")
-            if self.path is not None:
-                self._connection.execute("PRAGMA journal_mode = WAL")
-            self._connection.execute("PRAGMA synchronous = FULL")
-        self._migrate()
+        if self._legacy_sqlite:
+            with self._lock:
+                self._connection.execute("PRAGMA foreign_keys = ON")
+                self._connection.execute("PRAGMA busy_timeout = 10000")
+                if self.path is not None:
+                    self._connection.execute("PRAGMA journal_mode = WAL")
+                self._connection.execute("PRAGMA synchronous = FULL")
+            self._migrate()
 
     def close(self) -> None:
         with self._lock:

@@ -76,7 +76,7 @@ AI_OUTBOX_ENABLED=true
 AI_STREAM_ENABLED=true
 ```
 
-outbox 状态保存在 `delivery_outbox.sqlite3`：
+outbox 状态保存在 PostgreSQL 的 `deliveries` 与 `delivery_attempts` 表：
 
 - `pending`：等待投递。
 - `sending`：已领取租约，正在请求平台。
@@ -132,7 +132,7 @@ docker run -d --name qqbot-pgvector \
 
 ```text
 AI_SEMANTIC_ENABLED=true
-AI_POSTGRES_DSN=postgresql://qqbot:强密码@127.0.0.1:5432/qqbot
+AI_POSTGRES_DSN=postgresql://qq_bot:强密码@100.64.0.4:5432/qq_bot
 AI_EMBEDDING_BASE_URL=https://api.openai.com/v1
 AI_EMBEDDING_API_KEY=你的 embedding key
 AI_EMBEDDING_MODEL=text-embedding-3-small
@@ -143,7 +143,7 @@ AI_SEMANTIC_BATCH_SIZE=32
 
 DeepSeek Chat API 本身不等于 embedding API，不能直接把聊天模型名填在这里。维度必须
 与 embedding 服务实际返回一致。向量表带 Scope、来源句柄和 HNSW cosine 索引；
-原始消息仍以 SQLite ledger 为准，删掉向量库后可以重新生成。
+原始消息以 PostgreSQL `messages` 账本为准，删掉向量表后可以重新生成。
 
 ## 6. Historian 与 Dream
 
@@ -250,8 +250,12 @@ POST http://机器人地址:8080/bot-bridge/bluebubbles?token=AI_IMESSAGE_WEBHOO
 
 ```bash
 python -m compileall -q src tests
-python -m unittest discover -s tests -v
+AI_ALLOW_LEGACY_SQLITE=true python -m unittest discover -s tests -v
 ```
+
+单元测试显式打开 legacy 模式，是因为它们会创建隔离的内存 SQLite 数据库；这不代表
+生产会回退 SQLite。真实 PostgreSQL 集成测试另设 `TEST_POSTGRES_DSN`，详见
+`tests/test_postgres_integration.py`。
 
 然后再启动 `python bot.py`，依次观察：OneBot 连接、outbox worker、可选 Matrix sync、
 semantic worker、Historian/Dream 日志。不要一次同时修改所有开关，否则某个外部服务

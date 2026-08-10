@@ -90,6 +90,15 @@ in {
       description = "Additional executables exposed to bot tools through PATH.";
     };
 
+    database.migrateOnStart = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Run Alembic before starting the bot. When disabled, startup only checks
+        that PostgreSQL is already at the revision required by this package.
+      '';
+    };
+
     sandbox.enable = lib.mkOption {
       type = lib.types.bool;
       default = false;
@@ -223,6 +232,11 @@ in {
           StateDirectory = cfg.stateDirectory;
           CacheDirectory = cfg.cacheDirectory;
           WorkingDirectory = "${cfg.package}/share/qq-deepseek-bot";
+          ExecStartPre = "${cfg.package}/bin/qq-deepseek-bot-db ${
+            if cfg.database.migrateOnStart
+            then "upgrade"
+            else "check"
+          }";
           ExecStart = lib.getExe cfg.package;
           Restart = "on-failure";
           RestartSec = 5;

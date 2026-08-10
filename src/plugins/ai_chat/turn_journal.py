@@ -10,8 +10,9 @@ import zlib
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Iterator, Literal
+
+from src.bot_storage import DatabaseSource, PostgresDatabase, open_store_connection
 
 from .conversation_scope import ConversationScope
 
@@ -90,29 +91,23 @@ class ReplayBundle:
 class TurnJournal:
     def __init__(
         self,
-        path: str | Path,
+        path: DatabaseSource,
         *,
         archive_ttl_days: int = 14,
         archive_max_per_scope: int = 50,
         archive_max_bytes: int = 512 * 1024,
         event_max_chars: int = 12000,
     ) -> None:
-        self.path = Path(path) if str(path) != ":memory:" else None
-        if self.path is not None:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._legacy_sqlite = not isinstance(path, PostgresDatabase)
+        self.path, self._connection = open_store_connection(path)
         self.archive_ttl_seconds = max(int(archive_ttl_days), 0) * 86400
         self.archive_max_per_scope = max(int(archive_max_per_scope), 0)
         self.archive_max_bytes = max(int(archive_max_bytes), 4096)
         self.event_max_chars = max(int(event_max_chars), 1000)
         self._lock = threading.RLock()
-        self._connection = sqlite3.connect(
-            str(path),
-            timeout=10.0,
-            check_same_thread=False,
-        )
-        self._connection.row_factory = sqlite3.Row
-        self._configure()
-        self._migrate()
+        if self._legacy_sqlite:
+            self._configure()
+            self._migrate()
         self.recovered_unknown_effects = self.mark_started_effects_unknown()
         self.recovered_crashed_turns = self.mark_running_turns_crashed()
 
@@ -135,6 +130,11 @@ class TurnJournal:
     ) -> TurnRecord:
         now = int(started_at or time.time())
         with self._transaction() as cursor:
+            if not self._legacy_sqlite:
+                cursor.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext(?))",
+                    (f"turn:{scope.key}",),
+                )
             self._ensure_visibility(cursor, scope.key)
             row = cursor.execute(
                 """

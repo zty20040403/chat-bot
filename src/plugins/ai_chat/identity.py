@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-import json
 import time
-from pathlib import Path
+
+from src.bot_storage import StateSource, open_json_state
 
 
 class GroupUserProfileStore:
-    def __init__(self, state_path: Path) -> None:
-        self._state_path = state_path
+    def __init__(self, state_path: StateSource) -> None:
+        self._state = open_json_state(state_path, "user_profiles")
         self._profiles = self._load()
 
     def observe(
@@ -83,12 +83,7 @@ class GroupUserProfileStore:
         return len(removed) if isinstance(removed, dict) else 0
 
     def _load(self) -> dict[str, dict[str, dict[str, object]]]:
-        if not self._state_path.exists():
-            return {}
-        try:
-            data = json.loads(self._state_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return {}
+        data = self._state.load()
         if not isinstance(data, dict):
             return {}
 
@@ -115,13 +110,4 @@ class GroupUserProfileStore:
         return profiles
 
     def _save(self) -> None:
-        try:
-            self._state_path.parent.mkdir(parents=True, exist_ok=True)
-            temporary_path = self._state_path.with_suffix(".tmp")
-            temporary_path.write_text(
-                json.dumps(self._profiles, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            temporary_path.replace(self._state_path)
-        except OSError:
-            return
+        self._state.save(self._profiles)

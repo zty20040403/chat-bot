@@ -38,7 +38,7 @@ iMessage ────┘
 `__init__.py` 当前保留一组指向 `AppContext` 的兼容别名，使现有 Handler 和测试不必
 在一次改动里全部重写。资源所有权仍只有 `AppContext` 一份；NoneBot shutdown 最终只
 调用 `AppContext.shutdown()`，由它先停止后台任务和 AI turn，再按顺序关闭异步客户端
-与 SQLite 连接。后续拆分 Handler 时应显式接收 `AppContext` 或所需的最小服务，不能
+与 PostgreSQL 连接池。后续拆分 Handler 时应显式接收 `AppContext` 或所需的最小服务，不能
 重新依赖模块导入副作用。
 
 `model_catalog.py` 把每个 profile 的 provider、协议、endpoint、密钥来源、真实模型、
@@ -47,14 +47,14 @@ iMessage ────┘
 输出统一的内部消息和 tool call 形状，因此工具策略不需要知道供应商。历史文件名
 `deepseek.py` 暂时保留兼容导入，但其中 Agent loop 已由 ModelProfile 驱动。
 
-这个边界也是后续 PostgreSQL repository 和独立 worker 进程的迁移点：上层业务只依赖
-服务能力，构造方式和部署拓扑可以逐步替换。
+这个边界也允许后续拆出独立 worker 进程：上层业务只依赖服务能力，构造方式和部署
+拓扑可以逐步替换。
 
 ## ADR 001：上下文与记忆
 
 `ledger.py` 是事实层。OneBot 原生消息 ID 只用于幂等去重；第一次写入后，消息体、
 作者、时间和原始事件不再被重复事件覆盖。程序读取时从 `body_json` 的 Message IR
-重新生成提示文本，`rendered_text` 只是可重建的 SQLite 搜索缓存。
+重新生成提示文本，`rendered_text` 只是可重建的 PostgreSQL 搜索缓存。
 
 `context_store.py` 是投影层。它按当前会话的 token 水位，从最旧的未处理消息开始
 发布连续 compartment。每段保存确切 `msg#` 列表、起止范围、源 SHA-256、三档
@@ -71,7 +71,7 @@ iMessage ────┘
 变化就放弃。Dream 只对长期记忆执行带 `expected_version` 的更新或删除。
 
 `semantic_recall.py` 把消息、episode 和记忆送到可选 embedding provider，并写入
-PostgreSQL/pgvector HNSW 索引。向量仅用于混合召回，SQLite 原文仍是事实源。
+同一 PostgreSQL 中的 pgvector HNSW 索引。向量仅用于混合召回，`messages` 原文表仍是事实源。
 
 ## ADR 002：工具执行内核的基础层
 
@@ -141,22 +141,20 @@ turn 成功、确实调用过工具、trace 未过期、模型/提示词/工具�
 不满足条件时自动使用确定性 digest。digest 和规范 journal 是长期事实；压缩 trace
 只是 14 天 TTL、每 Scope 50 份的可丢弃缓存。纯聊天回合不建立原样工作回放面。
 
-## 本地存储
+## 持久存储
 
-默认都在 `src/plugins/ai_chat/assets/`，也可通过 `AI_STATE_DIR` 改目录：
+业务状态统一位于 PostgreSQL 的 `qq_bot` schema：
 
 ```text
-bot_state.sqlite3       原始规范消息、会话、principal、identity
-context_store.sqlite3   compartment 和覆盖 cursor
-turn_journal.sqlite3    turn、规范事件、fork 边、digest、trace cache
-long_term_memory.json   长期记忆和 mutation 审计
-delivery_outbox.sqlite3 投递、租约、尝试和结果状态
-bridge_state.sqlite3    平台来源、原生副本映射和同步 cursor
-usage.sqlite3           token 用量与 Scope 配额覆盖
-semantic_index_state.sqlite3 语义派生数据的本地 checkpoint
-maintenance_state.sqlite3    Historian/Dream 最近成功周期
-browser_profiles/       按发起者哈希隔离的 Playwright 持久 profile
+messages / conversations / principals  原始规范消息、会话和身份
+context_*                              compartment 和覆盖 cursor
+agent_turns / turn_*                   turn、效果事件、fork、digest、trace
+deliveries / delivery_attempts         投递、租约、尝试和结果状态
+bridge_*                               平台来源、原生副本映射和同步 cursor
+usage_events / quota_overrides         token 用量与 Scope 配额覆盖
+semantic_documents                    pgvector 语义派生索引
+state_blobs                            长期记忆、模型选择等小型状态
 ```
 
-PostgreSQL 中的 `semantic_documents` 只保存可重建向量投影。这些本地运行状态已被
-`.gitignore` 排除，不应提交到 GitHub。
+`AI_STATE_DIR/browser_profiles`、沙盒目录和缓存仍在 h610 本地，但不是权威业务数据。
+旧 `.sqlite3`/JSON 文件只允许迁移程序读取，详见 `postgresql-migration.md`。

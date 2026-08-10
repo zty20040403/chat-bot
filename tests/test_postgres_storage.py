@@ -1,0 +1,130 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from src.bot_storage.database import (
+    StoreRow,
+    _convert_qmark_placeholders,
+    _translate_sql,
+)
+from src.bot_storage.legacy_migration import capture_legacy_snapshot
+from src.plugins.ai_chat.semantic_recall import SemanticDocument, _document_key
+
+
+class PostgresCompatibilityTests(unittest.TestCase):
+    def test_rows_support_numeric_and_named_access(self) -> None:
+        row = StoreRow(("message_id", "body"), (7, "hello"))
+        self.assertEqual(row[0], 7)
+        self.assertEqual(row["message_id"], 7)
+        self.assertEqual(dict(row), {"message_id": 7, "body": "hello"})
+
+    def test_qmark_translation_ignores_quoted_question_marks(self) -> None:
+        query = "SELECT '?', \"?\" FROM messages WHERE id = ? AND body = ?"
+        self.assertEqual(
+            _convert_qmark_placeholders(query),
+            "SELECT '?', \"?\" FROM messages WHERE id = %s AND body = %s",
+        )
+
+    def test_insert_translation_returns_identity_and_maps_ignore(self) -> None:
+        query, identity = _translate_sql(
+            "INSERT INTO messages(body_json) VALUES (?)"
+        )
+        self.assertEqual(identity, "canonical_message_id")
+        self.assertTrue(query.endswith('RETURNING "canonical_message_id"'))
+
+        ignored, identity = _translate_sql(
+            "INSERT OR IGNORE INTO context_state(scope_key) VALUES (?)"
+        )
+        self.assertIsNone(identity)
+        self.assertIn("ON CONFLICT DO NOTHING", ignored)
+
+
+class LegacySnapshotTests(unittest.TestCase):
+    def test_snapshot_has_stable_row_and_json_digests(self) -> None:
+        with TemporaryDirectory() as temporary:
+            state_dir = Path(temporary)
+            connection = sqlite3.connect(state_dir / "bot_state.sqlite3")
+            connection.execute(
+                """
+                CREATE TABLE conversations (
+                    conversation_id INTEGER PRIMARY KEY,
+                    scope_key TEXT NOT NULL,
+                    platform TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    native_conversation_id TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                "INSERT INTO conversations VALUES (1, 'scope', 'onebot-v11', "
+                "'group', '42', 10, 11)"
+            )
+            connection.commit()
+            connection.close()
+            (state_dir / "model_preferences.json").write_text(
+                json.dumps({"scope": "deepseek"}),
+                encoding="utf-8",
+            )
+
+            first = capture_legacy_snapshot(state_dir)
+            second = capture_legacy_snapshot(state_dir)
+
+            self.assertEqual(first.fingerprint, second.fingerprint)
+            self.assertEqual(first.row_count, 1)
+            self.assertEqual(
+                first.json_states,
+                {"model_preferences": {"scope": "deepseek"}},
+            )
+
+    def test_invalid_json_fails_before_any_database_write(self) -> None:
+        with TemporaryDirectory() as temporary:
+            state_dir = Path(temporary)
+            (state_dir / "long_term_memory.json").write_text(
+                "{broken",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(RuntimeError, "legacy JSON is invalid"):
+                capture_legacy_snapshot(state_dir)
+
+    def test_legacy_semantic_keys_are_normalized_for_postgres(self) -> None:
+        document = SemanticDocument("scope", "message", "msg#1", "body", {})
+        with TemporaryDirectory() as temporary:
+            state_dir = Path(temporary)
+            connection = sqlite3.connect(
+                state_dir / "semantic_index_state.sqlite3"
+            )
+            connection.execute(
+                """
+                CREATE TABLE semantic_index_state (
+                    source_key TEXT PRIMARY KEY,
+                    content_hash TEXT NOT NULL,
+                    indexed_at INTEGER NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                "INSERT INTO semantic_index_state VALUES (?, 'hash', 10)",
+                ("scope\0message\0msg#1",),
+            )
+            connection.commit()
+            connection.close()
+
+            snapshot = capture_legacy_snapshot(state_dir)
+            table = next(
+                item
+                for item in snapshot.tables
+                if item.spec.table == "semantic_index_state"
+            )
+
+            self.assertEqual(table.rows[0][0], _document_key(document))
+            self.assertNotIn("\0", str(table.rows[0][0]))
+
+
+if __name__ == "__main__":
+    unittest.main()

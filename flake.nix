@@ -48,12 +48,21 @@
       root = ./.;
       fileset = lib.fileset.unions [
         ./bot.py
+        ./alembic.ini
         ./pyproject.toml
+        ./requirements.txt
         ./uv.lock
         ./README.md
         ./THIRD_PARTY_NOTICES.md
         (lib.fileset.fileFilter (file: file.hasExt "md" || file.hasExt "html") ./docs)
         (lib.fileset.fileFilter (file: file.hasExt "md") ./skills)
+        (lib.fileset.fileFilter (
+            file:
+              file.hasExt "py"
+              || file.hasExt "mako"
+              || file.hasExt "md"
+          )
+          ./migrations)
         (lib.fileset.fileFilter (file: file.hasExt "py") ./tests)
         (lib.fileset.fileFilter (file: file.hasExt "js") ./tools)
         (lib.fileset.fileFilter (
@@ -106,6 +115,11 @@
             --run 'export AI_STATE_DIR="''${AI_STATE_DIR:-$state_home/qq-deepseek-bot}"' \
             --run 'export AI_CACHE_DIR="''${AI_CACHE_DIR:-$cache_home/qq-deepseek-bot}"' \
             --run '${pkgs.coreutils}/bin/mkdir -p "$AI_STATE_DIR" "$AI_CACHE_DIR"'
+          makeWrapper ${virtualenv}/bin/python "$out/bin/qq-deepseek-bot-db" \
+            --add-flags "-m src.bot_storage.cli" \
+            --chdir "$out/share/qq-deepseek-bot" \
+            --set PYTHONDONTWRITEBYTECODE 1 \
+            --set PYTHONUNBUFFERED 1
 
           runHook postInstall
         '';
@@ -139,7 +153,7 @@
       inherit package;
       imports = pkgs.runCommand "qq-deepseek-bot-import-check" {} ''
         cd ${package}/share/qq-deepseek-bot
-        ${virtualenv}/bin/python -c 'import edge_tts, httpx, miniaudio, nonebot, openai, playwright, psycopg, pygments, pysilk'
+        ${virtualenv}/bin/python -c 'import alembic, edge_tts, httpx, miniaudio, nonebot, openai, playwright, psycopg, psycopg_pool, pygments, pysilk, sqlalchemy'
         ${virtualenv}/bin/python -c 'import ast, pathlib; [ast.parse(path.read_text(encoding="utf-8"), filename=str(path)) for path in pathlib.Path("src").rglob("*.py")]'
         touch "$out"
       '';

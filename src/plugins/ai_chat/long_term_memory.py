@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import json
 import time
 from dataclasses import asdict, dataclass
-from pathlib import Path
 from typing import Any, Iterable, Literal
+
+from src.bot_storage import StateSource, open_json_state
 
 
 class LongTermMemoryError(ValueError):
@@ -46,12 +46,12 @@ class MemoryMutation:
 class LongTermMemoryStore:
     def __init__(
         self,
-        state_path: Path,
+        state_path: StateSource,
         *,
         max_entries_per_scope: int = 30,
         max_content_chars: int = 300,
     ) -> None:
-        self._state_path = state_path
+        self._state = open_json_state(state_path, "long_term_memory")
         self._max_entries_per_scope = max(max_entries_per_scope, 1)
         self._max_content_chars = max(max_content_chars, 20)
         self._next_id = 1
@@ -340,12 +340,7 @@ class LongTermMemoryStore:
             )
 
     def _load(self) -> None:
-        if not self._state_path.exists():
-            return
-        try:
-            payload = json.loads(self._state_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return
+        payload = self._state.load()
         if not isinstance(payload, dict):
             return
 
@@ -512,15 +507,4 @@ class LongTermMemoryStore:
             "entries": [asdict(entry) for entry in self._entries],
             "mutations": [asdict(mutation) for mutation in self._mutations],
         }
-        try:
-            self._state_path.parent.mkdir(parents=True, exist_ok=True)
-            temporary_path = self._state_path.with_suffix(
-                self._state_path.suffix + ".tmp"
-            )
-            temporary_path.write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            temporary_path.replace(self._state_path)
-        except OSError:
-            return
+        self._state.save(payload)

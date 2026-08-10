@@ -5,15 +5,16 @@ import hashlib
 import importlib
 import json
 import math
+import re
 import sqlite3
 import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Iterator, Protocol, Sequence
 
 import httpx
+from src.bot_storage import DatabaseSource, PostgresDatabase, open_store_connection
 
 
 @dataclass(frozen=True)
@@ -134,9 +135,18 @@ class EmbeddingClient:
 class PgVectorBackend:
     """Small psycopg-backed vector index, loaded only when configured."""
 
-    def __init__(self, dsn: str, *, dimensions: int) -> None:
+    def __init__(
+        self,
+        dsn: str,
+        *,
+        dimensions: int,
+        schema: str = "qq_bot",
+    ) -> None:
         self.dsn = dsn.strip()
         self.dimensions = max(int(dimensions), 1)
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", schema):
+            raise ValueError("invalid PostgreSQL schema name")
+        self.schema = schema
         self._lock = threading.RLock()
         self._initialized = False
 
@@ -277,39 +287,32 @@ class PgVectorBackend:
                 return
             with self._connect() as connection:
                 with connection.cursor() as cursor:
-                    cursor.execute("CREATE EXTENSION IF NOT EXISTS vector")
                     cursor.execute(
-                        f"""
-                        CREATE TABLE IF NOT EXISTS semantic_documents (
-                            document_id BIGSERIAL PRIMARY KEY,
-                            scope_key TEXT NOT NULL,
-                            source_type TEXT NOT NULL,
-                            source_handle TEXT NOT NULL,
-                            content TEXT NOT NULL,
-                            content_hash TEXT NOT NULL,
-                            metadata_json JSONB NOT NULL DEFAULT '{{}}'::jsonb,
-                            embedding_model TEXT NOT NULL,
-                            embedding vector({self.dimensions}) NOT NULL,
-                            created_at BIGINT NOT NULL,
-                            updated_at BIGINT NOT NULL,
-                            UNIQUE(scope_key, source_type, source_handle)
+                        """
+                        SELECT format_type(attribute.atttypid, attribute.atttypmod)
+                        FROM pg_attribute AS attribute
+                        JOIN pg_class AS relation
+                          ON relation.oid = attribute.attrelid
+                        JOIN pg_namespace AS namespace
+                          ON namespace.oid = relation.relnamespace
+                        WHERE namespace.nspname = %s
+                          AND relation.relname = 'semantic_documents'
+                          AND attribute.attname = 'embedding'
+                        """
+                        ,
+                        (self.schema,),
+                    )
+                    row = cursor.fetchone()
+                    expected = f"vector({self.dimensions})"
+                    if row is None:
+                        raise RuntimeError(
+                            "semantic_documents is missing; run Alembic upgrade"
                         )
-                        """
-                    )
-                    cursor.execute(
-                        """
-                        CREATE INDEX IF NOT EXISTS idx_semantic_scope_type
-                        ON semantic_documents(scope_key, source_type, updated_at DESC)
-                        """
-                    )
-                    cursor.execute(
-                        """
-                        CREATE INDEX IF NOT EXISTS idx_semantic_embedding_hnsw
-                        ON semantic_documents
-                        USING hnsw (embedding vector_cosine_ops)
-                        """
-                    )
-                connection.commit()
+                    if str(row[0]) != expected:
+                        raise RuntimeError(
+                            "embedding dimensions do not match PostgreSQL schema: "
+                            f"expected {expected}, got {row[0]}"
+                        )
             self._initialized = True
 
     def _connect(self) -> Any:
@@ -322,7 +325,13 @@ class PgVectorBackend:
                 "PostgreSQL semantic recall requires psycopg; "
                 "run pip install -r requirements.txt"
             ) from exc
-        return psycopg.connect(self.dsn, connect_timeout=10)
+        connection = psycopg.connect(self.dsn, connect_timeout=10)
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f'SET search_path TO "{self.schema}", public'
+            )
+        connection.commit()
+        return connection
 
 
 class SemanticRecallService:
@@ -395,25 +404,21 @@ class SemanticRecallService:
 class SemanticIndexState:
     """Local checkpoint for derived vectors; source data remains authoritative."""
 
-    def __init__(self, path: str | Path) -> None:
-        self.path = Path(path) if str(path) != ":memory:" else None
-        if self.path is not None:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self, path: DatabaseSource) -> None:
+        self._legacy_sqlite = not isinstance(path, PostgresDatabase)
+        self.path, self._connection = open_store_connection(path)
         self._lock = threading.RLock()
-        self._connection = sqlite3.connect(
-            str(path), timeout=10.0, check_same_thread=False
-        )
-        self._connection.row_factory = sqlite3.Row
-        with self._transaction() as cursor:
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS semantic_index_state (
-                    source_key TEXT PRIMARY KEY,
-                    content_hash TEXT NOT NULL,
-                    indexed_at INTEGER NOT NULL
+        if self._legacy_sqlite:
+            with self._transaction() as cursor:
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS semantic_index_state (
+                        source_key TEXT PRIMARY KEY,
+                        content_hash TEXT NOT NULL,
+                        indexed_at INTEGER NOT NULL
+                    )
+                    """
                 )
-                """
-            )
 
     def close(self) -> None:
         with self._lock:
@@ -488,6 +493,8 @@ def _vector_literal(vector: Sequence[float]) -> str:
 
 
 def _document_key(document: SemanticDocument) -> str:
-    return "\0".join(
-        (document.scope_key, document.source_type, document.source_handle)
+    return json.dumps(
+        [document.scope_key, document.source_type, document.source_handle],
+        ensure_ascii=False,
+        separators=(",", ":"),
     )

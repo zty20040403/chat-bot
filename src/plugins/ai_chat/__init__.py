@@ -11,6 +11,7 @@ from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
 
 import httpx
+from src.bot_storage import DatabaseError
 
 from nonebot import (
     get_app,
@@ -327,7 +328,13 @@ def _current_group_context(
                     materialize=(historian_service is None),
                 )
                 recent_messages = projection.text
-            except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+            except (
+                OSError,
+                RuntimeError,
+                ValueError,
+                sqlite3.Error,
+                DatabaseError,
+            ) as exc:
                 logger.warning(f"Context projection failed softly: {exc}")
                 recent_messages = message_ledger.render_recent(
                     scope,
@@ -1187,7 +1194,7 @@ async def _ask_ai(
                 prompt_version=TURN_PROMPT_VERSION,
                 tool_catalog_version=current_tool_catalog_version,
             )
-        except (OSError, RuntimeError, sqlite3.Error) as exc:
+        except (OSError, RuntimeError, sqlite3.Error, DatabaseError) as exc:
             logger.warning(f"Could not update the turn environment: {exc}")
         if settings.turn_replay_enabled:
             parent_turn = turn_journal.fork_parent(
@@ -2007,6 +2014,7 @@ async def _ask_ai(
                         OSError,
                         ValueError,
                         sqlite3.Error,
+                        DatabaseError,
                     ) as exc:
                         logger.warning(
                             "Could not canonicalize the replied message: "
@@ -2137,7 +2145,13 @@ def _finish_turn_record(
                 output_tokens=trace.output_tokens if trace is not None else 0,
                 total_tokens=trace.total_tokens if trace is not None else 0,
             )
-        except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+        except (
+            OSError,
+            RuntimeError,
+            ValueError,
+            sqlite3.Error,
+            DatabaseError,
+        ) as exc:
             logger.warning(f"Could not finish durable turn {turn_id}: {exc}")
     if (
         usage_store is not None
@@ -2155,7 +2169,13 @@ def _finish_turn_record(
                 output_tokens=trace.output_tokens,
                 turn_id=turn_id,
             )
-        except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+        except (
+            OSError,
+            RuntimeError,
+            ValueError,
+            sqlite3.Error,
+            DatabaseError,
+        ) as exc:
             logger.warning(f"Could not record model usage: {exc}")
 
 
@@ -2235,7 +2255,13 @@ async def _run_tracked_ai(
                     scope=scope,
                 )
                 trigger_message_id = stored_trigger.canonical_message_id
-            except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+            except (
+                OSError,
+                RuntimeError,
+                ValueError,
+                sqlite3.Error,
+                DatabaseError,
+            ) as exc:
                 logger.warning(f"Could not journal the turn trigger: {exc}")
         try:
             turn = turn_journal.start_turn(
@@ -2260,7 +2286,13 @@ async def _run_tracked_ai(
                 "turn_context",
                 _current_turn_context(event, journal_turn_id),
             )
-        except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+        except (
+            OSError,
+            RuntimeError,
+            ValueError,
+            sqlite3.Error,
+            DatabaseError,
+        ) as exc:
             logger.warning(f"Could not start the durable AI turn: {exc}")
     if isinstance(stream_context, dict):
         stream_context["turn_id"] = journal_turn_id
@@ -4060,7 +4092,7 @@ async def handle_max_style_command(bot: Bot, event: MessageEvent) -> None:
             _reply_message(
                 event,
                 f"qq-deepseek-bot {BOT_VERSION} · NoneBot2 / OneBot V11 · "
-                "canonical IR + SQLite ledger + durable turn journal",
+                "canonical IR + PostgreSQL ledger + durable turn journal",
             ),
         )
 
@@ -4244,7 +4276,13 @@ async def handle_canonical_ingest(event: MessageEvent) -> None:
                     str(event.message_id),
                     confirmed_at=int(event.time),
                 )
-        except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+        except (
+            OSError,
+            RuntimeError,
+            ValueError,
+            sqlite3.Error,
+            DatabaseError,
+        ) as exc:
             logger.warning(f"Outbound echo reconciliation failed: {exc}")
     if message_ledger is None:
         return
@@ -4298,7 +4336,13 @@ async def handle_canonical_ingest(event: MessageEvent) -> None:
                 occurred_at=int(event.time),
                 reply_to_native_message_id=decoded.reply_to_native_message_id,
             )
-    except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+    except (
+        OSError,
+        RuntimeError,
+        ValueError,
+        sqlite3.Error,
+        DatabaseError,
+    ) as exc:
         logger.warning(f"Canonical message ingest failed: {exc}")
 
 

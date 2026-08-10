@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import json
 import random
 import re
 import time
 from collections import defaultdict
 from collections.abc import Callable
-from pathlib import Path
+
+from src.bot_storage import StateSource, open_json_state
 
 
 class ProactiveChatScheduler:
@@ -60,12 +60,12 @@ class IdleWarmupScheduler:
         idle_seconds: int,
         cooldown_seconds: int,
         daily_limit: int,
-        state_path: Path | None = None,
+        state_path: StateSource = None,
     ) -> None:
         self._idle_seconds = max(1, idle_seconds)
         self._cooldown_seconds = max(0, cooldown_seconds)
         self._daily_limit = max(0, daily_limit)
-        self._state_path = state_path
+        self._state = open_json_state(state_path, "warmup_state")
         self._last_human_activity: dict[int, float] = {}
         self._last_warmup_at: dict[int, float] = {}
         self._daily_counts = self._load_daily_counts()
@@ -120,13 +120,7 @@ class IdleWarmupScheduler:
         self._save_daily_counts()
 
     def _load_daily_counts(self) -> dict[int, tuple[str, int]]:
-        if self._state_path is None or not self._state_path.exists():
-            return {}
-
-        try:
-            raw = json.loads(self._state_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return {}
+        raw = self._state.load()
 
         if not isinstance(raw, dict):
             return {}
@@ -145,23 +139,11 @@ class IdleWarmupScheduler:
         return counts
 
     def _save_daily_counts(self) -> None:
-        if self._state_path is None:
-            return
-
         data = {
             str(group_id): {"day": day, "count": count}
             for group_id, (day, count) in self._daily_counts.items()
         }
-        try:
-            self._state_path.parent.mkdir(parents=True, exist_ok=True)
-            temporary_path = self._state_path.with_suffix(".tmp")
-            temporary_path.write_text(
-                json.dumps(data, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            temporary_path.replace(self._state_path)
-        except OSError:
-            return
+        self._state.save(data)
 
 
 def _is_candidate_message(text: str) -> bool:

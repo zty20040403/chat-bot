@@ -6,8 +6,9 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Iterator, Literal
+
+from src.bot_storage import DatabaseSource, PostgresDatabase, open_store_connection
 
 from .conversation_scope import ConversationScope
 from .message_ir import MessageBody, body_from_json, body_to_json, render_fallback_text
@@ -69,25 +70,19 @@ class DeliveryStore:
 
     def __init__(
         self,
-        path: str | Path,
+        path: DatabaseSource,
         *,
         max_attempts: int = 5,
         lease_seconds: int = 90,
     ) -> None:
-        self.path = Path(path) if str(path) != ":memory:" else None
-        if self.path is not None:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._legacy_sqlite = not isinstance(path, PostgresDatabase)
+        self.path, self._connection = open_store_connection(path)
         self.max_attempts = min(max(int(max_attempts), 1), 50)
         self.lease_seconds = max(int(lease_seconds), 10)
         self._lock = threading.RLock()
-        self._connection = sqlite3.connect(
-            str(path),
-            timeout=10.0,
-            check_same_thread=False,
-        )
-        self._connection.row_factory = sqlite3.Row
-        self._configure()
-        self._migrate()
+        if self._legacy_sqlite:
+            self._configure()
+            self._migrate()
         self.recovered_ambiguous = self.park_interrupted_attempts()
 
     def close(self) -> None:
@@ -203,17 +198,19 @@ class DeliveryStore:
         timestamp = int(time.time() if now is None else now)
         bounded = min(max(int(limit), 1), 100)
         with self._transaction() as cursor:
+            lock_clause = "" if self._legacy_sqlite else "FOR UPDATE SKIP LOCKED"
             rows = cursor.execute(
-                """
+                f"""
                 SELECT * FROM deliveries
                 WHERE status = 'pending' AND next_attempt_at <= ?
                   AND attempts < ?
                 ORDER BY next_attempt_at ASC, delivery_id ASC
                 LIMIT ?
+                {lock_clause}
                 """,
                 (timestamp, self.max_attempts, bounded),
             ).fetchall()
-            claimed: list[sqlite3.Row] = []
+            claimed = []
             for row in rows:
                 delivery_id = int(row["delivery_id"])
                 attempt = int(row["attempts"]) + 1

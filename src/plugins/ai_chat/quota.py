@@ -6,9 +6,10 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import Iterator
 from zoneinfo import ZoneInfo
+
+from src.bot_storage import DatabaseSource, PostgresDatabase, open_store_connection
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -40,27 +41,21 @@ class QuotaStatus:
 class UsageStore:
     def __init__(
         self,
-        path: str | Path,
+        path: DatabaseSource,
         *,
         daily_call_limit: int = 0,
         daily_input_token_limit: int = 0,
         daily_output_token_limit: int = 0,
     ) -> None:
-        self.path = Path(path) if str(path) != ":memory:" else None
-        if self.path is not None:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._legacy_sqlite = not isinstance(path, PostgresDatabase)
+        self.path, self._connection = open_store_connection(path)
         self.daily_call_limit = max(int(daily_call_limit), 0)
         self.daily_input_token_limit = max(int(daily_input_token_limit), 0)
         self.daily_output_token_limit = max(int(daily_output_token_limit), 0)
         self._lock = threading.RLock()
-        self._connection = sqlite3.connect(
-            str(path),
-            timeout=10.0,
-            check_same_thread=False,
-        )
-        self._connection.row_factory = sqlite3.Row
-        self._configure()
-        self._migrate()
+        if self._legacy_sqlite:
+            self._configure()
+            self._migrate()
 
     def close(self) -> None:
         with self._lock:

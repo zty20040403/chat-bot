@@ -151,15 +151,17 @@ ws://127.0.0.1:8080/onebot/v11/ws
 启用方法及 PostgreSQL、Matrix、iMessage 等可选基础设施见
 [`docs/operations-v3.md`](docs/operations-v3.md)。
 机器人会引用触发它的原消息。QQ 消息进入机器人后，会先转换成统一的
-Message IR，再存入本地 SQLite 规范消息账本。模型在群聊上下文和消息工具里
+Message IR，再存入 PostgreSQL 规范消息账本。模型在群聊上下文和消息工具里
 只看到 `msg#12`、`@#3` 这类机器人内部句柄；原始群号、QQ 号和 NapCat
 消息 ID 只留在本地适配层，不直接交给模型，也不会提交到 Git 仓库。
 群聊累计一定数量的普通消息后，机器人会低概率参考上下文主动接一句。
 群成员连续 30 分钟没有发言时，机器人会主动暖场；每个群每天最多暖场 2 次，
 凌晨 1 点到 8 点保持安静。
-会话历史和最近群聊会写入 `AI_STATE_DIR`。规范消息位于
-`bot_state.sqlite3`，并使用 WAL 和按会话可见性边界；同一个 OneBot 消息重复
-到达只会命中原记录，不会覆盖原文。较旧聊天按 token 水位压成带精确来源范围、
+消息、上下文、长期记忆、提醒、配额和工具执行记录统一写入 PostgreSQL；
+`AI_STATE_DIR` 只保留浏览器 profile 等主机本地状态。生产启动必须配置
+`AI_POSTGRES_DSN`，不会自动退回 SQLite。旧 SQLite/JSON 数据只由一次性迁移工具
+读取，步骤见 [`docs/postgresql-migration.md`](docs/postgresql-migration.md)。同一个
+OneBot 消息重复到达只会命中原记录，不会覆盖原文。较旧聊天按 token 水位压成带精确来源范围、
 源哈希和 `episode#` 句柄的 P1/P2/P3 分段，最近消息保留为原文尾部。摘要只是可
 重建投影，原始 Message IR 才是事实来源。投影失败时会退回有界原始消息，不会
 推进覆盖游标。群聊、私聊和用户长期记忆严格按 `ConversationScope` 隔离。
@@ -204,7 +206,7 @@ Message IR，再存入本地 SQLite 规范消息账本。模型在群聊上下�
 
 每个 AI 请求现在都会留下一个当前会话内可见的回合编号，例如
 `t#3`。机器人会把模型说明、工具开始、成功、失败或已实际发送等事件写入
-`turn_journal.sqlite3`，而不是只保留最后一句回答。普通闲聊仍会记录为回合，
+PostgreSQL 的 `agent_turns` 与 `turn_journal_events`，而不是只保留最后一句回答。普通闲聊仍会记录为回合，
 但不会挤进提供给模型的 recent turns 工作摘要。
 
 你可以自然地说：
@@ -228,7 +230,7 @@ Message IR，再存入本地 SQLite 规范消息账本。模型在群聊上下�
 为了排查中断，模型和工具之间的短期 trace 默认压缩保留 14 天，每个会话最多
 50 份；检测到密码、Token、API Key 或验证码的 trace 不会归档。`/ai_reset`
 和 `/clear` 会立刻移动当前会话的可见性边界，让旧 `t#` 不再进入模型上下文。
-底层审计行仍保留在本机 SQLite 中，不会上传 Git。机器人启动时会把没有完成行
+底层审计行保留在 Tank 的 PostgreSQL 中，不会上传 Git。机器人启动时会把没有完成行
 的 `started` 工具效果标记为 `outcome-unknown`，并把未结束回合标为异常中断，
 避免把“可能已经执行过”误当成“肯定没执行”。最终 QQ 回复也按发送尝试记录
 `started`、`committed`、`failed` 或 `outcome-unknown`；NapCat 超时不会被伪装成
@@ -501,6 +503,12 @@ AI_QUOTA_ENABLED=true
 AI_QUOTA_DAILY_CALLS=0
 AI_QUOTA_DAILY_INPUT_TOKENS=0
 AI_QUOTA_DAILY_OUTPUT_TOKENS=0
+AI_POSTGRES_DSN=postgresql://qq_bot:强密码@100.64.0.4:5432/qq_bot
+AI_POSTGRES_SCHEMA=qq_bot
+AI_POSTGRES_POOL_MIN_SIZE=1
+AI_POSTGRES_POOL_MAX_SIZE=10
+AI_POSTGRES_POOL_TIMEOUT_SECONDS=10
+AI_ALLOW_LEGACY_SQLITE=false
 AI_RICH_RENDER_ENABLED=true
 AI_BROWSER_ENABLED=false
 AI_SEMANTIC_ENABLED=false
@@ -527,8 +535,8 @@ AI_ENABLED_GROUPS=123456789,987654321
 ## 五份 ADR 的落地范围
 
 本项目参考了 [HCHogan/max 的 ADR](https://github.com/HCHogan/max/tree/main/docs/adr)
-（MIT），但继续使用 NoneBot2、OneBot V11 和独立 LLM Gateway；SQLite 保存规范事实，
-PostgreSQL/pgvector 仅作为可选的语义派生索引：
+（MIT），但继续使用 NoneBot2、OneBot V11 和独立 LLM Gateway；PostgreSQL 保存规范事实，
+pgvector 在同一数据库内保存可重建的语义派生索引：
 
 | ADR | 本项目中的对应实现 |
 | --- | --- |

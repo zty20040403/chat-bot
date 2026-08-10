@@ -10,8 +10,9 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import Iterator
+
+from src.bot_storage import DatabaseSource, PostgresDatabase, open_store_connection
 
 from .conversation_scope import ConversationScope
 from .ledger import CanonicalMessage, MessageLedger
@@ -62,7 +63,7 @@ class ContextStore:
 
     def __init__(
         self,
-        path: str | Path,
+        path: DatabaseSource,
         *,
         input_budget_tokens: int = 6000,
         high_watermark_tokens: int = 4500,
@@ -71,9 +72,8 @@ class ContextStore:
         raw_tail_min_messages: int = 8,
         max_compartments: int = 12,
     ) -> None:
-        self.path = Path(path) if str(path) != ":memory:" else None
-        if self.path is not None:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._legacy_sqlite = not isinstance(path, PostgresDatabase)
+        self.path, self._connection = open_store_connection(path)
         self.input_budget_tokens = max(int(input_budget_tokens), 1000)
         self.high_watermark_tokens = min(
             max(int(high_watermark_tokens), 500),
@@ -90,14 +90,9 @@ class ContextStore:
         self.raw_tail_min_messages = max(int(raw_tail_min_messages), 1)
         self.max_compartments = min(max(int(max_compartments), 1), 50)
         self._lock = threading.RLock()
-        self._connection = sqlite3.connect(
-            str(path),
-            timeout=10.0,
-            check_same_thread=False,
-        )
-        self._connection.row_factory = sqlite3.Row
-        self._configure()
-        self._migrate()
+        if self._legacy_sqlite:
+            self._configure()
+            self._migrate()
 
     def close(self) -> None:
         with self._lock:
@@ -499,6 +494,11 @@ class ContextStore:
         generated = summaries or self._summaries(messages)
         source_hash = self._source_hash(messages)
         with self._transaction() as cursor:
+            if not self._legacy_sqlite:
+                cursor.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext(?))",
+                    (f"context:{scope_key}",),
+                )
             state = cursor.execute(
                 """
                 SELECT last_compacted_message_id, next_ordinal

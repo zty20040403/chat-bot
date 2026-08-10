@@ -15,6 +15,7 @@ import httpx
 from nonebot import logger
 from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, Message, MessageSegment
 from nonebot.adapters.onebot.v11.exception import ActionFailed
+from src.bot_storage import DatabaseError
 
 from .ai_tools import (
     BROWSER_CLICK_TOOL_NAME,
@@ -251,7 +252,14 @@ class AgentToolExecutor:
         except ActionFailed as exc:
             logger.warning(f"NapCat agent tool {name} failed: {exc}")
             return _json_result(ok=False, error="NapCat 执行这个操作失败。")
-        except (httpx.HTTPError, OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+        except (
+            httpx.HTTPError,
+            OSError,
+            RuntimeError,
+            ValueError,
+            sqlite3.Error,
+            DatabaseError,
+        ) as exc:
             logger.warning(f"Agent tool {name} failed: {exc}")
             return _json_result(ok=False, error="工具执行失败。")
 
@@ -999,7 +1007,7 @@ class AgentToolExecutor:
                 canonical_message_id,
                 node_id=node_id,
             )
-        except sqlite3.Error as exc:
+        except (sqlite3.Error, DatabaseError) as exc:
             logger.warning(f"Could not link tool send to turn: {exc}")
 
     @staticmethod

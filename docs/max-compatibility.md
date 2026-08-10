@@ -12,14 +12,14 @@ OneBot V11、NapCat、可配置 LLM provider 和本机优先的运行方式。�
 
 | 能力 | 本项目实现 |
 | --- | --- |
-| 规范消息账本 | OneBot、Matrix、iMessage 事件先转成 Message IR，再幂等写入 SQLite 事实层 |
+| 规范消息账本 | OneBot、Matrix、iMessage 事件先转成 Message IR，再幂等写入 PostgreSQL 事实层 |
 | 精确上下文 | token 水位、原文尾部、可重建 `episode#`、来源范围与哈希、Scope 隔离 |
 | 混合召回 | 词面搜索始终可用；可选 OpenAI-compatible embedding + PostgreSQL/pgvector HNSW |
 | Historian | 后台按连续证据生成 P1/P2/P3 摘要，用 cursor CAS 发布，失败不推进覆盖范围 |
 | Dream | 按版本 CAS 合并、更新或归档长期记忆，操作与理由进入原有 mutation 审计 |
 | 规范身份 | 模型只见 `msg#`、`episode#`、`t#`、`@#principal`；原生账号留在适配层 |
 | 工作回合 | durable turn journal、工具效果状态、fork、digest、条件 replay、崩溃恢复 |
-| 持久投递 | SQLite outbox、幂等键、租约、尝试日志、OneBot echo 对账、超时结果不明停放 |
+| 持久投递 | PostgreSQL outbox、幂等键、租约、尝试日志、OneBot echo 对账、超时结果不明停放 |
 | 跨平台镜像 | OneBot/Matrix/BlueBubbles iMessage bundle、来源去重、原生引用映射、循环抑制 |
 | 输出规划 | 空行/`[split]`、代码块保护、`[reply#]`、`[silence]`、反应与分段延迟 |
 | 原生流式 | 完整段落到达即发送；代码围栏和单段回答暂存；`/停止` 取消底层 HTTP stream |
@@ -43,8 +43,7 @@ OneBot V11、NapCat、可配置 LLM provider 和本机优先的运行方式。�
 
 ## 有意保留的差异
 
-- SQLite 仍是单机事实层；PostgreSQL 只负责可删除重建的语义向量，不会成为第二份
-  消息事实源。
+- PostgreSQL 是唯一事实层；Bot 与数据库可分机部署，生产不会自动回退 SQLite。
 - 镜像 bundle 里只要包含 OneBot，OneBot 必须是 canonical endpoint。这样现有
   NoneBot 命令、群权限和 QQ 原生工具不会在跨平台时产生两套身份。
 - Matrix 与 iMessage 当前承担持久镜像、引用映射和回执对账；独立平台上的 `@机器人`

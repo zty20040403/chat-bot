@@ -134,6 +134,11 @@ class Settings:
     quota_daily_calls: int
     quota_daily_input_tokens: int
     quota_daily_output_tokens: int
+    legacy_sqlite_allowed: bool
+    postgres_schema: str
+    postgres_pool_min_size: int
+    postgres_pool_max_size: int
+    postgres_pool_timeout_seconds: int
     semantic_enabled: bool
     postgres_dsn: str
     embedding_base_url: str
@@ -420,6 +425,26 @@ class Settings:
             quota_daily_output_tokens=max(
                 _get_int("AI_QUOTA_DAILY_OUTPUT_TOKENS", 0),
                 0,
+            ),
+            legacy_sqlite_allowed=_get_bool(
+                "AI_ALLOW_LEGACY_SQLITE",
+                False,
+            ),
+            postgres_schema=(
+                os.getenv("AI_POSTGRES_SCHEMA", "qq_bot").strip()
+                or "qq_bot"
+            ),
+            postgres_pool_min_size=min(
+                max(_get_int("AI_POSTGRES_POOL_MIN_SIZE", 1), 1),
+                20,
+            ),
+            postgres_pool_max_size=min(
+                max(_get_int("AI_POSTGRES_POOL_MAX_SIZE", 10), 1),
+                100,
+            ),
+            postgres_pool_timeout_seconds=max(
+                _get_int("AI_POSTGRES_POOL_TIMEOUT_SECONDS", 10),
+                1,
             ),
             semantic_enabled=_get_bool("AI_SEMANTIC_ENABLED", False),
             postgres_dsn=os.getenv("AI_POSTGRES_DSN", "").strip(),

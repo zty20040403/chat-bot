@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import json
 import time
 from collections import defaultdict, deque
 from dataclasses import asdict, dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import Any
+
+from src.bot_storage import StateSource, open_json_state
 
 from .deepseek import ChatMessage
 
@@ -20,9 +20,9 @@ class GroupContextMessage:
 
 
 class ConversationMemory:
-    def __init__(self, max_turns: int, state_path: Path | None = None) -> None:
+    def __init__(self, max_turns: int, state_path: StateSource = None) -> None:
         self._max_messages = max(max_turns, 1) * 2
-        self._state_path = state_path
+        self._state = open_json_state(state_path, "conversation_history")
         self._histories: defaultdict[str, deque[ChatMessage]] = defaultdict(
             self._new_history
         )
@@ -52,7 +52,8 @@ class ConversationMemory:
         return removed
 
     def _load(self) -> None:
-        data = _read_json_object(self._state_path)
+        loaded = self._state.load()
+        data = loaded if isinstance(loaded, dict) else {}
         for raw_conversation_id, raw_history in data.items():
             if not isinstance(raw_conversation_id, str) or not isinstance(
                 raw_history, list
@@ -72,7 +73,7 @@ class ConversationMemory:
             for conversation_id, history in self._histories.items()
             if history
         }
-        _write_json(self._state_path, payload)
+        self._state.save(payload)
 
 
 class GroupContextMemory:
@@ -80,14 +81,14 @@ class GroupContextMemory:
         self,
         max_messages: int,
         max_chars: int,
-        state_path: Path | None = None,
+        state_path: StateSource = None,
     ) -> None:
         self._max_messages = max(max_messages, 1)
         self._messages: defaultdict[int, deque[GroupContextMessage]] = defaultdict(
             self._new_group
         )
         self._max_chars = max(max_chars, 200)
-        self._state_path = state_path
+        self._state = open_json_state(state_path, "group_context")
         self._load()
 
     def _new_group(self) -> deque[GroupContextMessage]:
@@ -141,7 +142,8 @@ class GroupContextMemory:
         return len(removed or ())
 
     def _load(self) -> None:
-        data = _read_json_object(self._state_path)
+        loaded = self._state.load()
+        data = loaded if isinstance(loaded, dict) else {}
         for raw_group_id, raw_messages in data.items():
             if not isinstance(raw_messages, list):
                 continue
@@ -163,7 +165,7 @@ class GroupContextMemory:
             for group_id, messages in self._messages.items()
             if messages
         }
-        _write_json(self._state_path, payload)
+        self._state.save(payload)
 
 
 def _valid_chat_message(raw_message: Any) -> ChatMessage | None:
@@ -208,28 +210,3 @@ def _render_group_message(message: GroupContextMessage) -> str:
         metadata.append(f"#{message.message_id}")
     prefix = f"[{' '.join(metadata)}] " if metadata else ""
     return f"{prefix}{message.sender}: {message.content}"
-
-
-def _read_json_object(state_path: Path | None) -> dict[str, Any]:
-    if state_path is None or not state_path.exists():
-        return {}
-    try:
-        data = json.loads(state_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def _write_json(state_path: Path | None, payload: object) -> None:
-    if state_path is None:
-        return
-    try:
-        state_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary_path = state_path.with_suffix(state_path.suffix + ".tmp")
-        temporary_path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        temporary_path.replace(state_path)
-    except OSError:
-        return
