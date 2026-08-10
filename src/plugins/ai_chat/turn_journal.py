@@ -178,15 +178,28 @@ class TurnJournal:
         model: str,
         prompt_version: str,
         tool_catalog_version: str,
+        provider: str | None = None,
+        profile: str | None = None,
     ) -> None:
         with self._transaction() as cursor:
             cursor.execute(
                 """
                 UPDATE agent_turns
-                SET model = ?, prompt_version = ?, tool_catalog_version = ?
+                SET provider = COALESCE(?, provider),
+                    model = ?,
+                    profile = COALESCE(?, profile),
+                    prompt_version = ?,
+                    tool_catalog_version = ?
                 WHERE turn_id = ? AND status = 'running'
                 """,
-                (model, prompt_version, tool_catalog_version, int(turn_id)),
+                (
+                    provider,
+                    model,
+                    profile,
+                    prompt_version,
+                    tool_catalog_version,
+                    int(turn_id),
+                ),
             )
 
     def record_model_note(
@@ -769,6 +782,8 @@ class TurnJournal:
         current_model: str,
         prompt_version: str,
         tool_catalog_version: str,
+        current_provider: str = "",
+        current_profile: str = "",
         max_chars: int = 40000,
         max_segments: int = 3,
     ) -> ReplayBundle:
@@ -792,6 +807,8 @@ class TurnJournal:
             invalid_reason = self._replay_invalid_reason(
                 turn,
                 current_model=current_model,
+                current_provider=current_provider,
+                current_profile=current_profile,
                 prompt_version=prompt_version,
                 tool_catalog_version=tool_catalog_version,
             )
@@ -1038,6 +1055,8 @@ class TurnJournal:
         turn: TurnRecord,
         *,
         current_model: str,
+        current_provider: str,
+        current_profile: str,
         prompt_version: str,
         tool_catalog_version: str,
     ) -> str:
@@ -1045,6 +1064,10 @@ class TurnJournal:
             return "turn-not-succeeded"
         if turn.tool_call_count <= 0:
             return "chat-only"
+        if current_provider and turn.provider != current_provider:
+            return "provider-changed"
+        if current_profile and turn.profile != current_profile:
+            return "profile-changed"
         if turn.model != current_model:
             return "model-changed"
         if not turn.prompt_version or turn.prompt_version != prompt_version:

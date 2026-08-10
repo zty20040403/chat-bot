@@ -4,7 +4,7 @@
 
 - 接入层：OneBot V11，推荐先用 NapCatQQ 做自用测试
 - 框架层：NoneBot2
-- 模型层：DeepSeek API
+- 模型层：可配置的 OpenAI Chat Compatible / Anthropic Messages，多 profile 隔离
 - 当前功能：对话、联网搜索、OCR、语音、模型切换、持久化上下文、
   长期记忆、语义召回、固定消息、提醒、并发任务、项目沙箱和持久浏览器
 - Max 风格交互：消息拆分、指定引用、静默反应、运行中反馈、旁路提问、
@@ -20,8 +20,14 @@ bot/
   pyproject.toml
   src/plugins/ai_chat/
     __init__.py
+    bootstrap.py
     config.py
     deepseek.py
+    llm_gateway.py
+    lifecycle.py
+    matchers.py
+    model_catalog.py
+    runtime.py
     agent_tools.py
     context_store.py
     conversation_scope.py
@@ -55,6 +61,10 @@ bot/
     self-knowledge.md
     web.md
 ```
+
+`__init__.py` 是 NoneBot 业务入口；`matchers.py` 只声明触发器，`runtime.py`
+统一创建并持有存储、桥接、浏览器和调度器，`lifecycle.py` 监管长时间运行的后台任务，
+`bootstrap.py` 注册管理页和桥接 HTTP 路由。业务模块不应自行创建第二套全局资源。
 
 ## 本地启动
 
@@ -99,10 +109,10 @@ ws://127.0.0.1:8080/onebot/v11/ws
 ```
 
 机器人正常回答 AI 问题时，会自动在结尾带一个合适的颜文字。
-普通 `@机器人` 提问统一进入 DeepSeek Tool Call 循环，不再按“看图”、
+普通 `@机器人` 提问统一进入 LLM Tool Call 循环，不再按“看图”、
 “听语音”或“发表情”等关键词提前走固定回复。联网搜索、可用图片 OCR、
 语音、表情和授权用户的沙箱工具都会按现场条件提供给模型，由模型判断是否调用；
-工具结果会交回 DeepSeek 后再生成最终回答。
+工具结果会交回当前 profile 对应的模型后再生成最终回答。
 模型还可以按需展开 Bilibili 视频、QQ 合并转发和持久网页会话。浏览器默认关闭；
 启用方法及 PostgreSQL、Matrix、iMessage 等可选基础设施见
 [`docs/operations-v3.md`](docs/operations-v3.md)。
@@ -129,7 +139,7 @@ Message IR，再存入本地 SQLite 规范消息账本。模型在群聊上下�
 - 把严格的 `[silence]` 变成 QQ 反应，不把控制标记泄漏到聊天文本。
 - 开始处理时临时添加“正在想”反应，成功、失败和静默都有各自的宿主侧状态。
 - 第一段默认引用并 @ 提问者，后续拆分段不重复刷引用；语音仍作为独立消息发送。
-- DeepSeek 原生流式返回时，闭合的完整段落会先发；代码围栏和 `[silence]` 会等到
+- 当前 profile 支持流式返回时，闭合的完整段落会先发；代码围栏和 `[silence]` 会等到
   完整答案确定，`/停止` 会取消底层 HTTP stream。
 - fenced code 和 Markdown 表格可渲染为 PNG；Playwright 不可用时自动退回原文本。
 
@@ -170,7 +180,7 @@ Message IR，再存入本地 SQLite 规范消息账本。模型在群聊上下�
 @机器人 展开 t#3，告诉我上次执行到了哪里
 ```
 
-DeepSeek 会按需调用 `context_search` 查找当前会话的 `msg#` 和 `episode#`，再用
+当前模型会按需调用 `context_search` 查找当前会话的 `msg#` 和 `episode#`，再用
 `context_expand` 展开 `t#` 或 `episode#` 的证据。所有句柄都必须连同宿主给定的
 当前 `ConversationScope` 查询；猜中其他群的编号或 UUID 也读不到内容。
 
@@ -192,7 +202,7 @@ DeepSeek 会按需调用 `context_search` 查找当前会话的 `msg#` 和 `epis
 
 ## 长期记忆和任务管理
 
-自然聊天时 DeepSeek 可以调用：
+自然聊天时当前模型可以调用：
 
 ```text
 memory_add / memory_list / memory_remove
@@ -230,16 +240,17 @@ API Key 或验证码。所有记忆都可以手动审计：
 
 私聊消息现在也复用同一套 AI、长期记忆、工具和任务管理流程。
 
-按用户和会话切换 DeepSeek 模型：
+按用户和会话切换已配置的模型 profile：
 
 ```text
 /模型
-/模型 flash
-/模型 pro
+/模型 deepseek
+/模型 claude
 /模型 默认
 ```
 
-模型选择会保存在本地，不影响同群其他用户，也不会提交到 Git 仓库。
+`/模型` 会显示 profile 名、provider、真实模型和工具/流式/JSON 能力。选择只保存
+profile 名，不保存 API Key；它不影响同群其他用户，也不会提交到 Git 仓库。
 
 ## 项目沙箱和群文件工具
 
@@ -252,7 +263,7 @@ API Key 或验证码。所有记忆都可以手动审计：
 @机器人 搜一下最近群聊里谁提到过“比赛”
 ```
 
-DeepSeek 可以按任务自动调用：
+当前模型可以按任务自动调用：
 
 ```text
 get_message_by_id / context_search / context_expand
@@ -312,8 +323,8 @@ AI_SANDBOX_MAX_FILE_MB=20
 ```
 
 `/搜` 会把原始关键词直接交给 DuckDuckGo，返回标题、摘要和完整链接；
-它不经过 DeepSeek，也不会写入 AI 对话上下文。普通 `/ai` 和 `@机器人`
-仍可由 DeepSeek 自动调用 `web_search` 工具并整理回答。
+它不经过大模型，也不会写入 AI 对话上下文。普通 `/ai` 和 `@机器人`
+仍可由当前模型自动调用 `web_search` 工具并整理回答。
 DuckDuckGo 返回人机验证、空结果或请求失败时，会自动改用 Bing RSS
 作为备用搜索入口。
 
@@ -327,7 +338,7 @@ DuckDuckGo 返回人机验证、空结果或请求失败时，会自动改用 Bi
 ```
 
 `/ocr` 会强制调用 `read_image_text` 工具；普通 `@机器人` 消息由
-DeepSeek 根据问题和图片是否可用自行决定是否调用，不再使用关键词匹配。
+当前模型根据问题和图片是否可用自行决定是否调用，不再使用关键词匹配。
 机器人优先识别当前消息中的图片，其次识别被回复的图片，最后使用同一用户
 5 分钟内最近发送的图片。Windows 使用 NapCat OCR；macOS 使用系统 Vision OCR，
 图片不会上传到第三方视觉服务。
@@ -348,7 +359,7 @@ DeepSeek 根据问题和图片是否可用自行决定是否调用，不再使�
 ```
 
 `/语音` 强制调用 `reply_with_voice`，`/听` 强制调用
-`transcribe_voice`；普通 `@机器人` 时由 DeepSeek 自己决定是否调用。
+`transcribe_voice`；普通 `@机器人` 时由当前模型自己决定是否调用。
 语音回答默认使用标记为 `Cute` 的在线神经音色
 `zh-CN-YunxiaNeural`，再由机器人本地
 解码并编码为腾讯 SILK；不依赖 NapCat PacketBackend，也不需要 NapCat
@@ -376,7 +387,7 @@ DeepSeek 根据问题和图片是否可用自行决定是否调用，不再使�
 @机器人 发一个可爱的 QQ 自带表情
 ```
 
-斜杠命令是手动快捷入口；自然语言请求会由 DeepSeek 调用
+斜杠命令是手动快捷入口；自然语言请求会由当前模型调用
 `send_sticker` 或 `send_qq_face`，不会再靠关键词直接发送。
 
 清空当前群的上下文：
@@ -390,6 +401,8 @@ DeepSeek 根据问题和图片是否可用自行决定是否调用，不再使�
 ```text
 DEEPSEEK_MODEL=deepseek-v4-flash
 DEEPSEEK_THINKING=disabled
+AI_MODEL_DEFAULT_PROFILE=deepseek
+# AI_MODEL_PROFILES_JSON 的完整示例见 .env.example 和 docs/operations-v3.md
 AI_MAX_CONTEXT_TURNS=6
 AI_GROUP_CONTEXT_MESSAGES=40
 AI_GROUP_CONTEXT_CHARS=4000
@@ -480,7 +493,7 @@ AI_ENABLED_GROUPS=123456789,987654321
 ## 五份 ADR 的落地范围
 
 本项目参考了 [HCHogan/max 的 ADR](https://github.com/HCHogan/max/tree/main/docs/adr)
-（MIT），但继续使用 NoneBot2、OneBot V11 和 DeepSeek；SQLite 保存规范事实，
+（MIT），但继续使用 NoneBot2、OneBot V11 和独立 LLM Gateway；SQLite 保存规范事实，
 PostgreSQL/pgvector 仅作为可选的语义派生索引：
 
 | ADR | 本项目中的对应实现 |

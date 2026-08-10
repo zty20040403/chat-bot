@@ -5,7 +5,7 @@
 Max 提交 `d80be22a29dbf35222bdb09699db0f54f737e370`（2026-08-09）。
 
 目标是把 Max 已验证的交互和架构思想移植到本项目，同时保留 NoneBot2、
-OneBot V11、NapCat、DeepSeek 和本机优先的运行方式。实现不是逐行翻译；平台协议、
+OneBot V11、NapCat、可配置 LLM provider 和本机优先的运行方式。实现不是逐行翻译；平台协议、
 模型和部署条件不同，因此不能保证回答文字、音色或每个原生消息段完全一致。
 
 ## 已移植能力
@@ -53,8 +53,9 @@ OneBot V11、NapCat、DeepSeek 和本机优先的运行方式。实现不是逐�
   语音和表情。不会为了看起来一致而发送平台不支持的伪消息段。
 - 持久浏览器默认关闭，并且不承诺是对敌意网页的完整安全沙箱。默认阻断本机、
   私网和非 HTTP(S) 地址；高风险浏览任务仍应放进隔离容器。
-- 模型选择仍针对同一个 OpenAI-compatible DeepSeek endpoint；没有照搬 Max 的生产
-  provider、人格、私有部署和 iMessage IMCore 环境。
+- 模型选择已改为独立 ModelProfile，可在 OpenAI Chat Compatible 与 Anthropic
+  Messages provider 间切换；没有照搬 Max 的私有 provider、人格和 iMessage IMCore
+  环境，也不保证不同模型生成完全相同的措辞。
 
 ## 默认启用边界
 

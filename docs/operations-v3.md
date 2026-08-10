@@ -1,6 +1,6 @@
 # 0.3.0 可选基础设施启用手册
 
-基础 QQ 对话只需要 NapCat、NoneBot 和 DeepSeek。下面功能都能独立开启，建议一次
+基础 QQ 对话只需要 NapCat、NoneBot 和一个模型 profile。下面功能都能独立开启，建议一次
 只开一组，启动后先看日志和管理页，再继续下一组。
 
 ## 1. 安装新增依赖
@@ -16,7 +16,60 @@ playwright install chromium
 用于代码高亮。Chromium 会额外占用磁盘；不安装时机器人仍可对话，代码和表格只会
 按普通文本发送。
 
-## 2. 持久 outbox 与流式发送
+## 2. 多模型底座
+
+不填写新配置时，程序会把原来的 `DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`、
+`DEEPSEEK_MODEL` 和 `DEEPSEEK_THINKING` 合成为一个名为 `deepseek` 的兼容 profile，
+并保留 `flash`、`pro` 两个旧切换入口，原有部署不需要立刻迁移。
+
+显式多模型配置使用一行 JSON；API Key 只引用环境变量名，不要直接写进 JSON：
+
+```text
+DEEPSEEK_API_KEY=你的DeepSeekKey
+OPENAI_API_KEY=你的OpenAIKey
+ANTHROPIC_API_KEY=你的AnthropicKey
+AI_MODEL_DEFAULT_PROFILE=deepseek
+AI_MODEL_PROFILES_JSON={"default":"deepseek","profiles":{"deepseek":{"provider":"deepseek","protocol":"openai-chat","base_url":"https://api.deepseek.com","api_key_env":"DEEPSEEK_API_KEY","model":"deepseek-v4-flash","thinking":"disabled","aliases":["ds","flash"]},"openai":{"provider":"openai","protocol":"openai-chat","base_url":"https://api.openai.com/v1","api_key_env":"OPENAI_API_KEY","model":"gpt-5-mini","aliases":["gpt"]},"claude":{"provider":"anthropic","protocol":"anthropic-messages","base_url":"https://api.anthropic.com","api_key_env":"ANTHROPIC_API_KEY","model":"claude-sonnet-4-6","max_output_tokens":4096}}}
+```
+
+每个 profile 支持这些主要字段：
+
+| 字段 | 作用 |
+| --- | --- |
+| `provider` | 日志和用量统计中的供应商名称 |
+| `protocol` | `openai-chat` 或 `anthropic-messages` |
+| `base_url` | 此 profile 自己的 API 地址 |
+| `api_key_env` | 保存密钥的环境变量名 |
+| `model` | 发给供应商的真实模型 ID |
+| `aliases` | `/模型` 可接受的短名称 |
+| `timeout_seconds` | 单次 HTTP 请求超时，范围 1 到 600 秒 |
+| `temperature` | 可选采样温度；留空则由供应商默认 |
+| `thinking` | `auto`、`enabled` 或 `disabled` |
+| `max_output_tokens` | 输出 token 上限；Anthropic 默认 4096 |
+| `api_key_required` | 本地免鉴权兼容服务可显式设为 `false` |
+| `capabilities` | 可覆盖 `tools`、`streaming`、`json_mode`、`model_listing`、`vision` |
+
+当前 `openai-chat` 支持工具、流式输出和原生 JSON mode；它可连接实现 Chat
+Completions 协议的兼容 endpoint。`anthropic-messages` 已支持普通对话和客户端工具调用，
+但当前适配器使用完整响应而不是流式事件；JSON 后台任务通过严格提示和宿主解析完成。
+profile 若声明不支持工具，机器人仍能普通回答，但不会给该模型执行工具。
+`vision` 是协议能力记录；当前 QQ 图片仍统一走受限 OCR 工具，不会因把它设为 `true`
+就把原图直接上传给模型。
+
+重启后在群里使用：
+
+```text
+/模型
+/模型 claude
+/模型 默认
+```
+
+选择按用户和会话隔离，只持久化 profile 名。回合重放还会同时核对 provider、profile、
+真实 model、提示词版本和工具目录；切换供应商后旧回合自动退化成摘要，不会把两种协议
+的原样 tool segment 混在一起。配置变更需要重启。当前不会在 Agent 工具回合中自动
+故障转移，因为重跑可能重复发送文件、写记忆或执行其他有副作用操作。
+
+## 3. 持久 outbox 与流式发送
 
 ```text
 AI_OUTBOX_ENABLED=true
@@ -36,9 +89,9 @@ Matrix 使用稳定 transaction id，网络失败可安全重试；OneBot 和 iM
 停放。确认目标会话确实没收到后，才能在管理页手动重试 `ambiguous` 项。
 
 流式输出只发送已经闭合的完整段落。未闭合代码块、`[silence]` 和还没有段落边界的
-短回答会等模型完成；`/停止` 会取消任务并关闭 DeepSeek HTTP stream。
+短回答会等模型完成；`/停止` 会取消任务并关闭当前 provider 的 HTTP stream。
 
-## 3. 管理页与配额
+## 4. 管理页与配额
 
 ```text
 AI_ADMIN_ENABLED=true
@@ -54,10 +107,14 @@ AI_QUOTA_DAILY_OUTPUT_TOKENS=100000
 任务、桥接和浏览器状态，并可停止任务、重试或取消投递。若把 `HOST` 改为公网地址，
 必须设置 `AI_ADMIN_TOKEN` 并在反向代理上再加 TLS 与访问控制。
 
+`/bot-admin/api/overview` 还会列出当前存活的后台 worker、模型 profile 的非敏感配置
+以及最近一次未捕获异常。
+worker 意外退出不会被误报成“功能仍正常”；生产监控应对非空 `failures` 告警。
+
 数值 `0` 表示不限制。当前配额按 canonical ConversationScope 和上海自然日计算，
 不会因为同一群的不同镜像端重复计费。
 
-## 4. PostgreSQL + pgvector 语义召回
+## 5. PostgreSQL + pgvector 语义召回
 
 先准备装有 pgvector 扩展的 PostgreSQL。用 Docker/OrbStack 测试可运行：
 
@@ -88,26 +145,29 @@ DeepSeek Chat API 本身不等于 embedding API，不能直接把聊天模型名
 与 embedding 服务实际返回一致。向量表带 Scope、来源句柄和 HNSW cosine 索引；
 原始消息仍以 SQLite ledger 为准，删掉向量库后可以重新生成。
 
-## 5. Historian 与 Dream
+## 6. Historian 与 Dream
 
 ```text
 AI_HISTORIAN_ENABLED=true
+AI_HISTORIAN_PROFILE=
 AI_HISTORIAN_MODEL=
 AI_HISTORIAN_CHECK_SECONDS=60
 AI_DREAM_ENABLED=true
+AI_DREAM_PROFILE=
 AI_DREAM_MODEL=
 AI_DREAM_HOUR=4
 AI_DREAM_MIN_ENTRIES=15
 ```
 
-模型留空时使用当前默认 DeepSeek 模型。Historian 只总结一段连续、哈希确定的旧消息，
+profile 留空时使用默认 profile；`AI_HISTORIAN_MODEL` 和 `AI_DREAM_MODEL` 只用于在所选
+profile 内兼容覆盖真实模型 ID。Historian 只总结一段连续、哈希确定的旧消息，
 并要求每条长期记忆建议引用该 capture 内的 `msg#`；发布时 cursor 已变化则 CAS 失败，
 不会覆盖新状态。Dream 每天在指定小时做一次长期记忆整理，更新必须携带当前版本，
 因此群聊过程中刚被人修改的记录不会被后台静默覆盖。
 
 两者都会额外消耗模型额度，建议先只开 Historian，观察管理页用量后再开 Dream。
 
-## 6. 持久浏览器与富消息截图
+## 7. 持久浏览器与富消息截图
 
 ```text
 AI_RICH_RENDER_ENABLED=true
@@ -127,7 +187,7 @@ AI_BROWSER_ALLOW_PRIVATE_NETWORK=false
 默认拒绝 localhost、`.local`、IP 私网和解析到非公网 IP 的地址。浏览器仍是宿主
 进程，不应用它打开不可信内网页面，也不要在共享群里登录重要账号。
 
-## 7. Bilibili 与合并转发
+## 8. Bilibili 与合并转发
 
 这两项无需额外开关。模型在群聊工具回合中可调用：
 
@@ -139,7 +199,7 @@ view_forward
 `view_bilibili` 读取公开视频元数据和有限条热门评论；`view_forward` 只允许展开当前
 Scope 已有的 `msg#`，子消息中的原生 QQ 号和嵌套 forward id 不会交给模型。
 
-## 8. Matrix 镜像
+## 9. Matrix 镜像
 
 示例 bundle：
 
@@ -162,7 +222,7 @@ PUT /_matrix/app/v1/transactions/{txn_id}?access_token=AI_MATRIX_APPSERVICE_TOKE
 一个 endpoint 只能属于一个 bundle。bundle 中存在 OneBot 时它固定为 canonical；
 同一事件在 `/sync` 与 Application Service 重复到达也会按原生 event id 去重。
 
-## 9. BlueBubbles iMessage 镜像
+## 10. BlueBubbles iMessage 镜像
 
 ```text
 AI_IMESSAGE_ENABLED=true
@@ -184,7 +244,7 @@ POST http://机器人地址:8080/bot-bridge/bluebubbles?token=AI_IMESSAGE_WEBHOO
 
 桥接 token 为空时 webhook 返回 503，这是故意的 fail-closed 行为。
 
-## 10. 验证
+## 11. 验证
 
 不启动真实机器人也能运行：
 

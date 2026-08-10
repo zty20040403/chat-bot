@@ -20,6 +20,8 @@ class AdminServices:
     bridge_router: Any = None
     bridge_state: Any = None
     browser_manager: Any = None
+    background_tasks: Any = None
+    model_catalog: Any = None
 
 
 def register_admin(
@@ -66,6 +68,15 @@ def register_admin(
             "uptime_seconds": max(int(time.time()) - services.started_at, 0),
             "deliveries": deliveries,
             "running_tasks": tasks,
+            "background_tasks": (
+                {
+                    "running": list(services.background_tasks.running()),
+                    "failures": services.background_tasks.failures(),
+                }
+                if services.background_tasks is not None
+                else {"running": [], "failures": {}}
+            ),
+            "models": _model_overview(services.model_catalog),
             "bridges": (
                 services.bridge_state.stats()
                 if services.bridge_state is not None
@@ -198,6 +209,30 @@ def register_admin(
     app.include_router(router)
 
 
+def _model_overview(catalog: Any) -> dict[str, object]:
+    if catalog is None:
+        return {"default": "", "profiles": []}
+    return {
+        "default": str(catalog.default_name),
+        "profiles": [
+            {
+                "name": profile.name,
+                "provider": profile.provider,
+                "protocol": profile.protocol,
+                "model": profile.model,
+                "configured": profile.configured,
+                "capabilities": {
+                    "tools": profile.capabilities.tools,
+                    "streaming": profile.capabilities.streaming,
+                    "json_mode": profile.capabilities.json_mode,
+                    "vision": profile.capabilities.vision,
+                },
+            }
+            for profile in catalog.profiles
+        ],
+    }
+
+
 def _dashboard_html(prefix: str, version: str, requires_token: bool) -> str:
     safe_prefix = escape(prefix, quote=True)
     safe_version = escape(version)
@@ -267,6 +302,7 @@ def _dashboard_html(prefix: str, version: str, requires_token: bool) -> str:
     <button class="tab" data-view="deliveries">投递</button>
     <button class="tab" data-view="usage">用量</button>
     <button class="tab" data-view="tasks">任务</button>
+    <button class="tab" data-view="models">模型</button>
   </div></nav>
   <main>
     <div class="toolbar">
@@ -287,6 +323,9 @@ def _dashboard_html(prefix: str, version: str, requires_token: bool) -> str:
     <section id="tasks" hidden><div class="table-wrap"><table><thead><tr>
       <th>任务</th><th>会话</th><th>摘要</th><th>耗时</th><th>操作</th>
     </tr></thead><tbody id="task-body"></tbody></table></div></section>
+    <section id="models" hidden><div class="table-wrap"><table><thead><tr>
+      <th>Profile</th><th>Provider</th><th>协议</th><th>模型</th><th>能力</th><th>状态</th>
+    </tr></thead><tbody id="model-body"></tbody></table></div></section>
   </main>
   <script>
     const prefix={safe_prefix!r}, requiresToken={token_state};
@@ -312,6 +351,8 @@ def _dashboard_html(prefix: str, version: str, requires_token: bool) -> str:
         document.querySelector('#delivery-body').innerHTML=d.items.map(x=>`<tr><td><code>${{esc(x.handle)}}</code></td><td>${{esc(x.target_platform)}} · ${{esc(x.target_kind)}} · <code>${{esc(x.target_native_conversation_id)}}</code></td><td class="status ${{esc(x.status)}}">${{esc(x.status)}}</td><td>${{esc(x.attempts)}}</td><td>${{fmt(x.updated_at)}}</td><td>${{['ambiguous','failed'].includes(x.status)?`<button class="action" data-retry="${{x.delivery_id}}">重试</button>`:''}}</td></tr>`).join('')||'<tr><td colspan="6" class="empty">尚无投递记录</td></tr>';
         document.querySelector('#usage-body').innerHTML=u.items.map(x=>`<tr><td>${{esc(x.day)}}</td><td><code>${{esc(x.scope_key)}}</code></td><td>${{esc(x.source)}}</td><td>${{esc(x.calls)}}</td><td>${{esc(x.input_tokens)}}</td><td>${{esc(x.output_tokens)}}</td></tr>`).join('')||'<tr><td colspan="6" class="empty">尚无用量记录</td></tr>';
         document.querySelector('#task-body').innerHTML=t.items.map(x=>`<tr><td><code>${{esc(x.task_id)}}</code></td><td><code>${{esc(x.conversation_id)}}</code></td><td>${{esc(x.summary)}}</td><td>${{esc(x.elapsed_seconds)}} 秒</td><td><button class="action" data-kill="${{esc(x.task_id)}}">停止</button></td></tr>`).join('')||'<tr><td colspan="5" class="empty">当前没有运行任务</td></tr>';
+        const models=o.models?.profiles||[];
+        document.querySelector('#model-body').innerHTML=models.map(x=>{{const caps=Object.entries(x.capabilities||{{}}).filter(([,enabled])=>enabled).map(([name])=>name).join(', ')||'text';const isDefault=x.name===o.models.default;return `<tr><td><code>${{esc(x.name)}}</code>${{isDefault?' · 默认':''}}</td><td>${{esc(x.provider)}}</td><td><code>${{esc(x.protocol)}}</code></td><td><code>${{esc(x.model)}}</code></td><td>${{esc(caps)}}</td><td class="status ${{x.configured?'committed':'failed'}}">${{x.configured?'已配置':'缺少密钥'}}</td></tr>`;}}).join('')||'<tr><td colspan="6" class="empty">没有模型配置</td></tr>';
       }}catch(e){{document.querySelector('#error').textContent=e.message;}}
     }}
     document.addEventListener('click',async e=>{{

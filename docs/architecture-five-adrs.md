@@ -12,7 +12,9 @@ iMessage ────┘
   -> ledger.py 不可变消息账本
   -> context_store.py / historian.py / semantic_recall.py 投影
   -> long_term_memory.py / turn_journal.py 可审计状态
+  -> model_catalog.py 解析当前会话的不可变 ModelProfile
   -> deepseek.py 组装当前 system + 历史证据 + 用户消息
+  -> llm_gateway.py 按协议转换并调用对应 provider
   -> tool_policy.py 校验模型提出的 tool call
   -> 工具执行并把规范事件写入 turn_journal.py
   -> output_planner.py / browser_tools.py 规划文本、控制标记和富截图
@@ -20,6 +22,33 @@ iMessage ────┘
   -> message_lowering.py 按 OneBot / Matrix / iMessage 能力降级
   -> 各平台 adapter 发出并由 echo 对账
 ```
+
+## 运行时装配边界
+
+插件启动不再由 `__init__.py` 分散创建几十个全局对象。当前装配分成四层：
+
+- `matchers.py` 只声明 NoneBot Matcher，不打开数据库、不启动后台任务。
+- `runtime.py` 是 composition root。`build_app_context()` 根据配置创建模型目录、LLM
+  Gateway、所有存储、桥接、浏览器和领域服务，并放进唯一的 `AppContext`。
+- `bootstrap.py` 只把已经创建好的服务注册到 FastAPI 管理面和桥接 webhook。
+- `lifecycle.py` 用 `BackgroundTaskSupervisor` 管理 warmup、提醒、outbox、Matrix、
+  semantic、Historian 和 Dream 循环；同名任务不能重复启动，未捕获异常会留下日志，
+  关闭时集中取消并等待任务退出。
+
+`__init__.py` 当前保留一组指向 `AppContext` 的兼容别名，使现有 Handler 和测试不必
+在一次改动里全部重写。资源所有权仍只有 `AppContext` 一份；NoneBot shutdown 最终只
+调用 `AppContext.shutdown()`，由它先停止后台任务和 AI turn，再按顺序关闭异步客户端
+与 SQLite 连接。后续拆分 Handler 时应显式接收 `AppContext` 或所需的最小服务，不能
+重新依赖模块导入副作用。
+
+`model_catalog.py` 把每个 profile 的 provider、协议、endpoint、密钥来源、真实模型、
+超时、思考模式和能力声明一起校验；密钥不进入 repr、群聊选择状态或管理接口。
+`llm_gateway.py` 当前实现 `openai-chat` 和 `anthropic-messages` 两个协议适配器，对上仍
+输出统一的内部消息和 tool call 形状，因此工具策略不需要知道供应商。历史文件名
+`deepseek.py` 暂时保留兼容导入，但其中 Agent loop 已由 ModelProfile 驱动。
+
+这个边界也是后续 PostgreSQL repository 和独立 worker 进程的迁移点：上层业务只依赖
+服务能力，构造方式和部署拓扑可以逐步替换。
 
 ## ADR 001：上下文与记忆
 
@@ -61,7 +90,7 @@ PostgreSQL/pgvector HNSW 索引。向量仅用于混合召回，SQLite 原文仍
 - `delivery.py` 进一步把所有出站效果放进 lease-based outbox。进程中断或租约过期
   不能证明没发出去，因此停成 `ambiguous`；Matrix 的稳定 transaction id 才允许
   自动安全重试。
-- 现有 horizon-1 DeepSeek tool loop 保留为稳定执行策略；完整动态 Plan IR 只有在
+- 现有 horizon-1 LLM tool loop 保留为稳定执行策略；完整动态 Plan IR 只有在
   validator、审批和回放评测都具备后才适合开启。
 
 ## ADR 003：Message IR 与能力降级
@@ -106,7 +135,7 @@ token 使用量、模型、提示词版本和工具目录指纹。含工具的�
 用户引用机器人已经发送的结果时，新 turn 写一条 `fork-from` 边。回放器只有在旧
 turn 成功、确实调用过工具、trace 未过期、模型/提示词/工具目录匹配且预算足够时
 才使用原样 provider segment。当前 system 永远重新生成；旧 final reasoning 被
-移除，工具调用中 DeepSeek 协议需要的 `reasoning_content` 保留。旧触发消息和回复
+移除，OpenAI-compatible 工具段需要的 `reasoning_content` 保留。旧触发消息和回复
 会从普通 ledger 窗口排除，防止模型看到两遍。
 
 不满足条件时自动使用确定性 digest。digest 和规范 journal 是长期事实；压缩 trace

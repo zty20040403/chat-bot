@@ -4,15 +4,16 @@ import json
 import logging
 import re
 import time
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import date
 from types import SimpleNamespace
-from typing import Any, Awaitable, Callable, Literal, Optional
-
-from openai import APIConnectionError, APIStatusError, AsyncOpenAI, RateLimitError
+from typing import Any, Awaitable, Callable, Literal
 
 from .ai_tools import ToolChoice, ToolDefinition
 from .config import settings
+from .llm_gateway import LLMConfigError, LLMGateway
+from .model_catalog import ModelCatalog, ModelProfile
 from .tool_policy import ToolCatalog
 
 ChatMessage = dict[str, Any]
@@ -42,6 +43,7 @@ class AgentLoopEvent:
 class DeepSeekTrace:
     provider: str = "deepseek-openai-compatible"
     model: str = ""
+    profile: str = "default"
     messages: list[ChatMessage] = field(default_factory=list)
     input_tokens: int = 0
     output_tokens: int = 0
@@ -60,9 +62,10 @@ class DeepSeekTrace:
 
     def to_payload(self) -> dict[str, Any]:
         return {
-            "v": 1,
+            "v": 2,
             "provider": self.provider,
             "model": self.model,
+            "profile": self.profile,
             "created_at": self.created_at,
             "usage": {
                 "input_tokens": self.input_tokens,
@@ -81,28 +84,41 @@ class FinalStreamState:
 
 LoopEventSink = Callable[[AgentLoopEvent], Awaitable[None]]
 
-_client: Optional[AsyncOpenAI] = None
 _logger = logging.getLogger(__name__)
+_model_catalog: ModelCatalog | None = None
+_llm_gateway: LLMGateway | None = None
+_active_profile: ContextVar[ModelProfile | None] = ContextVar(
+    "ai_chat_active_model_profile",
+    default=None,
+)
+
+DeepSeekConfigError = LLMConfigError
 
 
-class DeepSeekConfigError(RuntimeError):
-    pass
+def configure_llm_runtime(
+    catalog: ModelCatalog,
+    gateway: LLMGateway,
+) -> None:
+    global _model_catalog, _llm_gateway
+    _model_catalog = catalog
+    _llm_gateway = gateway
 
 
-def _get_client() -> AsyncOpenAI:
-    global _client
+def _runtime() -> tuple[ModelCatalog, LLMGateway]:
+    global _model_catalog, _llm_gateway
+    if _model_catalog is None:
+        _model_catalog = ModelCatalog.from_settings(settings)
+    if _llm_gateway is None:
+        _llm_gateway = LLMGateway()
+    return _model_catalog, _llm_gateway
 
-    if not settings.deepseek_api_key or settings.deepseek_api_key.startswith("replace-with"):
-        raise DeepSeekConfigError("DEEPSEEK_API_KEY is not configured.")
 
-    if _client is None:
-        _client = AsyncOpenAI(
-            api_key=settings.deepseek_api_key,
-            base_url=settings.deepseek_base_url,
-            timeout=60.0,
-        )
-
-    return _client
+def _resolve_profile(
+    profile: ModelProfile | str | None = None,
+    model: str | None = None,
+) -> ModelProfile:
+    catalog, _gateway = _runtime()
+    return catalog.resolve_runtime(profile=profile, model=model)
 
 
 def _build_system_prompt(
@@ -201,36 +217,45 @@ def _build_messages(
     return messages
 
 
-def _extra_body() -> Optional[dict[str, object]]:
-    if settings.deepseek_thinking in {"enabled", "on", "true", "1"}:
+def _extra_body(profile: ModelProfile) -> dict[str, object] | None:
+    if profile.protocol != "openai-chat":
+        return None
+    if profile.thinking in {"enabled", "on", "true", "1"}:
         return {"thinking": {"type": "enabled"}}
-    if settings.deepseek_thinking in {"disabled", "off", "false", "0"}:
+    if profile.thinking in {"disabled", "off", "false", "0"}:
         return {"thinking": {"type": "disabled"}}
     return None
 
 
 async def _create_completion(**kwargs: Any) -> Any:
-    client = _get_client()
+    profile = _active_profile.get() or _resolve_profile()
+    _catalog, gateway = _runtime()
+    return await gateway.create_completion(profile, **kwargs)
 
+
+async def _invoke_completion(
+    profile: ModelProfile,
+    **kwargs: Any,
+) -> Any:
+    token = _active_profile.set(profile)
     try:
-        return await client.chat.completions.create(**kwargs)
-    except RateLimitError as exc:
-        raise RuntimeError("DeepSeek rate limit reached.") from exc
-    except APIConnectionError as exc:
-        raise RuntimeError("Could not connect to DeepSeek.") from exc
-    except APIStatusError as exc:
-        raise RuntimeError(f"DeepSeek API error: HTTP {exc.status_code}") from exc
+        return await _create_completion(**kwargs)
+    finally:
+        _active_profile.reset(token)
 
 
 def _completion_kwargs(
     messages: list[ChatMessage],
-    model: str | None = None,
+    profile: ModelProfile,
 ) -> dict[str, Any]:
-    return {
-        "model": model or settings.deepseek_model,
+    request: dict[str, Any] = {
+        "model": profile.model,
         "messages": messages,
-        "extra_body": _extra_body(),
+        "extra_body": _extra_body(profile),
     }
+    if profile.temperature is not None:
+        request["temperature"] = profile.temperature
+    return request
 
 
 def _model_dump(value: Any) -> dict[str, Any]:
@@ -308,28 +333,35 @@ async def ask_deepseek(
     current_user: str = "",
     image_context: str = "",
     model: str | None = None,
+    profile: ModelProfile | str | None = None,
     tool_context: str = "",
     replay_prefix: list[ChatMessage] | None = None,
+    trace: DeepSeekTrace | None = None,
     final_text_sink: FinalTextSink | None = None,
     final_stream_state: FinalStreamState | None = None,
 ) -> str:
+    selected_profile = _resolve_profile(profile, model)
+    messages = _build_messages(
+        user_text,
+        history,
+        group_context,
+        memory_context,
+        web_context,
+        current_user,
+        image_context,
+        tool_context,
+        replay_prefix,
+    )
     response, emitted = await _completion_with_optional_stream(
         final_text_sink,
-        **_completion_kwargs(
-            _build_messages(
-                user_text,
-                history,
-                group_context,
-                memory_context,
-                web_context,
-                current_user,
-                image_context,
-                tool_context,
-                replay_prefix,
-            ),
-            model,
-        ),
+        selected_profile,
+        **_completion_kwargs(messages, selected_profile),
     )
+    if trace is not None:
+        _configure_trace(trace, selected_profile)
+        trace.add_usage(response)
+        trace.messages.extend(messages)
+        trace.messages.append(_assistant_final_message(response.choices[0].message))
     content = response.choices[0].message.content
     if final_stream_state is not None:
         final_stream_state.sent_prefix = emitted
@@ -342,17 +374,28 @@ async def ask_deepseek_json(
     user_text: str,
     *,
     model: str | None = None,
+    profile: ModelProfile | str | None = None,
     trace: DeepSeekTrace | None = None,
 ) -> dict[str, Any]:
+    selected_profile = _resolve_profile(profile, model)
+    if not selected_profile.capabilities.json_mode:
+        system_prompt = (
+            system_prompt
+            + "\n\n只输出一个有效 JSON 对象，不要使用 Markdown 代码块或额外说明。"
+        )
     messages: list[ChatMessage] = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_text},
     ]
-    response = await _create_completion(
-        **_completion_kwargs(messages, model),
-        response_format={"type": "json_object"},
+    request = _completion_kwargs(messages, selected_profile)
+    if selected_profile.capabilities.json_mode:
+        request["response_format"] = {"type": "json_object"}
+    response = await _invoke_completion(
+        selected_profile,
+        **request,
     )
     if trace is not None:
+        _configure_trace(trace, selected_profile)
         trace.add_usage(response)
         trace.messages.extend(messages)
     content = (response.choices[0].message.content or "").strip()
@@ -365,9 +408,9 @@ async def ask_deepseek_json(
     try:
         payload = json.loads(content)
     except json.JSONDecodeError as exc:
-        raise RuntimeError("DeepSeek background job returned invalid JSON") from exc
+        raise RuntimeError("Model background job returned invalid JSON") from exc
     if not isinstance(payload, dict):
-        raise RuntimeError("DeepSeek background job must return a JSON object")
+        raise RuntimeError("Model background job must return a JSON object")
     return payload
 
 
@@ -382,6 +425,7 @@ async def ask_deepseek_with_tools(
     tool_choice: ToolChoice = "auto",
     max_tool_rounds: int | None = 3,
     model: str | None = None,
+    profile: ModelProfile | str | None = None,
     tool_context: str = "",
     trace: DeepSeekTrace | None = None,
     event_sink: LoopEventSink | None = None,
@@ -390,16 +434,18 @@ async def ask_deepseek_with_tools(
     final_text_sink: FinalTextSink | None = None,
     final_stream_state: FinalStreamState | None = None,
 ) -> str:
-    if not tools:
+    selected_profile = _resolve_profile(profile, model)
+    if not tools or not selected_profile.capabilities.tools:
         return await ask_deepseek(
             user_text,
             history,
             group_context=group_context,
             memory_context=memory_context,
             current_user=current_user,
-            model=model,
+            profile=selected_profile,
             tool_context=tool_context,
             replay_prefix=replay_prefix,
+            trace=trace,
             final_text_sink=final_text_sink,
             final_stream_state=final_stream_state,
         )
@@ -414,7 +460,7 @@ async def ask_deepseek_with_tools(
         replay_prefix=replay_prefix,
     )
     if trace is not None:
-        trace.model = model or settings.deepseek_model
+        _configure_trace(trace, selected_profile)
         trace.messages.append({"role": "user", "content": user_text})
     next_tool_choice: ToolChoice = tool_choice
     tool_round = 0
@@ -429,7 +475,8 @@ async def ask_deepseek_with_tools(
         await _append_pending_feedback(messages, trace, feedback_provider)
         response, emitted = await _completion_with_optional_stream(
             final_text_sink,
-            **_completion_kwargs(messages, model),
+            selected_profile,
+            **_completion_kwargs(messages, selected_profile),
             tools=tools,
             tool_choice=next_tool_choice,
         )
@@ -631,7 +678,8 @@ async def ask_deepseek_with_tools(
         trace.messages.append(dict(stop_message))
     response, emitted = await _completion_with_optional_stream(
         final_text_sink,
-        **_completion_kwargs(messages, model),
+        selected_profile,
+        **_completion_kwargs(messages, selected_profile),
     )
     if trace is not None:
         trace.add_usage(response)
@@ -645,23 +693,32 @@ async def ask_deepseek_with_tools(
             final_stream_state.sent_prefix = emitted
             final_stream_state.streamed_calls += int(bool(emitted))
         return content.strip()
-    raise RuntimeError("DeepSeek did not finish after reaching the tool limit.")
+    raise RuntimeError("Model did not finish after reaching the tool limit.")
 
 
 async def _completion_with_optional_stream(
     sink: FinalTextSink | None,
+    profile: ModelProfile,
     **kwargs: Any,
 ) -> tuple[Any, str]:
-    if sink is None or not settings.stream_enabled:
-        return await _create_completion(**kwargs), ""
-    return await _create_streaming_completion(sink, **kwargs)
+    if (
+        sink is None
+        or not settings.stream_enabled
+        or not profile.capabilities.streaming
+    ):
+        return await _invoke_completion(profile, **kwargs), ""
+    return await _create_streaming_completion(sink, profile, **kwargs)
 
 
 async def _create_streaming_completion(
     sink: FinalTextSink,
+    profile: ModelProfile | None = None,
     **kwargs: Any,
 ) -> tuple[Any, str]:
-    stream = await _create_completion(
+    if profile is None:
+        profile = _resolve_profile(model=str(kwargs.get("model") or ""))
+    stream = await _invoke_completion(
+        profile,
         **kwargs,
         stream=True,
         stream_options={"include_usage": True},
@@ -867,18 +924,24 @@ def _safe_usage_int(value: Any) -> int:
         return 0
 
 
-async def list_deepseek_models() -> list[str]:
-    client = _get_client()
-    try:
-        response = await client.models.list()
-    except RateLimitError as exc:
-        raise RuntimeError("DeepSeek rate limit reached.") from exc
-    except APIConnectionError as exc:
-        raise RuntimeError("Could not connect to DeepSeek.") from exc
-    except APIStatusError as exc:
-        raise RuntimeError(f"DeepSeek API error: HTTP {exc.status_code}") from exc
-    return sorted(
-        model.id
-        for model in response.data
-        if isinstance(model.id, str) and model.id.strip()
-    )
+def _configure_trace(trace: DeepSeekTrace, profile: ModelProfile) -> None:
+    trace.provider = profile.provider_identity
+    trace.profile = profile.name
+    trace.model = profile.model
+
+
+async def list_deepseek_models(
+    profile: ModelProfile | str | None = None,
+) -> list[str]:
+    selected_profile = _resolve_profile(profile)
+    _catalog, gateway = _runtime()
+    return await gateway.list_models(selected_profile)
+
+
+# Provider-neutral names are used by new code. The old DeepSeek names remain
+# import-compatible for existing plugins, scripts, and persisted deployments.
+LLMTrace = DeepSeekTrace
+ask_llm = ask_deepseek
+ask_llm_json = ask_deepseek_json
+ask_llm_with_tools = ask_deepseek_with_tools
+list_llm_models = list_deepseek_models

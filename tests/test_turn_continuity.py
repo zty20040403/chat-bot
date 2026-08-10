@@ -666,6 +666,18 @@ class TurnContinuityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(turn.status, "succeeded")  # type: ignore[union-attr]
         self.assertEqual(turn.tool_call_count, 1)  # type: ignore[union-attr]
         self.assertEqual(
+            turn.profile,  # type: ignore[union-attr]
+            ai_chat.model_profiles.default.name,
+        )
+        self.assertEqual(
+            turn.provider,  # type: ignore[union-attr]
+            ai_chat.model_profiles.default.provider_identity,
+        )
+        self.assertEqual(
+            turn.model,  # type: ignore[union-attr]
+            ai_chat.model_profiles.default.model,
+        )
+        self.assertEqual(
             [item.state for item in self.journal.events_for_turn(turn.turn_id)],  # type: ignore[union-attr]
             ["started", "succeeded"],
         )

@@ -1,0 +1,150 @@
+from __future__ import annotations
+
+import json
+import unittest
+from dataclasses import replace
+
+import nonebot
+
+nonebot.init()
+
+from src.plugins.ai_chat.config import settings
+from src.plugins.ai_chat.model_catalog import (
+    ModelCatalog,
+    ModelCatalogError,
+)
+
+
+class ModelCatalogTests(unittest.TestCase):
+    def test_profiles_resolve_independent_secrets_protocols_and_aliases(self) -> None:
+        raw = json.dumps(
+            {
+                "default": "fast",
+                "profiles": {
+                    "fast": {
+                        "provider": "deepseek",
+                        "protocol": "openai-chat",
+                        "base_url": "https://api.deepseek.com",
+                        "api_key_env": "DEEPSEEK_TEST_KEY",
+                        "model": "deepseek-chat",
+                        "aliases": ["ds"],
+                    },
+                    "claude": {
+                        "provider": "anthropic",
+                        "protocol": "anthropic-messages",
+                        "api_key_env": "ANTHROPIC_TEST_KEY",
+                        "model": "claude-sonnet-test",
+                        "max_output_tokens": 2048,
+                    },
+                },
+            }
+        )
+
+        catalog = ModelCatalog.from_json(
+            raw,
+            default_profile="ignored",
+            environ={
+                "DEEPSEEK_TEST_KEY": "secret-one",
+                "ANTHROPIC_TEST_KEY": "secret-two",
+            },
+        )
+
+        self.assertEqual(catalog.default.name, "fast")
+        self.assertEqual(catalog.resolve("ds").model, "deepseek-chat")
+        claude = catalog.resolve("claude")
+        self.assertEqual(claude.protocol, "anthropic-messages")
+        self.assertEqual(claude.api_key, "secret-two")
+        self.assertFalse(claude.capabilities.streaming)
+        self.assertFalse(claude.capabilities.json_mode)
+        self.assertNotIn("secret-two", repr(claude))
+
+    def test_custom_catalog_unknown_preference_falls_back_to_default(self) -> None:
+        catalog = ModelCatalog.from_json(
+            json.dumps(
+                {
+                    "main": {
+                        "model": "model-a",
+                        "api_key_required": False,
+                    }
+                }
+            ),
+            default_profile="main",
+            environ={},
+        )
+
+        self.assertEqual(catalog.resolve_preference("removed-profile").name, "main")
+        self.assertEqual(catalog.resolve_preference("removed-profile").model, "model-a")
+
+    def test_legacy_settings_keep_previous_raw_model_preferences_working(self) -> None:
+        legacy_settings = replace(
+            settings,
+            model_profiles_json="",
+            model_default_profile="deepseek",
+            deepseek_api_key="test-key",
+            deepseek_model="deepseek-chat",
+        )
+
+        catalog = ModelCatalog.from_settings(legacy_settings, environ={})
+        selected = catalog.resolve_preference("deepseek-old-model")
+
+        self.assertTrue(catalog.legacy_fallback)
+        self.assertEqual(selected.name, "deepseek")
+        self.assertEqual(selected.model, "deepseek-old-model")
+        self.assertEqual(catalog.resolve("flash").model, "deepseek-v4-flash")
+        self.assertEqual(catalog.resolve("pro").model, "deepseek-v4-pro")
+
+    def test_invalid_secret_source_and_alias_collision_fail_fast(self) -> None:
+        with self.assertRaisesRegex(ModelCatalogError, "both api_key"):
+            ModelCatalog.from_json(
+                json.dumps(
+                    {
+                        "main": {
+                            "model": "a",
+                            "api_key": "secret",
+                            "api_key_env": "MODEL_KEY",
+                        }
+                    }
+                ),
+                default_profile="main",
+                environ={"MODEL_KEY": "other"},
+            )
+
+        with self.assertRaisesRegex(ModelCatalogError, "used by both"):
+            ModelCatalog.from_json(
+                json.dumps(
+                    {
+                        "a": {
+                            "model": "a",
+                            "api_key_required": False,
+                            "aliases": ["shared"],
+                        },
+                        "b": {
+                            "model": "b",
+                            "api_key_required": False,
+                            "aliases": ["shared"],
+                        },
+                    }
+                ),
+                default_profile="a",
+                environ={},
+            )
+
+    def test_invalid_protocol_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ModelCatalogError, "unsupported protocol"):
+            ModelCatalog.from_json(
+                json.dumps(
+                    {
+                        "main": {
+                            "protocol": "made-up-api",
+                            "model": "anything",
+                            "api_key_required": False,
+                        }
+                    }
+                ),
+                default_profile="main",
+                environ={},
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()

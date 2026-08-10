@@ -54,6 +54,8 @@ class Settings:
     deepseek_base_url: str
     deepseek_model: str
     deepseek_thinking: str
+    model_default_profile: str
+    model_profiles_json: str
     system_prompt: str
     max_context_turns: int
     group_context_messages: int
@@ -142,10 +144,12 @@ class Settings:
     semantic_index_seconds: int
     semantic_batch_size: int
     historian_enabled: bool
+    historian_profile: str
     historian_model: str
     historian_check_seconds: int
     historian_max_scopes: int
     dream_enabled: bool
+    dream_profile: str
     dream_model: str
     dream_hour: int
     dream_min_entries: int
@@ -190,6 +194,11 @@ class Settings:
             deepseek_base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").strip(),
             deepseek_model=os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash").strip(),
             deepseek_thinking=os.getenv("DEEPSEEK_THINKING", "disabled").strip().lower(),
+            model_default_profile=(
+                os.getenv("AI_MODEL_DEFAULT_PROFILE", "deepseek").strip()
+                or "deepseek"
+            ),
+            model_profiles_json=os.getenv("AI_MODEL_PROFILES_JSON", "").strip(),
             system_prompt=os.getenv(
                 "AI_SYSTEM_PROMPT",
                 "你是QQ群里的友好助手。回答要简洁、准确、有帮助；不知道就说不知道。",
@@ -443,6 +452,7 @@ class Settings:
                 100,
             ),
             historian_enabled=_get_bool("AI_HISTORIAN_ENABLED", False),
+            historian_profile=os.getenv("AI_HISTORIAN_PROFILE", "").strip(),
             historian_model=os.getenv("AI_HISTORIAN_MODEL", "").strip(),
             historian_check_seconds=max(
                 _get_int("AI_HISTORIAN_CHECK_SECONDS", 60),
@@ -453,6 +463,7 @@ class Settings:
                 200,
             ),
             dream_enabled=_get_bool("AI_DREAM_ENABLED", False),
+            dream_profile=os.getenv("AI_DREAM_PROFILE", "").strip(),
             dream_model=os.getenv("AI_DREAM_MODEL", "").strip(),
             dream_hour=min(
                 max(_get_int("AI_DREAM_HOUR", 4), 0),

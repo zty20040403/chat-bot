@@ -277,6 +277,28 @@ class TurnJournalTests(unittest.TestCase):
         self.assertEqual(mismatch.mode, "digest")
         self.assertEqual(mismatch.reason, "model-changed")
 
+        provider_mismatch = self.journal.build_replay(
+            self.group_a,
+            turn.turn_ordinal,
+            current_model="deepseek-chat",
+            current_provider="anthropic:anthropic-messages",
+            current_profile="default",
+            prompt_version="v1",
+            tool_catalog_version="tools-v1",
+        )
+        self.assertEqual(provider_mismatch.reason, "provider-changed")
+
+        profile_mismatch = self.journal.build_replay(
+            self.group_a,
+            turn.turn_ordinal,
+            current_model="deepseek-chat",
+            current_provider="deepseek-openai-compatible",
+            current_profile="another-profile",
+            prompt_version="v1",
+            tool_catalog_version="tools-v1",
+        )
+        self.assertEqual(profile_mismatch.reason, "profile-changed")
+
     def test_chat_only_turn_degrades_to_digest(self) -> None:
         turn = self.start(self.group_a, "just chat")
         self.journal.finish_turn(
