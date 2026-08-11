@@ -37,6 +37,24 @@ class DockerSandboxManagerTests(unittest.TestCase):
 
 
 class DockerSandboxCancellationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_create_does_not_apply_resource_limits(self) -> None:
+        manager = DockerSandboxManager()
+        manager.list = AsyncMock(return_value=[])  # type: ignore[method-assign]
+        manager._list_by_label = AsyncMock(  # type: ignore[method-assign]
+            return_value=[]
+        )
+        manager._run = AsyncMock(  # type: ignore[method-assign]
+            return_value=SandboxResult("container-id\n", "", 0)
+        )
+
+        await manager.create("owner", "python")
+
+        command = manager._run.await_args.args
+        self.assertNotIn("--memory", command)
+        self.assertNotIn("--memory-swap", command)
+        self.assertNotIn("--cpus", command)
+        self.assertNotIn("--pids-limit", command)
+
     async def test_exec_returns_observed_manifest(self) -> None:
         manager = DockerSandboxManager()
         manager._owned_container = AsyncMock(return_value="qqbot-sabc123")  # type: ignore[method-assign]
