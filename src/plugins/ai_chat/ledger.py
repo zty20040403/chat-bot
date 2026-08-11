@@ -555,18 +555,28 @@ class MessageLedger:
             rows = self._connection.execute(
                 """
                 SELECT
-                    m.sender_principal_id,
-                    m.sender_display,
-                    MAX(m.canonical_message_id) AS last_message_id
-                FROM messages AS m
-                JOIN conversations AS c
-                  ON c.conversation_id = m.conversation_id
-                JOIN conversation_visibility AS v
-                  ON v.conversation_id = m.conversation_id
-                WHERE c.scope_key = ?
-                  AND m.canonical_message_id >= v.min_canonical_message_id
-                  AND m.sender_principal_id IS NOT NULL
-                GROUP BY m.sender_principal_id
+                    latest.sender_principal_id,
+                    latest.sender_display,
+                    latest.last_message_id
+                FROM (
+                    SELECT
+                        m.sender_principal_id,
+                        m.sender_display,
+                        m.canonical_message_id AS last_message_id,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY m.sender_principal_id
+                            ORDER BY m.canonical_message_id DESC
+                        ) AS roster_rank
+                    FROM messages AS m
+                    JOIN conversations AS c
+                      ON c.conversation_id = m.conversation_id
+                    JOIN conversation_visibility AS v
+                      ON v.conversation_id = m.conversation_id
+                    WHERE c.scope_key = ?
+                      AND m.canonical_message_id >= v.min_canonical_message_id
+                      AND m.sender_principal_id IS NOT NULL
+                ) AS latest
+                WHERE latest.roster_rank = 1
                 ORDER BY last_message_id DESC
                 LIMIT ?
                 """,

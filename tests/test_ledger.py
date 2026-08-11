@@ -188,6 +188,31 @@ class MessageLedgerTests(unittest.TestCase):
         self.assertIn(f"@#{message.sender_principal_id}", rendered)
         self.assertNotIn("987654", rendered)
 
+    def test_roster_uses_each_principals_latest_display_name(self) -> None:
+        first = self.ledger.record_message(
+            self.group_a,
+            native_message_id="1",
+            sender_native_user_id="7",
+            sender_display="Old Name",
+            body=MessageBody((TextNode(0, "first"),)),
+            occurred_at=101,
+        )
+        self.ledger.record_message(
+            self.group_a,
+            native_message_id="2",
+            sender_native_user_id="7",
+            sender_display="New Name",
+            body=MessageBody((TextNode(0, "second"),)),
+            occurred_at=102,
+        )
+
+        roster = self.ledger.render_roster(self.group_a)
+
+        self.assertEqual(
+            roster,
+            f"@#{first.sender_principal_id}: New Name",
+        )
+
     def test_commands_are_audited_but_excluded_from_prompt_projection(self) -> None:
         command = self.ledger.record_message(
             self.group_a,

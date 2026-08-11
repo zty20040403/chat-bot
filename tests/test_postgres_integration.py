@@ -257,6 +257,10 @@ class PostgresIntegrationTests(unittest.TestCase):
                     )
                 )
 
+            roster = ledger.render_roster(scope)
+            self.assertIn("User 0", roster)
+            self.assertIn("User 1", roster)
+
             projection = context.build_projection(ledger, scope)
             valid, detail = context.verify_scope(ledger, scope)
             self.assertTrue(valid, detail)

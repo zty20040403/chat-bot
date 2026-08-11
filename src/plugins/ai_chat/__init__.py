@@ -2077,6 +2077,9 @@ async def _ask_ai(
         )
     except DeepSeekConfigError:
         return f"模型配置 {selected_profile.name} 缺少可用的 API Key。"
+    except DatabaseError as exc:
+        logger.warning(f"AI context storage request failed: {exc}")
+        return "我读取聊天上下文时遇到数据库问题，等会儿再试。"
     except RuntimeError as exc:
         logger.warning(f"LLM request failed: {exc}")
         return f"{selected_profile.provider} 暂时没回上来，等会儿再试。"
