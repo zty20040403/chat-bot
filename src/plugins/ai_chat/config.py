@@ -191,6 +191,7 @@ class Settings:
     sandbox_timeout_seconds: int
     sandbox_max_file_bytes: int
     enabled_groups: set[int]
+    disabled_groups: set[int]
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -572,10 +573,13 @@ class Settings:
             * 1024
             * 1024,
             enabled_groups=_get_group_ids("AI_ENABLED_GROUPS"),
+            disabled_groups=_get_group_ids("AI_DISABLED_GROUPS"),
         )
 
     def is_group_enabled(self, group_id: int) -> bool:
-        return not self.enabled_groups or group_id in self.enabled_groups
+        return group_id not in self.disabled_groups and (
+            not self.enabled_groups or group_id in self.enabled_groups
+        )
 
     def is_sandbox_user_allowed(self, user_id: int) -> bool:
         return self.sandbox_enabled and (

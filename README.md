@@ -532,6 +532,14 @@ AI_ENABLED_GROUPS=123456789,987654321
 
 留空则所有群都可以用。
 
+需要让机器人在个别群完全静默时，使用禁用名单：
+
+```text
+AI_DISABLED_GROUPS=201644592
+```
+
+禁用名单优先于允许名单，并同时阻止命令回复、主动聊天、暖场、提醒和待投递消息。
+
 ## 五份 ADR 的落地范围
 
 本项目参考了 [HCHogan/max 的 ADR](https://github.com/HCHogan/max/tree/main/docs/adr)

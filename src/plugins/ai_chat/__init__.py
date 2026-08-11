@@ -28,7 +28,8 @@ from nonebot.adapters.onebot.v11 import (
     PrivateMessageEvent,
 )
 from nonebot.adapters.onebot.v11.exception import ActionFailed
-from nonebot.exception import FinishedException
+from nonebot.exception import FinishedException, IgnoredException
+from nonebot.message import event_preprocessor
 from nonebot.params import CommandArg
 
 from .agent_tools import AGENT_TOOL_PROMPT, AgentToolExecutor
@@ -232,6 +233,15 @@ rich_renderer = app_context.rich_renderer
 background_tasks = app_context.background_tasks
 BOT_STARTED_AT = app_context.started_at
 driver = get_driver()
+
+
+@event_preprocessor
+async def ignore_disabled_group_event(event: MessageEvent) -> None:
+    if (
+        isinstance(event, GroupMessageEvent)
+        and not settings.is_group_enabled(event.group_id)
+    ):
+        raise IgnoredException("QQ group is disabled for this bot")
 
 register_http_surfaces(
     get_app(),
@@ -3008,6 +3018,8 @@ async def _warmup_loop() -> None:
 
         day = now.date().isoformat()
         for group_id in idle_warmup_scheduler.due_groups(day):
+            if not settings.is_group_enabled(group_id):
+                continue
             reply = await _generate_warmup_reply(group_id)
             if not reply or not idle_warmup_scheduler.is_still_idle(group_id):
                 continue
@@ -3023,6 +3035,12 @@ async def _warmup_loop() -> None:
 async def _deliver_reminder(bot: Bot, reminder: Reminder) -> None:
     text = f"提醒：{reminder.message}"
     if reminder.conversation_kind == "group":
+        group_id = int(reminder.native_conversation_id)
+        if not settings.is_group_enabled(group_id):
+            logger.info(
+                f"Dropping {reminder.handle}: target QQ group is disabled."
+            )
+            return
         segments = Message()
         try:
             creator_id = int(reminder.creator_native_user_id)
@@ -3033,7 +3051,7 @@ async def _deliver_reminder(bot: Bot, reminder: Reminder) -> None:
             segments.append(MessageSegment.text(" "))
         segments.append(MessageSegment.text(text))
         response = await bot.send_group_msg(
-            group_id=int(reminder.native_conversation_id),
+            group_id=group_id,
             message=segments,
         )
     else:
@@ -3091,6 +3109,10 @@ async def _reminder_loop() -> None:
 
 
 async def _deliver_onebot_outbox(bot: Bot, delivery: Delivery) -> None:
+    if delivery.target_kind == "group" and not settings.is_group_enabled(
+        int(delivery.target_native_conversation_id)
+    ):
+        raise BridgePermanentError("target QQ group is disabled")
     message = render_onebot_body(delivery.body)
     if delivery.reply_to_native_message_id:
         try:
