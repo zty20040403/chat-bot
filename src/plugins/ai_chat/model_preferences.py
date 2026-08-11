@@ -14,6 +14,9 @@ class ModelPreferenceStore:
     def get_explicit(self, conversation_id: str) -> str | None:
         return self._models.get(conversation_id)
 
+    def items(self) -> list[tuple[str, str]]:
+        return sorted(self._models.items())
+
     def set(self, conversation_id: str, model: str) -> None:
         self._models[conversation_id] = model
         self._save()

@@ -43,6 +43,19 @@ class SandboxObservedManifest:
     network_mode: str
 
 
+@dataclass(frozen=True)
+class SandboxExecutionActivity:
+    activity_id: str
+    sandbox_id: str
+    owner: str
+    command: str
+    started_at: int
+    status: str = "running"
+    finished_at: int | None = None
+    returncode: int | None = None
+    error: str = ""
+
+
 class DockerSandboxManager:
     def __init__(
         self,
@@ -58,6 +71,8 @@ class DockerSandboxManager:
         self.default_timeout_seconds = max(5, default_timeout_seconds)
         self.max_output_chars = max(1000, max_output_chars)
         self.max_file_bytes = max(0, int(max_file_bytes))
+        self._active_execs: dict[str, SandboxExecutionActivity] = {}
+        self._last_execs: dict[str, SandboxExecutionActivity] = {}
 
     async def create(self, owner: str, runtime: str = "python") -> dict[str, str]:
         image = RUNTIME_IMAGES.get(runtime)
@@ -86,6 +101,8 @@ class DockerSandboxManager:
             "qqbot.sandbox=true",
             "--label",
             f"qqbot.owner={owner_hash}",
+            "--label",
+            f"qqbot.owner_ref={self._owner_ref(owner)}",
             "--label",
             f"qqbot.id={sandbox_id}",
             "--label",
@@ -125,6 +142,80 @@ class DockerSandboxManager:
             f"qqbot.owner={self._owner_hash(owner)}"
         )
 
+    async def admin_snapshot(self) -> dict[str, object]:
+        result = await self._run(
+            "docker",
+            "ps",
+            "-a",
+            "--filter",
+            "label=qqbot.sandbox=true",
+            "--format",
+            (
+                '{{.Names}}|{{.Label "qqbot.id"}}|'
+                '{{.Label "qqbot.runtime"}}|{{.Label "qqbot.owner_ref"}}|'
+                '{{.Label "qqbot.owner"}}|{{.Status}}'
+            ),
+            timeout=20,
+        )
+        if result.returncode != 0:
+            raise SandboxError(self._docker_error(result.stderr))
+
+        containers: list[dict[str, object]] = []
+        running_names: list[str] = []
+        for line in result.stdout.splitlines():
+            parts = (line.split("|", 5) + [""] * 6)[:6]
+            name, sandbox_id, runtime, owner_ref, owner_hash, status = parts
+            if not SANDBOX_ID_PATTERN.fullmatch(sandbox_id):
+                continue
+            running = status.lower().startswith("up ")
+            if running:
+                running_names.append(name)
+            containers.append(
+                {
+                    "sandbox_id": sandbox_id,
+                    "name": name,
+                    "runtime": runtime,
+                    "owner": owner_ref,
+                    "owner_hash": owner_hash,
+                    "status": status,
+                    "running": running,
+                    "cpu_percent": "-",
+                    "memory_usage": "-",
+                    "memory_percent": "-",
+                    "workspace_size_bytes": 0,
+                    "workspace_file_count": 0,
+                    "workspace_files": [],
+                    "workspace_error": "",
+                }
+            )
+
+        stats = await self._container_stats(running_names)
+        now = int(time.time())
+        active_by_sandbox: dict[str, list[dict[str, object]]] = {}
+        for activity in self._active_execs.values():
+            active_by_sandbox.setdefault(activity.sandbox_id, []).append(
+                self._activity_payload(activity, now=now)
+            )
+
+        for container in containers:
+            name = str(container["name"])
+            sandbox_id = str(container["sandbox_id"])
+            container.update(stats.get(name, {}))
+            container["activities"] = active_by_sandbox.get(sandbox_id, [])
+            last_activity = self._last_execs.get(sandbox_id)
+            container["last_activity"] = (
+                self._activity_payload(last_activity, now=now)
+                if last_activity is not None
+                else None
+            )
+            if bool(container["running"]):
+                container.update(await self._workspace_inventory(name))
+
+        return {
+            "items": containers,
+            "active_commands": len(self._active_execs),
+        }
+
     async def destroy(self, owner: str, sandbox_id: str) -> None:
         name = await self._owned_container(owner, sandbox_id)
         result = await self._run(
@@ -151,14 +242,24 @@ class DockerSandboxManager:
             max(timeout_seconds or self.default_timeout_seconds, 1),
             300,
         )
-        marker = f"/tmp/qqbot-observe-{secrets.token_hex(8)}"
-        network_mode = await self._network_mode(name)
-        marker_result = await self._run(
-            "docker", "exec", name, "touch", marker, timeout=10
+        activity_id = secrets.token_hex(8)
+        activity = SandboxExecutionActivity(
+            activity_id=activity_id,
+            sandbox_id=sandbox_id,
+            owner=self._owner_ref(owner),
+            command=command[:2000],
+            started_at=int(time.time()),
         )
-        marker_ready = marker_result.returncode == 0
-        started = time.monotonic()
+        self._active_execs[activity_id] = activity
+        marker = f"/tmp/qqbot-observe-{secrets.token_hex(8)}"
+        marker_ready = False
         try:
+            network_mode = await self._network_mode(name)
+            marker_result = await self._run(
+                "docker", "exec", name, "touch", marker, timeout=10
+            )
+            marker_ready = marker_result.returncode == 0
+            started = time.monotonic()
             stdout_bytes, stderr_bytes, returncode = await self._run_bytes(
                 "docker",
                 "exec",
@@ -168,43 +269,50 @@ class DockerSandboxManager:
                 command,
                 timeout=timeout,
             )
+            duration_ms = max(int((time.monotonic() - started) * 1000), 0)
+            changed_paths = (
+                await self._changed_workspace_paths(name, marker)
+                if marker_ready
+                else ()
+            )
+            container_diff = await self._container_diff(name, marker)
+            result = SandboxResult(
+                stdout=self._trim_output(
+                    stdout_bytes.decode("utf-8", errors="replace")
+                ),
+                stderr=self._trim_output(
+                    stderr_bytes.decode("utf-8", errors="replace")
+                ),
+                returncode=returncode,
+                manifest=SandboxObservedManifest(
+                    command=command,
+                    duration_ms=duration_ms,
+                    stdout_sha256=hashlib.sha256(stdout_bytes).hexdigest(),
+                    stdout_bytes=len(stdout_bytes),
+                    stderr_sha256=hashlib.sha256(stderr_bytes).hexdigest(),
+                    stderr_bytes=len(stderr_bytes),
+                    changed_workspace_paths=changed_paths,
+                    container_diff=container_diff,
+                    network_mode=network_mode,
+                ),
+            )
         except asyncio.CancelledError:
+            self._remember_exec(activity, status="cancelled")
+            raise
+        except Exception as exc:
+            self._remember_exec(activity, status="failed", error=str(exc))
+            raise
+        else:
+            self._remember_exec(
+                activity,
+                status="completed" if result.returncode == 0 else "failed",
+                returncode=result.returncode,
+            )
+            return result
+        finally:
+            self._active_execs.pop(activity_id, None)
             if marker_ready:
                 await self._remove_observation_marker(name, marker)
-            raise
-        except Exception:
-            if marker_ready:
-                await self._remove_observation_marker(name, marker)
-            raise
-        duration_ms = max(int((time.monotonic() - started) * 1000), 0)
-        changed_paths = (
-            await self._changed_workspace_paths(name, marker)
-            if marker_ready
-            else ()
-        )
-        container_diff = await self._container_diff(name, marker)
-        if marker_ready:
-            await self._remove_observation_marker(name, marker)
-        return SandboxResult(
-            stdout=self._trim_output(
-                stdout_bytes.decode("utf-8", errors="replace")
-            ),
-            stderr=self._trim_output(
-                stderr_bytes.decode("utf-8", errors="replace")
-            ),
-            returncode=returncode,
-            manifest=SandboxObservedManifest(
-                command=command,
-                duration_ms=duration_ms,
-                stdout_sha256=hashlib.sha256(stdout_bytes).hexdigest(),
-                stdout_bytes=len(stdout_bytes),
-                stderr_sha256=hashlib.sha256(stderr_bytes).hexdigest(),
-                stderr_bytes=len(stderr_bytes),
-                changed_workspace_paths=changed_paths,
-                container_diff=container_diff,
-                network_mode=network_mode,
-            ),
-        )
 
     async def write_file(
         self,
@@ -424,6 +532,129 @@ class DockerSandboxManager:
                 )
         return sandboxes
 
+    async def _container_stats(
+        self,
+        names: list[str],
+    ) -> dict[str, dict[str, str]]:
+        if not names:
+            return {}
+        result = await self._run(
+            "docker",
+            "stats",
+            "--no-stream",
+            "--format",
+            "{{.Name}}|{{.CPUPerc}}|{{.MemUsage}}|{{.MemPerc}}",
+            *names,
+            timeout=20,
+        )
+        if result.returncode != 0:
+            return {}
+        stats: dict[str, dict[str, str]] = {}
+        for line in result.stdout.splitlines():
+            name, cpu, memory, memory_percent = (
+                line.split("|", 3) + ["", "", "", ""]
+            )[:4]
+            if name:
+                stats[name] = {
+                    "cpu_percent": cpu,
+                    "memory_usage": memory,
+                    "memory_percent": memory_percent,
+                }
+        return stats
+
+    async def _workspace_inventory(self, name: str) -> dict[str, object]:
+        script = (
+            "printf '__TOTAL__|'; "
+            "du -sb /workspace 2>/dev/null | cut -f1; "
+            "printf '__COUNT__|'; "
+            "find /workspace -xdev -type f -printf '.' 2>/dev/null | wc -c; "
+            "find /workspace -xdev -type f -printf '%P|%s\\n' "
+            "2>/dev/null | sort | head -n 100"
+        )
+        result = await self._run(
+            "docker",
+            "exec",
+            name,
+            "sh",
+            "-lc",
+            script,
+            timeout=20,
+        )
+        if result.returncode != 0:
+            return {"workspace_error": self._docker_error(result.stderr)}
+
+        total_size = 0
+        file_count = 0
+        files: list[dict[str, object]] = []
+        for line in result.stdout.splitlines():
+            if line.startswith("__TOTAL__|"):
+                total_size = self._safe_int(line.partition("|")[2])
+                continue
+            if line.startswith("__COUNT__|"):
+                file_count = self._safe_int(line.partition("|")[2])
+                continue
+            path, separator, raw_size = line.rpartition("|")
+            if not separator or not path:
+                continue
+            files.append(
+                {
+                    "path": path[:500],
+                    "size_bytes": self._safe_int(raw_size),
+                }
+            )
+        return {
+            "workspace_size_bytes": total_size,
+            "workspace_file_count": file_count,
+            "workspace_files": files,
+            "workspace_error": "",
+        }
+
+    def _remember_exec(
+        self,
+        activity: SandboxExecutionActivity,
+        *,
+        status: str,
+        returncode: int | None = None,
+        error: str = "",
+    ) -> None:
+        self._last_execs[activity.sandbox_id] = SandboxExecutionActivity(
+            activity_id=activity.activity_id,
+            sandbox_id=activity.sandbox_id,
+            owner=activity.owner,
+            command=activity.command,
+            started_at=activity.started_at,
+            status=status,
+            finished_at=int(time.time()),
+            returncode=returncode,
+            error=error[:500],
+        )
+
+    @staticmethod
+    def _activity_payload(
+        activity: SandboxExecutionActivity,
+        *,
+        now: int,
+    ) -> dict[str, object]:
+        finished_at = activity.finished_at
+        elapsed_until = finished_at if finished_at is not None else now
+        return {
+            "activity_id": activity.activity_id,
+            "command": activity.command,
+            "started_at": activity.started_at,
+            "finished_at": finished_at,
+            "elapsed_seconds": max(elapsed_until - activity.started_at, 0),
+            "status": activity.status,
+            "returncode": activity.returncode,
+            "error": activity.error,
+        }
+
+    @staticmethod
+    def _safe_int(value: object) -> int:
+        try:
+            return max(int(str(value).strip()), 0)
+        except (TypeError, ValueError):
+            return 0
+
     async def _run(
         self,
         *command: str,
@@ -494,6 +725,10 @@ class DockerSandboxManager:
     @staticmethod
     def _container_name(sandbox_id: str) -> str:
         return f"qqbot-{sandbox_id}"
+
+    @staticmethod
+    def _owner_ref(owner: str) -> str:
+        return " ".join(str(owner).split())[:200]
 
     @staticmethod
     def _owner_hash(owner: str) -> str:

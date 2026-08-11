@@ -54,6 +54,7 @@ class DockerSandboxCancellationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(command[command.index("--memory-swap") + 1], "8g")
         self.assertNotIn("--cpus", command)
         self.assertNotIn("--pids-limit", command)
+        self.assertIn("qqbot.owner_ref=owner", command)
 
     async def test_zero_file_limit_allows_large_transfers(self) -> None:
         manager = DockerSandboxManager(max_file_bytes=0)
@@ -101,6 +102,45 @@ class DockerSandboxCancellationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result.manifest.stdout_bytes, 5)  # type: ignore[union-attr]
         self.assertEqual(len(result.manifest.stdout_sha256), 64)  # type: ignore[union-attr]
+        self.assertEqual(
+            manager._last_execs["sabc123"].command,
+            "python main.py",
+        )
+        self.assertEqual(manager._last_execs["sabc123"].status, "completed")
+
+    async def test_admin_snapshot_reports_resources_and_workspace(self) -> None:
+        manager = DockerSandboxManager()
+        manager._run = AsyncMock(  # type: ignore[method-assign]
+            side_effect=[
+                SandboxResult(
+                    (
+                        "qqbot-sabc123|sabc123|python|"
+                        "group:1:user:2|ownerhash|Up 2 minutes\n"
+                    ),
+                    "",
+                    0,
+                ),
+                SandboxResult(
+                    "qqbot-sabc123|1.25%|64MiB / 8GiB|0.78%\n",
+                    "",
+                    0,
+                ),
+                SandboxResult(
+                    "__TOTAL__|123\n__COUNT__|2\na.txt|5\ndir/b.bin|118\n",
+                    "",
+                    0,
+                ),
+            ]
+        )
+
+        snapshot = await manager.admin_snapshot()
+
+        self.assertEqual(snapshot["active_commands"], 0)
+        item = snapshot["items"][0]  # type: ignore[index]
+        self.assertEqual(item["owner"], "group:1:user:2")
+        self.assertEqual(item["memory_usage"], "64MiB / 8GiB")
+        self.assertEqual(item["workspace_file_count"], 2)
+        self.assertEqual(item["workspace_files"][1]["path"], "dir/b.bin")
 
     async def test_cancelling_exec_kills_child_process(self) -> None:
         class FakeProcess:

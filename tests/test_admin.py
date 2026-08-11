@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import unittest
+from types import SimpleNamespace
 
 import httpx
 import nonebot
@@ -30,6 +31,50 @@ class BackgroundTasks:
 
     def failures(self):
         return {"historian": "upstream timeout"}
+
+
+class SandboxManager:
+    async def admin_snapshot(self):
+        return {
+            "items": [
+                {
+                    "sandbox_id": "s123abc",
+                    "owner": "group:930690526:user:3526452465",
+                    "activities": [
+                        {
+                            "command": "python main.py",
+                            "elapsed_seconds": 2,
+                        }
+                    ],
+                }
+            ],
+            "active_commands": 1,
+        }
+
+
+class ModelPreferences:
+    def items(self):
+        return [("group:930690526:user:3526452465", "main")]
+
+
+class MessageLedger:
+    def list_scopes(self):
+        return [
+            SimpleNamespace(
+                platform="onebot-v11",
+                kind="group",
+                native_conversation_id="930690526",
+            )
+        ]
+
+
+class Settings:
+    enabled_groups = {930690526}
+    disabled_groups = {201644592}
+
+    @staticmethod
+    def is_group_enabled(group_id):
+        return group_id != 201644592
 
 
 class AdminTests(unittest.TestCase):
@@ -62,6 +107,23 @@ class AdminTests(unittest.TestCase):
                 running_tasks=EmptyTasks(),
                 background_tasks=BackgroundTasks(),
                 model_catalog=models,
+                model_preferences=ModelPreferences(),
+                message_ledger=MessageLedger(),
+                settings=Settings(),
+                sandbox_manager=SandboxManager(),
+                sticker_inventory=lambda: {
+                    "counts": {"total": 1, "learned_images": 1},
+                    "items": [
+                        {
+                            "inventory_id": "learned-1",
+                            "source": "learned",
+                            "kind": "image",
+                            "name": "sticker.png",
+                            "reference": "https://example.test/sticker.png",
+                            "size_bytes": None,
+                        }
+                    ],
+                },
             ),
             token="secret",
         )
@@ -78,9 +140,23 @@ class AdminTests(unittest.TestCase):
                     "/bot-admin/api/overview",
                     headers={"Authorization": "Bearer secret"},
                 )
-                return page, denied, allowed
+                sandboxes = await client.get(
+                    "/bot-admin/api/sandboxes",
+                    headers={"Authorization": "Bearer secret"},
+                )
+                stickers = await client.get(
+                    "/bot-admin/api/stickers",
+                    headers={"Authorization": "Bearer secret"},
+                )
+                group_models = await client.get(
+                    "/bot-admin/api/group-models",
+                    headers={"Authorization": "Bearer secret"},
+                )
+                return page, denied, allowed, sandboxes, stickers, group_models
 
-        page, denied, allowed = asyncio.run(run())
+        page, denied, allowed, sandboxes, stickers, group_models = asyncio.run(
+            run()
+        )
         self.assertEqual(page.status_code, 200)
         self.assertIn("QQ Bot", page.text)
         self.assertEqual(denied.status_code, 401)
@@ -96,6 +172,21 @@ class AdminTests(unittest.TestCase):
         self.assertEqual(allowed.json()["models"]["default"], "main")
         self.assertTrue(allowed.json()["models"]["profiles"][0]["configured"])
         self.assertNotIn("never-return-this-secret", allowed.text)
+        self.assertIn("data-view=\"sandboxes\"", page.text)
+        self.assertEqual(sandboxes.json()["active_commands"], 1)
+        self.assertEqual(
+            sandboxes.json()["items"][0]["agent_tasks"],
+            [],
+        )
+        self.assertEqual(stickers.json()["counts"]["total"], 1)
+        group_rows = group_models.json()["items"]
+        self.assertEqual(
+            [row["group_id"] for row in group_rows],
+            [201644592, 930690526],
+        )
+        self.assertFalse(group_rows[0]["enabled"])
+        self.assertEqual(group_rows[1]["overrides"][0]["profile"], "main")
+        self.assertNotIn("never-return-this-secret", group_models.text)
 
 
 if __name__ == "__main__":

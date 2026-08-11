@@ -5,6 +5,7 @@ import re
 import threading
 from pathlib import Path
 from random import choice, sample
+from urllib.parse import urlsplit, urlunsplit
 
 from nonebot.adapters import Message
 from nonebot.adapters.onebot.v11 import MessageSegment
@@ -217,10 +218,97 @@ def learned_sticker_count() -> int:
     return len(_load_learned_stickers())
 
 
+def sticker_inventory() -> dict[str, object]:
+    items: list[dict[str, object]] = []
+    learned_faces = 0
+    learned_images = 0
+
+    for index, sticker in enumerate(_load_learned_stickers(), start=1):
+        segment_type = str(sticker.get("type", ""))
+        data = sticker.get("data")
+        if not isinstance(data, dict):
+            continue
+
+        if segment_type == "face":
+            face_id = _stable_face_id(data.get("id"))
+            if face_id is None:
+                continue
+            learned_faces += 1
+            items.append(
+                {
+                    "inventory_id": f"learned-{index}",
+                    "source": "learned",
+                    "kind": "qq-face",
+                    "name": f"QQ 表情 #{face_id}",
+                    "reference": str(face_id),
+                    "size_bytes": None,
+                }
+            )
+            continue
+
+        if segment_type == "image":
+            image_url = data.get("url")
+            if not isinstance(image_url, str) or not image_url.startswith(
+                ("http://", "https://")
+            ):
+                continue
+            learned_images += 1
+            items.append(
+                {
+                    "inventory_id": f"learned-{index}",
+                    "source": "learned",
+                    "kind": "image",
+                    "name": _image_reference_name(image_url),
+                    "reference": _safe_image_reference(image_url),
+                    "size_bytes": None,
+                }
+            )
+
+    local_stickers = list_stickers()
+    for index, sticker_path in enumerate(local_stickers, start=1):
+        try:
+            size_bytes: int | None = sticker_path.stat().st_size
+        except OSError:
+            size_bytes = None
+        items.append(
+            {
+                "inventory_id": f"local-{index}",
+                "source": "local",
+                "kind": "image",
+                "name": sticker_path.name,
+                "reference": sticker_path.name,
+                "size_bytes": size_bytes,
+            }
+        )
+
+    return {
+        "counts": {
+            "total": len(items),
+            "learned_faces": learned_faces,
+            "learned_images": learned_images,
+            "local_images": len(local_stickers),
+        },
+        "items": items,
+    }
+
+
 def clear_learned_stickers() -> int:
     count = learned_sticker_count()
     _save_learned_stickers([])
     return count
+
+
+def _safe_image_reference(image_url: str) -> str:
+    parsed = urlsplit(image_url)
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))[:500]
+
+
+def _image_reference_name(image_url: str) -> str:
+    parsed = urlsplit(image_url)
+    filename = Path(parsed.path).name
+    if filename:
+        return filename[:160]
+    return (parsed.netloc or "QQ 图片表情")[:160]
 
 
 def _message_from_learned_sticker(sticker: dict[str, object]) -> MessageSegment | None:

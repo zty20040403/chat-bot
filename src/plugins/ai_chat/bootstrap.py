@@ -6,6 +6,7 @@ from .admin import AdminServices, register_admin
 from .bridges import register_bridge_routes
 from .config import Settings
 from .runtime import AppContext
+from .stickers import sticker_inventory
 
 
 class BootstrapLogger(Protocol):
@@ -54,6 +55,11 @@ def register_http_surfaces(
                 browser_manager=context.browser_manager,
                 background_tasks=context.background_tasks,
                 model_catalog=context.model_catalog,
+                model_preferences=context.model_preferences,
+                message_ledger=context.message_ledger,
+                settings=context.settings,
+                sandbox_manager=context.sandbox_manager,
+                sticker_inventory=sticker_inventory,
             ),
             path=settings.admin_path,
             token=settings.admin_token,
