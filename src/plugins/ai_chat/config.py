@@ -195,6 +195,7 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
+        sandbox_max_file_mb = _get_int("AI_SANDBOX_MAX_FILE_MB", 20)
         return cls(
             deepseek_api_key=os.getenv("DEEPSEEK_API_KEY", "").strip(),
             deepseek_base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").strip(),
@@ -567,11 +568,11 @@ class Settings:
             sandbox_timeout_seconds=min(
                 max(_get_int("AI_SANDBOX_TIMEOUT_SECONDS", 120), 5), 300
             ),
-            sandbox_max_file_bytes=min(
-                max(_get_int("AI_SANDBOX_MAX_FILE_MB", 20), 1), 100
-            )
-            * 1024
-            * 1024,
+            sandbox_max_file_bytes=(
+                0
+                if sandbox_max_file_mb <= 0
+                else min(sandbox_max_file_mb, 100) * 1024 * 1024
+            ),
             enabled_groups=_get_group_ids("AI_ENABLED_GROUPS"),
             disabled_groups=_get_group_ids("AI_DISABLED_GROUPS"),
         )

@@ -57,7 +57,7 @@ class DockerSandboxManager:
         self.max_total = max(1, max_total)
         self.default_timeout_seconds = max(5, default_timeout_seconds)
         self.max_output_chars = max(1000, max_output_chars)
-        self.max_file_bytes = max(1024, max_file_bytes)
+        self.max_file_bytes = max(0, int(max_file_bytes))
 
     async def create(self, owner: str, runtime: str = "python") -> dict[str, str]:
         image = RUNTIME_IMAGES.get(runtime)
@@ -90,6 +90,10 @@ class DockerSandboxManager:
             f"qqbot.id={sandbox_id}",
             "--label",
             f"qqbot.runtime={runtime}",
+            "--memory",
+            "8g",
+            "--memory-swap",
+            "8g",
             "--cap-drop",
             "ALL",
             "--security-opt",
@@ -211,10 +215,12 @@ class DockerSandboxManager:
         *,
         allow_large: bool = False,
     ) -> int:
-        limit = self.max_file_bytes if allow_large else min(
-            self.max_file_bytes, 512 * 1024
+        limit = self._file_limit(
+            None
+            if allow_large or self.max_file_bytes == 0
+            else 512 * 1024
         )
-        if len(content) > limit:
+        if limit is not None and len(content) > limit:
             raise SandboxError(f"单次写入文件不能超过 {limit} 字节。")
         name = await self._owned_container(owner, sandbox_id)
         container_path = self._workspace_path(path)
@@ -250,7 +256,7 @@ class DockerSandboxManager:
         owner: str,
         sandbox_id: str,
         path: str,
-        max_bytes: int = 64 * 1024,
+        max_bytes: int | None = 64 * 1024,
     ) -> bytes:
         name = await self._owned_container(owner, sandbox_id)
         container_path = self._workspace_path(path)
@@ -269,8 +275,8 @@ class DockerSandboxManager:
             size = int(size_result.stdout.strip())
         except ValueError as exc:
             raise SandboxError("无法读取文件大小。") from exc
-        limit = min(max(1, max_bytes), self.max_file_bytes)
-        if size > limit:
+        limit = self._file_limit(max_bytes)
+        if limit is not None and size > limit:
             raise SandboxError(f"文件大小 {size} 字节，超过读取上限 {limit}。")
         result = await self._run_bytes(
             "docker",
@@ -286,6 +292,14 @@ class DockerSandboxManager:
                 result[1].decode("utf-8", errors="replace") or "读取文件失败。"
             )
         return result[0]
+
+    def _file_limit(self, requested: int | None) -> int | None:
+        limits: list[int] = []
+        if self.max_file_bytes > 0:
+            limits.append(self.max_file_bytes)
+        if requested is not None and requested > 0:
+            limits.append(int(requested))
+        return min(limits) if limits else None
 
     async def _owned_container(self, owner: str, sandbox_id: str) -> str:
         if not SANDBOX_ID_PATTERN.fullmatch(sandbox_id):

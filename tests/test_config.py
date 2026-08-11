@@ -12,6 +12,15 @@ from src.plugins.ai_chat.config import Settings
 
 
 class SettingsGroupFilterTests(unittest.TestCase):
+    def test_zero_sandbox_file_limit_means_unlimited(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"AI_SANDBOX_MAX_FILE_MB": "0"},
+        ):
+            settings = Settings.from_env()
+
+        self.assertEqual(settings.sandbox_max_file_bytes, 0)
+
     def test_disabled_groups_override_allowlist(self) -> None:
         with patch.dict(
             os.environ,

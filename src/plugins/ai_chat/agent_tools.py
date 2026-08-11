@@ -165,7 +165,7 @@ class AgentToolExecutor:
         self.event = event
         self.owner = owner
         self.sandbox_manager = sandbox_manager
-        self.max_file_bytes = max(1024, max_file_bytes)
+        self.max_file_bytes = max(0, int(max_file_bytes))
         self.ledger = ledger
         self.scope = scope
         self.turn_journal = turn_journal
@@ -587,7 +587,7 @@ class AgentToolExecutor:
             self.owner,
             sandbox_id,
             path,
-            max_bytes=self.max_file_bytes,
+            max_bytes=self.max_file_bytes or None,
         )
         response = await self.bot.call_api(
             "upload_group_file",
@@ -614,7 +614,11 @@ class AgentToolExecutor:
             self.owner,
             sandbox_id,
             path,
-            max_bytes=min(self.max_file_bytes, 10 * 1024 * 1024),
+            max_bytes=(
+                min(self.max_file_bytes, 10 * 1024 * 1024)
+                if self.max_file_bytes
+                else 10 * 1024 * 1024
+            ),
         )
         response = await self.bot.send_group_msg(
             group_id=self.event.group_id,
@@ -782,7 +786,10 @@ class AgentToolExecutor:
                 )
             native_file_id = str(matched_file["_native_file_id"])
 
-        if matched_file["file_size"] > self.max_file_bytes:
+        if (
+            self.max_file_bytes
+            and matched_file["file_size"] > self.max_file_bytes
+        ):
             return _json_result(ok=False, error="群文件超过导入大小上限。")
 
         response = await self.bot.call_api(
@@ -967,7 +974,7 @@ class AgentToolExecutor:
         if isinstance(local_file, str) and local_file:
             path = Path(local_file)
             size = await asyncio.to_thread(path.stat)
-            if size.st_size > self.max_file_bytes:
+            if self.max_file_bytes and size.st_size > self.max_file_bytes:
                 raise ValueError("文件超过导入大小上限。")
             content = await asyncio.to_thread(path.read_bytes)
             return self._check_download_size(content)
@@ -983,14 +990,17 @@ class AgentToolExecutor:
                     content = bytearray()
                     async for chunk in download.aiter_bytes():
                         content.extend(chunk)
-                        if len(content) > self.max_file_bytes:
+                        if (
+                            self.max_file_bytes
+                            and len(content) > self.max_file_bytes
+                        ):
                             raise ValueError("文件超过导入大小上限。")
                     return bytes(content)
 
         raise ValueError("NapCat 没有提供可读取的文件内容。")
 
     def _check_download_size(self, content: bytes) -> bytes:
-        if len(content) > self.max_file_bytes:
+        if self.max_file_bytes and len(content) > self.max_file_bytes:
             raise ValueError("文件超过导入大小上限。")
         return content
 

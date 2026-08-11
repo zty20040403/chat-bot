@@ -37,7 +37,7 @@ class DockerSandboxManagerTests(unittest.TestCase):
 
 
 class DockerSandboxCancellationTests(unittest.IsolatedAsyncioTestCase):
-    async def test_create_does_not_apply_resource_limits(self) -> None:
+    async def test_create_only_applies_eight_gibibyte_memory_limit(self) -> None:
         manager = DockerSandboxManager()
         manager.list = AsyncMock(return_value=[])  # type: ignore[method-assign]
         manager._list_by_label = AsyncMock(  # type: ignore[method-assign]
@@ -50,10 +50,30 @@ class DockerSandboxCancellationTests(unittest.IsolatedAsyncioTestCase):
         await manager.create("owner", "python")
 
         command = manager._run.await_args.args
-        self.assertNotIn("--memory", command)
-        self.assertNotIn("--memory-swap", command)
+        self.assertEqual(command[command.index("--memory") + 1], "8g")
+        self.assertEqual(command[command.index("--memory-swap") + 1], "8g")
         self.assertNotIn("--cpus", command)
         self.assertNotIn("--pids-limit", command)
+
+    async def test_zero_file_limit_allows_large_transfers(self) -> None:
+        manager = DockerSandboxManager(max_file_bytes=0)
+        manager._owned_container = AsyncMock(  # type: ignore[method-assign]
+            return_value="qqbot-sabc123"
+        )
+        manager._run = AsyncMock(  # type: ignore[method-assign]
+            side_effect=[
+                SandboxResult("", "", 0),
+                SandboxResult("", "", 0),
+            ]
+        )
+
+        self.assertIsNone(manager._file_limit(None))
+        self.assertEqual(manager._file_limit(64 * 1024), 64 * 1024)
+        content = b"x" * (600 * 1024)
+        self.assertEqual(
+            await manager.write_file("owner", "sabc123", "large.bin", content),
+            len(content),
+        )
 
     async def test_exec_returns_observed_manifest(self) -> None:
         manager = DockerSandboxManager()

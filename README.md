@@ -328,9 +328,9 @@ NapCat 原始消息和文件 ID，模型不能直接看到或提交这些原生 
 缺少必填参数、越界值和多余字段都会在执行前拒绝，并记为 `rejected`，模型不能
 靠自己声明一个新工具来获得权限。每轮和每回合分别有调用预算。
 
-沙箱以“群 + 发起用户”隔离，不挂载宿主机目录。当前容器不设置 CPU、内存、
-Swap 或进程数上限，会直接共享宿主机可用资源，因此生产部署必须使用
-`AI_SANDBOX_ALLOWED_USERS` 限制调用者，并限制同时存在的沙箱数量。
+沙箱以“群 + 发起用户”隔离，不挂载宿主机目录。每个容器最多使用 8GB 内存，
+CPU 和进程数不设上限。生产部署应使用 `AI_SANDBOX_ALLOWED_USERS` 限制调用者，
+并限制同时存在的沙箱数量。
 它可以联网安装依赖、构建、测试、打包并把产物发到当前群。
 这里的“部署”是把项目在临时沙箱中构建并运行验证；
 发布成公网服务仍需要对应云平台的账号、密钥和部署配置。
@@ -346,8 +346,11 @@ AI_SANDBOX_ALLOWED_USERS=你的QQ号
 AI_SANDBOX_MAX_PER_USER=2
 AI_SANDBOX_MAX_TOTAL=8
 AI_SANDBOX_TIMEOUT_SECONDS=120
-AI_SANDBOX_MAX_FILE_MB=20
+AI_SANDBOX_MAX_FILE_MB=0
 ```
+
+`AI_SANDBOX_MAX_FILE_MB=0` 表示 Bot 不额外限制沙箱文件导入和发送大小；
+实际传输仍受 QQ、NapCat、网络和服务器剩余磁盘空间限制。
 
 `AI_SANDBOX_ALLOWED_USERS` 留空时，所有已启用群的成员都能创建沙箱，
 会占用本机内存和磁盘。机器人关闭后，已创建容器仍会保留，之后可让机器人
