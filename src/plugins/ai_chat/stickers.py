@@ -2,16 +2,25 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from pathlib import Path
 from random import choice, sample
 
 from nonebot.adapters import Message
 from nonebot.adapters.onebot.v11 import MessageSegment
 
+from src.bot_storage import StateSource, open_json_state
+
 from .paths import STATE_DIR
 
 STICKER_DIR = Path(__file__).parent / "assets" / "stickers"
 LEARNED_STICKERS_PATH = STATE_DIR / "learned_stickers.json"
+LEARNED_STICKERS_NAMESPACE = "learned_stickers"
+_learned_stickers_lock = threading.RLock()
+_learned_stickers_state = open_json_state(
+    LEARNED_STICKERS_PATH,
+    LEARNED_STICKERS_NAMESPACE,
+)
 STICKER_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 LEARNABLE_SEGMENT_TYPES = {"face", "image"}
 MAX_STABLE_FACE_ID = 348
@@ -117,24 +126,27 @@ QQ_FACE_KEYWORDS = (
     "小黄脸",
     "face",
 )
-def _load_learned_stickers() -> list[dict[str, object]]:
-    if not LEARNED_STICKERS_PATH.exists():
-        return []
 
-    try:
-        data = json.loads(LEARNED_STICKERS_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
+
+def configure_learned_sticker_state(source: StateSource) -> None:
+    global _learned_stickers_state
+    with _learned_stickers_lock:
+        _learned_stickers_state = open_json_state(
+            source,
+            LEARNED_STICKERS_NAMESPACE,
+        )
+
+
+def _load_learned_stickers() -> list[dict[str, object]]:
+    with _learned_stickers_lock:
+        data = _learned_stickers_state.load()
 
     return data if isinstance(data, list) else []
 
 
 def _save_learned_stickers(stickers: list[dict[str, object]]) -> None:
-    LEARNED_STICKERS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    LEARNED_STICKERS_PATH.write_text(
-        json.dumps(stickers, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    with _learned_stickers_lock:
+        _learned_stickers_state.save(stickers)
 
 
 def _sticker_key(sticker: dict[str, object]) -> str:
@@ -161,40 +173,44 @@ def _clean_segment_data(data: dict[str, object]) -> dict[str, object]:
 
 
 def learn_stickers_from_message(message: Message) -> int:
-    learned = _load_learned_stickers()
-    known_keys = {_sticker_key(sticker) for sticker in learned}
-    added = 0
+    with _learned_stickers_lock:
+        learned = _load_learned_stickers()
+        known_keys = {_sticker_key(sticker) for sticker in learned}
+        added = 0
 
-    for segment in message:
-        if segment.type not in LEARNABLE_SEGMENT_TYPES:
-            continue
-
-        data = _clean_segment_data(segment.data)
-        if segment.type == "image":
-            image_url = data.get("url")
-            if not (isinstance(image_url, str) and image_url.startswith(("http://", "https://"))):
+        for segment in message:
+            if segment.type not in LEARNABLE_SEGMENT_TYPES:
                 continue
-            data = {"url": image_url}
 
-        if segment.type == "face":
-            face_id = _stable_face_id(data.get("id"))
-            if face_id is None:
+            data = _clean_segment_data(segment.data)
+            if segment.type == "image":
+                image_url = data.get("url")
+                if not (
+                    isinstance(image_url, str)
+                    and image_url.startswith(("http://", "https://"))
+                ):
+                    continue
+                data = {"url": image_url}
+
+            if segment.type == "face":
+                face_id = _stable_face_id(data.get("id"))
+                if face_id is None:
+                    continue
+                data = {"id": str(face_id)}
+
+            sticker = {"type": segment.type, "data": data}
+            key = _sticker_key(sticker)
+            if key in known_keys:
                 continue
-            data = {"id": str(face_id)}
 
-        sticker = {"type": segment.type, "data": data}
-        key = _sticker_key(sticker)
-        if key in known_keys:
-            continue
+            learned.append(sticker)
+            known_keys.add(key)
+            added += 1
 
-        learned.append(sticker)
-        known_keys.add(key)
-        added += 1
+        if added:
+            _save_learned_stickers(learned)
 
-    if added:
-        _save_learned_stickers(learned)
-
-    return added
+        return added
 
 
 def learned_sticker_count() -> int:

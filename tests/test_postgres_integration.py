@@ -21,6 +21,7 @@ from src.bot_storage.legacy_migration import (
     verify_legacy_snapshot,
 )
 from src.bot_storage.schema import HEAD_REVISION
+from src.bot_storage.state import open_json_state
 from src.plugins.ai_chat.bridges import MirrorStateStore
 from src.plugins.ai_chat.context_store import ContextStore
 from src.plugins.ai_chat.conversation_scope import ConversationScope
@@ -130,6 +131,13 @@ class PostgresIntegrationTests(unittest.TestCase):
                 json.dumps({"930690526": []}),
                 encoding="utf-8",
             )
+            learned_stickers = [
+                {"type": "face", "data": {"id": "14"}},
+            ]
+            (state_dir / "learned_stickers.json").write_text(
+                json.dumps(learned_stickers),
+                encoding="utf-8",
+            )
 
             snapshot = capture_legacy_snapshot(state_dir)
             report = migrate_legacy_snapshot(
@@ -189,6 +197,10 @@ class PostgresIntegrationTests(unittest.TestCase):
             self.assertEqual(
                 ModelPreferenceStore(self.database).get(scope.key, "default"),
                 "deepseek-chat",
+            )
+            self.assertEqual(
+                open_json_state(self.database, "learned_stickers").load(),
+                learned_stickers,
             )
 
     def test_runtime_stores_and_pgvector_use_the_unified_schema(self) -> None:

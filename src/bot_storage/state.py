@@ -4,7 +4,7 @@ import json
 import threading
 import time
 from pathlib import Path
-from typing import Any, Protocol, TypeAlias, Union
+from typing import Any, Protocol, Union
 
 from .database import PostgresDatabase
 
@@ -15,7 +15,7 @@ class JsonState(Protocol):
     def save(self, payload: object) -> None: ...
 
 
-StateSource: TypeAlias = Union[Path, PostgresDatabase, None]
+StateSource = Union[Path, PostgresDatabase, None]
 
 
 class FileJsonState:

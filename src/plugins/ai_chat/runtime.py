@@ -50,6 +50,7 @@ from .semantic_recall import (
     SemanticRecallService,
 )
 from .skills import SkillRegistry
+from .stickers import configure_learned_sticker_state
 from .tasks import RunningTaskRegistry
 from .turn_journal import TurnJournal
 from .voice import RecentVoiceStore
@@ -205,6 +206,8 @@ def build_app_context(
 
     def store_source(filename: str):
         return database if database is not None else state_dir / filename
+
+    configure_learned_sticker_state(store_source("learned_stickers.json"))
 
     memory = ConversationMemory(
         settings.max_context_turns,

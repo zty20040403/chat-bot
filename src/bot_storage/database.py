@@ -5,7 +5,7 @@ import sqlite3
 import threading
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
-from typing import Any, Protocol, TypeAlias, Union, overload
+from typing import Any, Protocol, Union, overload
 
 import psycopg
 from psycopg import sql
@@ -84,7 +84,7 @@ class StoreConnection(Protocol):
     def close(self) -> None: ...
 
 
-DatabaseSource: TypeAlias = Union[str, Path, "PostgresDatabase"]
+DatabaseSource = Union[str, Path, "PostgresDatabase"]
 
 
 _IDENTITY_COLUMNS = {

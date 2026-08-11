@@ -71,6 +71,10 @@ class LegacySnapshotTests(unittest.TestCase):
                 json.dumps({"scope": "deepseek"}),
                 encoding="utf-8",
             )
+            (state_dir / "learned_stickers.json").write_text(
+                json.dumps([{"type": "face", "data": {"id": "14"}}]),
+                encoding="utf-8",
+            )
 
             first = capture_legacy_snapshot(state_dir)
             second = capture_legacy_snapshot(state_dir)
@@ -79,7 +83,12 @@ class LegacySnapshotTests(unittest.TestCase):
             self.assertEqual(first.row_count, 1)
             self.assertEqual(
                 first.json_states,
-                {"model_preferences": {"scope": "deepseek"}},
+                {
+                    "learned_stickers": [
+                        {"type": "face", "data": {"id": "14"}}
+                    ],
+                    "model_preferences": {"scope": "deepseek"},
+                },
             )
 
     def test_invalid_json_fails_before_any_database_write(self) -> None:
