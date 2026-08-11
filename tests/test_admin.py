@@ -173,6 +173,13 @@ class AdminTests(unittest.TestCase):
         self.assertTrue(allowed.json()["models"]["profiles"][0]["configured"])
         self.assertNotIn("never-return-this-secret", allowed.text)
         self.assertIn("data-view=\"sandboxes\"", page.text)
+        self.assertIn("class=\"sidebar\"", page.text)
+        self.assertIn("id=\"usage-chart\"", page.text)
+        self.assertIn("QQ Bot Control", page.text)
+        self.assertNotIn("__DASHBOARD_", page.text)
+        self.assertNotIn("__ADMIN_PREFIX__", page.text)
+        self.assertNotIn("__TOKEN_REQUIRED__", page.text)
+        self.assertNotIn("unpkg.com", page.text)
         self.assertEqual(sandboxes.json()["active_commands"], 1)
         self.assertEqual(
             sandboxes.json()["items"][0]["agent_tasks"],
