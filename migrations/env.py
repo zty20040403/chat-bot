@@ -4,9 +4,9 @@ import os
 import re
 from logging.config import fileConfig
 
+import psycopg
 from alembic import context
 from sqlalchemy import create_engine, pool, text
-from sqlalchemy.engine import URL, make_url
 
 
 config = context.config
@@ -23,20 +23,17 @@ def _schema() -> str:
     return value
 
 
-def _url() -> URL:
+def _dsn() -> str:
     dsn = os.getenv("AI_POSTGRES_DSN", "").strip()
     if not dsn:
         raise RuntimeError("AI_POSTGRES_DSN is required for Alembic")
-    url = make_url(dsn)
-    if url.drivername in {"postgres", "postgresql"}:
-        url = url.set(drivername="postgresql+psycopg")
-    return url
+    return dsn
 
 
 def run_migrations_offline() -> None:
     schema = _schema()
     context.configure(
-        url=_url(),
+        dialect_name="postgresql",
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
@@ -49,7 +46,12 @@ def run_migrations_offline() -> None:
 
 def run_migrations_online() -> None:
     schema = _schema()
-    engine = create_engine(_url(), poolclass=pool.NullPool)
+    dsn = _dsn()
+    engine = create_engine(
+        "postgresql+psycopg://",
+        creator=lambda: psycopg.connect(dsn),
+        poolclass=pool.NullPool,
+    )
     with engine.connect() as connection:
         connection.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
         connection.commit()

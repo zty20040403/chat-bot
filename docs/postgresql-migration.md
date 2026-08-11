@@ -8,19 +8,26 @@ QQ / NapCat
     v
 h610: qq-deepseek-bot
     |
-    | Tailscale 100.64.0.3 -> 100.64.0.4:5432
+    | libpq 自动选择当前 read-write 节点
     v
-Tank: PostgreSQL + pgvector
-      /data/lib/postgresql/...
-      每日 pg_dump + Tank 文件系统备份
+Tank  100.64.0.4:55432  <==同步复制==>  h610 100.64.0.3:55432
+首选节点，14T 冷存储                    故障接管，小盘热数据
 ```
 
-Tank 是唯一权威数据源。h610 不再运行 SQLite，也不保存消息、记忆、提醒或工具
-轨迹的权威副本。浏览器 profile、沙盒工作目录和下载缓存仍留在 h610，因为它们是
-主机相关或可重建数据。
+两个 PostgreSQL 节点保存相同的结构化热数据，由 `pg_auto_failover` 决定唯一可写
+主库。Tank 正常时是首选主库；Tank 离线时 h610 接管。连接串同时列出两个地址并
+使用 `target_session_attrs=read-write`，不会误写只读副本。
+
+Tank 的 14T 空间用于媒体、群文件、沙盒产物和旧数据归档，这些大对象不进入双机
+PostgreSQL。h610 实际只有约 476.9G，总数据库规模必须按 h610 的容量设计。浏览器
+profile、沙盒工作目录和下载缓存仍留在 h610，因为它们是主机相关或可重建数据。
+
+Tank 离线期间 monitor 暂时位于 h610。正式生产应迁移到第三台常在线的小机器；
+monitor 只保存集群状态，不保存机器人业务数据。
 
 PostgreSQL 只允许 `qq_bot` 用户从 h610 的 Tailscale 地址连接。密码放在 sops 和
-systemd `EnvironmentFile`，不能写进 Git、Nix store 或命令行历史。
+systemd `EnvironmentFile`，不能写进 Git、Nix store 或命令行历史。Alembic 在线
+迁移把多主机 DSN 原样交给 Psycopg，因此与机器人运行时采用相同的自动选主逻辑。
 
 ## 数据库命令
 
@@ -91,10 +98,11 @@ Bot 包并临时设置 `AI_ALLOW_LEGACY_SQLITE=true` 即可读取原目录。不
 
 ## 备份与恢复
 
-Tank 每天把 `qq_bot` 备份为带 UTC 时间戳的 PostgreSQL custom-format 文件，生成后
-立即运行 `pg_restore --list` 做结构检查，并自动删除超过 30 天的日备份。至少再复制
-一份到 Tank 之外。恢复演练要落到临时数据库，运行 Alembic revision、逐表行数和
-Bot 只读冒烟检查，不能只看 `pg_dump` 退出码。
+当前可写节点每天把 `qq_bot` 备份为带 UTC 时间戳的 PostgreSQL custom-format
+文件，生成后立即运行 `pg_restore --list` 做结构检查；只读副本会自动跳过备份。
+Tank 最多保留 30 份、30 天，h610 只保留最新 1 份且预留至少 30G 空间。至少再复制
+一份到第三台机器或对象存储。恢复演练要落到临时数据库，运行 Alembic revision、
+逐表行数和 Bot 只读冒烟检查，不能只看 `pg_dump` 退出码。
 
 当前向量列固定为 `vector(1536)`；若以后更换为其他维度的 embedding 模型，必须新增
 Alembic migration 修改列类型，不能只改 `AI_EMBEDDING_DIMENSIONS`。
