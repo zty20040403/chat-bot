@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import AsyncMock, patch
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
 import nonebot
 
@@ -22,6 +25,7 @@ from src.plugins.ai_chat.ai_tools import (
     SEND_QQ_FACE_TOOL_NAME,
     SEND_STICKER_TOOL_NAME,
 )
+from src.plugins.ai_chat.media_library import MediaRecord
 
 
 def _group_event(user_id: int = 321) -> GroupMessageEvent:
@@ -137,6 +141,62 @@ class NaturalToolRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(answer, Message)
         self.assertEqual(len(answer), 1)
         self.assertEqual(answer[0].type, "face")
+
+    async def test_send_sticker_searches_global_library_and_sends_match(self) -> None:
+        async def fake_deepseek(
+            user_text,
+            history,
+            tools,
+            execute_tool,
+            **kwargs,
+        ) -> str:
+            del user_text, history, tools, kwargs
+            await execute_tool(SEND_STICKER_TOOL_NAME, {"query": "猫娘卖萌"})
+            return ""
+
+        with TemporaryDirectory() as directory:
+            image_path = Path(directory) / "sticker.png"
+            image_path.write_bytes(b"fake-png")
+            record = MediaRecord(
+                media_id=42,
+                handle="media#42",
+                summary="猫娘开心卖萌",
+                description="猫耳少女露出开心表情。",
+                extracted_text="",
+                emotions=("开心",),
+                usage=("卖萌",),
+                is_sticker=True,
+                safety="safe",
+                storage_path=image_path,
+                mime_type="image/png",
+                score=0.9,
+            )
+            fake_library = SimpleNamespace(
+                search_stickers=AsyncMock(return_value=[record]),
+                get_sticker=lambda *args, **kwargs: None,
+                mark_sent=Mock(),
+            )
+            with (
+                patch(
+                    "src.plugins.ai_chat.ask_deepseek_with_tools",
+                    new=fake_deepseek,
+                ),
+                patch("src.plugins.ai_chat.media_library", fake_library),
+            ):
+                answer = await _ask_ai(
+                    AsyncMock(),
+                    _group_event(user_id=323),
+                    "发个猫娘表情",
+                )
+
+        self.assertIsInstance(answer, Message)
+        self.assertEqual(len(answer), 1)
+        self.assertEqual(answer[0].type, "image")
+        fake_library.search_stickers.assert_awaited_once_with(
+            "猫娘卖萌",
+            limit=5,
+        )
+        fake_library.mark_sent.assert_called_once_with(42)
 
 
 if __name__ == "__main__":

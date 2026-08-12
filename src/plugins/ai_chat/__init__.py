@@ -2061,12 +2061,17 @@ async def _ask_ai(
                     ensure_ascii=False,
                 )
             try:
-                records = await media_library.search_media(
-                    scope_from_event(event),
-                    query,
-                    stickers_only=name == FIND_STICKERS_TOOL_NAME,
-                    limit=limit,
-                )
+                if name == FIND_STICKERS_TOOL_NAME:
+                    records = await media_library.search_stickers(
+                        query,
+                        limit=limit,
+                    )
+                else:
+                    records = await media_library.search_media(
+                        scope_from_event(event),
+                        query,
+                        limit=limit,
+                    )
             except (OSError, RuntimeError, ValueError, DatabaseError) as exc:
                 logger.warning(f"Media search tool failed: {exc}")
                 records = []
@@ -2163,22 +2168,47 @@ async def _ask_ai(
                     ensure_ascii=False,
                 )
             media_handle = str(arguments.get("media_handle") or "").strip()
+            query = str(arguments.get("query") or "").strip()
             record = None
             if media_library is not None and media_handle.startswith("media#"):
                 try:
                     media_id = int(media_handle.removeprefix("media#"))
-                    record = media_library.get_media(
-                        scope_from_event(event),
-                        media_id,
-                        sendable_sticker_only=True,
-                    )
+                    record = media_library.get_sticker(media_id)
                 except (OSError, RuntimeError, TypeError, ValueError, DatabaseError):
                     record = None
+            if media_library is not None and record is None:
+                try:
+                    candidates = await media_library.search_stickers(
+                        query,
+                        limit=5,
+                    )
+                    record = candidates[0] if candidates else None
+                except (
+                    OSError,
+                    RuntimeError,
+                    TypeError,
+                    ValueError,
+                    DatabaseError,
+                ) as exc:
+                    logger.warning(f"Sticker search-and-send tool failed: {exc}")
             if record is not None and record.is_sticker and record.safety == "safe":
                 visual_reply_segment = MessageSegment.image(record.storage_path.read_bytes())
                 media_library.mark_sent(record.media_id)
                 return json.dumps(
-                    {"ok": True, "message": "表情包已经准备发送。"},
+                    {
+                        "ok": True,
+                        "message": "已从全局表情库找到并准备发送。",
+                        "media_handle": record.handle,
+                        "summary": record.summary,
+                    },
+                    ensure_ascii=False,
+                )
+            if media_library is not None:
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "error": "没有这个表情。",
+                    },
                     ensure_ascii=False,
                 )
             sticker_message = random_sticker_message()
@@ -2252,6 +2282,9 @@ async def _ask_ai(
             "principal 编号或 QQ 号自行填进 at。宿主会在发送前解析并校验当前群成员。"
             "要重发当前会话中的图片或表情包，可照抄 [image#消息.段] 或 "
             "[sticker#消息.段]；QQ 自带表情使用 [face#编号]。"
+            "用户要求从已有表情包中发一张时，直接调用 send_sticker(query)，"
+            "它会在全局安全表情库检索并发送，不要先反复调用 find_stickers；"
+            "用户只说随便发一个时省略 query。"
             "正经问题不能用沉默敷衍，控制标记不要放在普通句子中。\n"
             "需要贴代码时使用带语言名的 ``` 围栏，需要对比数据时使用 Markdown "
             "表格；宿主会把完整代码块和表格渲染为清晰图片。\n"
@@ -3734,6 +3767,17 @@ async def _dream_loop() -> None:
 
 @driver.on_startup
 async def start_background_tasks() -> None:
+    if media_library is not None:
+        try:
+            queued = await asyncio.to_thread(
+                media_library.enqueue_sticker_embeddings
+            )
+            if queued:
+                logger.info(
+                    f"Queued {queued} existing sticker(s) for global search indexing."
+                )
+        except (OSError, RuntimeError, DatabaseError) as exc:
+            logger.warning(f"Could not backfill global sticker search index: {exc}")
     if media_library is not None and background_tasks.start(
         "media-library",
         media_library.run_forever,

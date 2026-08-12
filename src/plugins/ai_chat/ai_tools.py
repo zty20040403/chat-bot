@@ -147,8 +147,8 @@ FIND_STICKERS_TOOL: ToolDefinition = {
     "function": {
         "name": FIND_STICKERS_TOOL_NAME,
         "description": (
-            "按当前语境、情绪或用途搜索当前群安全可发送的表情包。"
-            "先调用它取得 media# 句柄，再调用 send_sticker 发送选中的一张。"
+            "只浏览机器人从所有群收集的全局安全表情包，返回候选及 media# 句柄。"
+            "用户要求直接发一个表情包时不要调用它，直接调用 send_sticker 并传入检索意图。"
         ),
         "parameters": {
             "type": "object",
@@ -207,18 +207,26 @@ SEND_STICKER_TOOL: ToolDefinition = {
     "function": {
         "name": SEND_STICKER_TOOL_NAME,
         "description": (
-            "发送 find_stickers 返回的一张安全表情包。"
-            "media_handle 必须是当前群可见的 media# 句柄。"
+            "从机器人在所有群收集的全局安全表情包中搜索最合适的一张并立即发送。"
+            "用户要求发图、发表情包或用表情回应时直接调用；通常传 query，"
+            "不需要先调用 find_stickers。已有明确 media# 句柄时也可精确发送。"
+            "普通的随机表情请求可省略 query；指定内容没有匹配时会明确失败。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
+                "query": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500,
+                    "description": "想表达的画面、对象、情绪或用途，例如‘猫娘卖萌’‘震惊’‘无语’。",
+                },
                 "media_handle": {
                     "type": "string",
                     "pattern": "^media#[1-9][0-9]*$",
+                    "description": "可选；find_stickers 返回的全局 media# 句柄。",
                 }
             },
-            "required": ["media_handle"],
             "additionalProperties": False,
         },
     },

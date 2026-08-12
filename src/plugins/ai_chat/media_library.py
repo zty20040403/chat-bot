@@ -47,6 +47,7 @@ VISION_SYSTEM_PROMPT = """你是 QQ 机器人后台的图片理解服务。
 - contains_private_info：是否含聊天记录、联系方式、身份证件、二维码、账号凭据等隐私；
 - safety：safe、review、blocked 之一。
 真人照片和含隐私截图不能进入自动发送表情库；不确定时 safety 返回 review。"""
+GLOBAL_STICKER_SCOPE_KEY = "global:stickers"
 
 
 class MediaLibraryError(RuntimeError):
@@ -562,8 +563,61 @@ class MediaLibrary:
             )
             for scope_key, content, is_sticker in records
         ]
+        sticker = self.get_sticker(job.media_id)
+        if sticker is not None:
+            documents.append(
+                SemanticDocument(
+                    scope_key=GLOBAL_STICKER_SCOPE_KEY,
+                    source_type="media",
+                    source_handle=sticker.handle,
+                    content=self._record_search_content(sticker),
+                    metadata={"media_id": sticker.media_id, "is_sticker": True},
+                )
+            )
         if documents:
             await self.semantic_recall.index(documents)
+
+    def enqueue_sticker_embeddings(self) -> int:
+        if self.semantic_recall is None:
+            return 0
+        now = int(time.time())
+        connection = self.database.store_connection()
+        cursor = connection.cursor()
+        try:
+            cursor.execute(
+                """
+                INSERT INTO media_jobs (
+                    job_type, media_id, status, attempts,
+                    next_attempt_at, created_at, updated_at
+                )
+                SELECT 'embedding', stickers.media_id, 'pending', 0, ?, ?, ?
+                FROM sticker_library AS stickers
+                WHERE stickers.enabled = 1 AND stickers.banned = 0
+                  AND NOT EXISTS (
+                      SELECT 1 FROM semantic_documents AS document
+                      WHERE document.scope_key = ?
+                        AND document.source_type = 'media'
+                        AND document.source_handle = 'media#' || stickers.media_id::text
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM media_jobs AS job
+                      WHERE job.media_id = stickers.media_id
+                        AND job.job_type = 'embedding'
+                        AND job.status IN ('pending', 'running')
+                  )
+                """,
+                (now, now, now, GLOBAL_STICKER_SCOPE_KEY),
+            )
+            added = max(int(cursor.rowcount), 0)
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        if added:
+            self._wake.set()
+        return added
 
     def find_media(
         self,
@@ -662,6 +716,123 @@ class MediaLibrary:
             key=lambda item: (item.score, item.media_id),
             reverse=True,
         )[: min(max(int(limit), 1), 20)]
+
+    def find_stickers(
+        self,
+        query: str,
+        *,
+        limit: int = 5,
+    ) -> list[MediaRecord]:
+        cleaned = " ".join(str(query).split()).strip()
+        bounded = min(max(int(limit), 1), 20)
+        wildcard = f"%{cleaned}%"
+        connection = self.database.store_connection()
+        try:
+            rows = connection.execute(
+                """
+                SELECT blob.media_id, blob.storage_path, blob.mime_type,
+                       analysis.summary, analysis.description,
+                       analysis.extracted_text, analysis.emotions_json,
+                       analysis.usage_json, analysis.is_sticker, analysis.safety
+                FROM media_blobs AS blob
+                JOIN media_analysis AS analysis ON analysis.media_id = blob.media_id
+                JOIN sticker_library AS stickers ON stickers.media_id = blob.media_id
+                WHERE analysis.safety = 'safe'
+                  AND analysis.is_sticker = 1
+                  AND stickers.enabled = 1 AND stickers.banned = 0
+                  AND (
+                      ? = '' OR analysis.summary ILIKE ?
+                      OR analysis.description ILIKE ?
+                      OR analysis.extracted_text ILIKE ?
+                      OR analysis.emotions_json ILIKE ?
+                      OR analysis.usage_json ILIKE ?
+                  )
+                ORDER BY stickers.times_sent ASC,
+                         stickers.last_sent_at ASC NULLS FIRST,
+                         blob.last_seen_at DESC
+                LIMIT ?
+                """,
+                (
+                    cleaned,
+                    wildcard,
+                    wildcard,
+                    wildcard,
+                    wildcard,
+                    wildcard,
+                    bounded,
+                ),
+            ).fetchall()
+        finally:
+            connection.close()
+        return [
+            MediaRecord(**{**self._record_from_row(row).__dict__, "score": 1.0})
+            for row in rows
+        ]
+
+    async def search_stickers(
+        self,
+        query: str,
+        *,
+        limit: int = 5,
+        minimum_score: float = 0.68,
+    ) -> list[MediaRecord]:
+        cleaned = " ".join(str(query).split()).strip()
+        bounded = min(max(int(limit), 1), 20)
+        lexical = self.find_stickers(cleaned, limit=bounded)
+        if self.semantic_recall is None or not cleaned:
+            return lexical
+        try:
+            hits = await self.semantic_recall.search(
+                [GLOBAL_STICKER_SCOPE_KEY],
+                cleaned,
+                limit=bounded * 3,
+            )
+        except (OSError, RuntimeError, ValueError, httpx.HTTPError):
+            return lexical
+        by_id = {item.media_id: item for item in lexical}
+        for hit in hits:
+            if hit.source_type != "media" or hit.score < minimum_score:
+                continue
+            try:
+                media_id = int(hit.source_handle.removeprefix("media#"))
+            except ValueError:
+                continue
+            record = self.get_sticker(media_id)
+            if record is None:
+                continue
+            existing = by_id.get(media_id)
+            if existing is None or hit.score > existing.score:
+                by_id[media_id] = MediaRecord(
+                    **{**record.__dict__, "score": hit.score}
+                )
+        return sorted(
+            by_id.values(),
+            key=lambda item: (item.score, item.media_id),
+            reverse=True,
+        )[:bounded]
+
+    def get_sticker(self, media_id: int) -> MediaRecord | None:
+        connection = self.database.store_connection()
+        try:
+            row = connection.execute(
+                """
+                SELECT blob.media_id, blob.storage_path, blob.mime_type,
+                       analysis.summary, analysis.description,
+                       analysis.extracted_text, analysis.emotions_json,
+                       analysis.usage_json, analysis.is_sticker, analysis.safety
+                FROM media_blobs AS blob
+                JOIN media_analysis AS analysis ON analysis.media_id = blob.media_id
+                JOIN sticker_library AS stickers ON stickers.media_id = blob.media_id
+                WHERE blob.media_id = ?
+                  AND analysis.safety = 'safe'
+                  AND analysis.is_sticker = 1
+                  AND stickers.enabled = 1 AND stickers.banned = 0
+                """,
+                (int(media_id),),
+            ).fetchone()
+        finally:
+            connection.close()
+        return self._record_from_row(row) if row is not None else None
 
     def get_media(
         self,
@@ -1122,6 +1293,20 @@ class MediaLibrary:
             safety=str(row["safety"] or "review"),
             storage_path=self._resolve_storage_path(str(row["storage_path"])),
             mime_type=str(row["mime_type"] or "application/octet-stream"),
+        )
+
+    @staticmethod
+    def _record_search_content(record: MediaRecord) -> str:
+        return "\n".join(
+            part
+            for part in (
+                record.summary,
+                record.description,
+                record.extracted_text,
+                json.dumps(record.emotions, ensure_ascii=False),
+                json.dumps(record.usage, ensure_ascii=False),
+            )
+            if part and part not in {"[]", ""}
         )
 
     def _vision_profile(self) -> ModelProfile:
