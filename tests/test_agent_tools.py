@@ -305,7 +305,7 @@ class AgentToolExecutorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result["ok"])
         recent_file = result["files"][0]
-        self.assertIn("@#", recent_file["uploader"])
+        self.assertIn("[mention#", recent_file["uploader"])
         self.assertNotIn("7", recent_file["uploader"].split(" ")[0])
         self.assertTrue(recent_file["handle"].startswith("groupfile#"))
         self.assertNotIn("file_id", recent_file)
@@ -351,7 +351,7 @@ class AgentToolExecutorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result["ok"])
         child = result["children"][0]
-        self.assertEqual(child["sender_handle"], "@#1")
+        self.assertEqual(child["sender_handle"], "[mention#1]")
         self.assertTrue(child["has_nested_forward"])
         encoded = json.dumps(result, ensure_ascii=False)
         self.assertNotIn("forward-native", encoded)

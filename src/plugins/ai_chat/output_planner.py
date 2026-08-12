@@ -79,6 +79,11 @@ CURATED_FACE_IDS = {
 }
 
 _QUOTE_HANDLE = re.compile(r"^\s*\[(?:reply|↩)#(-?[0-9]+)\]\s*")
+_REPLY_TOKEN = re.compile(
+    r"\[(?:reply|↩)#(?P<message_id>-?[0-9]+)"
+    r"(?::[^\]\r\n]*)?\](?:\([^\)\r\n]*\))?[ \t]?"
+)
+_PROTECTED = re.compile(r"```[\s\S]*?(?:```|\Z)|`[^`\r\n]*(?:`|\Z)")
 _SILENCE = re.compile(r"^\[(?:silence|沉默)(?:[:：]([^\]]+))?\]$")
 
 
@@ -98,7 +103,7 @@ class ReplyPlan:
 
 def plan_reply(text: str) -> ReplyPlan:
     source = str(text).strip()
-    quote_ids, silence_body = split_leading_quote_handles(source)
+    quote_ids, silence_body = _extract_reply_handles(source)
     silence_match = _SILENCE.fullmatch(silence_body)
     if not source or silence_match is not None:
         reason = (
@@ -148,8 +153,28 @@ def face_prompt_table() -> str:
 
 
 def _planned_chunk(text: str) -> PlannedChunk:
-    ids, body = split_leading_quote_handles(text.strip())
+    ids, body = _extract_reply_handles(text.strip())
     return PlannedChunk(text=body, reply_message_id=_first_positive(ids))
+
+
+def _extract_reply_handles(text: str) -> tuple[tuple[int, ...], str]:
+    ids: list[int] = []
+    parts: list[str] = []
+    position = 0
+
+    def strip_tokens(region: str) -> str:
+        def replace(matched: re.Match[str]) -> str:
+            ids.append(int(matched.group("message_id")))
+            return ""
+
+        return _REPLY_TOKEN.sub(replace, region)
+
+    for protected in _PROTECTED.finditer(text):
+        parts.append(strip_tokens(text[position : protected.start()]))
+        parts.append(protected.group(0))
+        position = protected.end()
+    parts.append(strip_tokens(text[position:]))
+    return tuple(ids), "".join(parts).strip()
 
 
 def _first_positive(values: tuple[int, ...]) -> int | None:

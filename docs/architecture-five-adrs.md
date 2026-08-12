@@ -116,7 +116,7 @@ msg#42                 一条规范消息
 image#42.1             msg#42 中 segment_index=1 的图片
 file#42.2              msg#42 中 segment_index=2 的文件
 groupfile#53a7...      当前群文件列表中的文件
-@#7                    一个 principal
+[mention#7]            一个 principal（人物，不是 QQ 号）
 episode#550e8400-...   一份已发布历史摘要
 t#12                   当前会话的第 12 个工作回合
 ```

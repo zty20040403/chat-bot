@@ -636,7 +636,7 @@ class ContextStore:
         if not message.prompt_text:
             return ""
         sender = (
-            f"@#{message.sender_principal_id} {message.sender_display}"
+            f"[mention#{message.sender_principal_id}] {message.sender_display}"
             if message.sender_principal_id is not None
             else message.sender_display
         )

@@ -17,11 +17,11 @@ OneBot V11、NapCat、可配置 LLM provider 和本机优先的运行方式。�
 | 混合召回 | 词面搜索始终可用；可选 OpenAI-compatible embedding + PostgreSQL/pgvector HNSW |
 | Historian | 后台按连续证据生成 P1/P2/P3 摘要，用 cursor CAS 发布，失败不推进覆盖范围 |
 | Dream | 按版本 CAS 合并、更新或归档长期记忆，操作与理由进入原有 mutation 审计 |
-| 规范身份 | 模型只见 `msg#`、`episode#`、`t#`、`@#principal`；原生账号留在适配层 |
+| 规范身份 | 模型只见 `msg#`、`episode#`、`t#`、`[mention#principal]`；原生账号留在适配层，发送前按当前群成员重新解析 |
 | 工作回合 | durable turn journal、工具效果状态、fork、digest、条件 replay、崩溃恢复 |
 | 持久投递 | PostgreSQL outbox、幂等键、租约、尝试日志、OneBot echo 对账、超时结果不明停放 |
 | 跨平台镜像 | OneBot/Matrix/BlueBubbles iMessage bundle、来源去重、原生引用映射、循环抑制 |
-| 输出规划 | 空行/`[split]`、代码块保护、`[reply#]`、`[silence]`、反应与分段延迟 |
+| 输出规划 | 空行/`[split]`、代码块保护、`[reply#]`、`[mention#]`、`[face#]`、会话内媒体、`[silence]`、反应与分段延迟 |
 | 原生流式 | 完整段落到达即发送；代码围栏和单段回答暂存；`/停止` 取消底层 HTTP stream |
 | 富消息渲染 | fenced code 与 Markdown 表格通过 Playwright/Pygments 渲染成 PNG，失败退回文本 |
 | 持久浏览器 | 每个发起者独立 Playwright profile、稳定元素句柄、会话上限、空闲回收、SSRF 检查 |

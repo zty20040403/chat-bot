@@ -28,7 +28,7 @@ from nonebot.adapters.onebot.v11 import (
     PrivateMessageEvent,
 )
 from nonebot.adapters.onebot.v11.exception import ActionFailed
-from nonebot.exception import FinishedException, IgnoredException
+from nonebot.exception import FinishedException, IgnoredException, NetworkError
 from nonebot.message import event_preprocessor
 from nonebot.params import CommandArg
 
@@ -88,7 +88,7 @@ from .historian import (
 from .ledger import MessageLedger
 from .long_term_memory import LongTermMemoryError, MemoryEntry
 from .model_catalog import ModelCatalogError, ModelProfile
-from .message_ir import render_fallback_text
+from .message_ir import MessageBody, TextNode, render_fallback_text
 from .onebot_codec import (
     compose_onebot_reply,
     decode_onebot_message,
@@ -96,6 +96,10 @@ from .onebot_codec import (
     record_onebot_outgoing,
     render_onebot_body,
     scope_from_event,
+)
+from .onebot_model_output import (
+    OneBotModelOutputResolver,
+    decode_group_members,
 )
 from .output_planner import (
     ACK_FACE_ID,
@@ -177,7 +181,7 @@ from .matchers import (
 
 SEND_RETRY_DELAY_SECONDS = 2.0
 SEND_RETRY_MAX_CHARS = 800
-TURN_PROMPT_VERSION = "qqbot-turn-v3"
+TURN_PROMPT_VERSION = "qqbot-turn-v4"
 BOT_VERSION = "0.3.0"
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 
@@ -472,7 +476,7 @@ def _current_turn_context(
     ]
     for message in activity:
         sender = (
-            f"@#{message.sender_principal_id} {message.sender_display}"
+            f"[mention#{message.sender_principal_id}] {message.sender_display}"
             if message.sender_principal_id is not None
             else message.sender_display
         )
@@ -869,16 +873,35 @@ async def _render_planned_chunk_message(
     chunk: PlannedChunk,
     *,
     first: bool,
+    output_resolver: OneBotModelOutputResolver | None = None,
 ) -> Message:
-    content: MessageSegment | None = None
-    if rich_renderer is not None:
+    content: Message | MessageSegment | None = None
+    resolved_content = (
+        await output_resolver.render(chunk.text)
+        if output_resolver is not None
+        else None
+    )
+    has_native_segments = bool(
+        resolved_content is not None
+        and any(segment.type != "text" for segment in resolved_content)
+    )
+    if rich_renderer is not None and not has_native_segments:
+        rich_source = (
+            resolved_content.extract_plain_text()
+            if resolved_content is not None
+            else chunk.text
+        )
         try:
-            png = await rich_renderer.render(chunk.text)
+            png = await rich_renderer.render(rich_source)
         except Exception as exc:
             logger.warning(f"Rich message rendering fell back to text: {exc}")
         else:
             if png:
                 content = MessageSegment.image(png)
+    if content is None and resolved_content is not None:
+        content = resolved_content
+        if not content:
+            return Message()
     return _planned_chunk_message(
         event,
         chunk,
@@ -1440,39 +1463,46 @@ async def _ask_ai(
                 raw_members = await bot.get_group_member_list(
                     group_id=event.group_id,
                 )
-            except (ActionFailed, RuntimeError, TypeError, ValueError) as exc:
+            except (
+                ActionFailed,
+                NetworkError,
+                RuntimeError,
+                TypeError,
+                ValueError,
+            ) as exc:
                 logger.warning(f"Fetching the QQ group roster failed: {exc}")
                 return json.dumps(
                     {"ok": False, "error": "读取当前群成员失败。"},
                     ensure_ascii=False,
                 )
-            members: list[dict[str, object]] = []
-            for raw_member in raw_members if isinstance(raw_members, list) else []:
-                if not isinstance(raw_member, dict):
-                    continue
-                display = str(
-                    raw_member.get("card")
-                    or raw_member.get("nickname")
-                    or "群成员"
+            decoded_members = decode_group_members(raw_members)
+            principal_ids = (
+                message_ledger.ensure_principal_identities(
+                    "onebot-v11",
+                    [
+                        (member.native_user_id, member.display)
+                        for member in decoded_members
+                    ],
                 )
+                if message_ledger is not None
+                else {}
+            )
+            members: list[dict[str, object]] = []
+            for member in decoded_members:
+                display = member.display
                 if query and query not in display.casefold():
                     continue
-                native_user_id = raw_member.get("user_id")
-                principal_id = (
-                    message_ledger.principal_id_for_native(
-                        "onebot-v11",
-                        native_user_id,
-                    )
-                    if message_ledger is not None and native_user_id is not None
-                    else None
-                )
+                principal_id = principal_ids.get(member.native_user_id)
                 members.append(
                     {
                         "principal": (
-                            f"@#{principal_id}" if principal_id is not None else None
+                            f"[mention#{principal_id}]"
+                            if principal_id is not None
+                            else None
                         ),
                         "display_name": display,
-                        "role": str(raw_member.get("role") or "member"),
+                        "role": member.role,
+                        "title": member.title or None,
                     }
                 )
                 if len(members) >= limit:
@@ -1614,7 +1644,7 @@ async def _ask_ai(
                         {
                             "handle": f"msg#{message.canonical_message_id}",
                             "sender": (
-                                f"@#{message.sender_principal_id} {message.sender_display}"
+                                f"[mention#{message.sender_principal_id}] {message.sender_display}"
                                 if message.sender_principal_id is not None
                                 else message.sender_display
                             ),
@@ -1637,7 +1667,7 @@ async def _ask_ai(
                         {
                             "handle": f"msg#{message.canonical_message_id}",
                             "sender": (
-                                f"@#{message.sender_principal_id} {message.sender_display}"
+                                f"[mention#{message.sender_principal_id}] {message.sender_display}"
                                 if message.sender_principal_id is not None
                                 else message.sender_display
                             ),
@@ -1978,6 +2008,11 @@ async def _ask_ai(
             "[split] 强制分条，代码围栏内不会拆；一次最多 10 条。需要引用上下文中的"
             "某条消息时，在对应段开头写 [reply#<msg编号>]。确实没有必要回复时，"
             "整条只写 [silence]；需要用反应表达原因可写 [silence:表情名]。"
+            "需要真正 @群成员时，只能写完整的 [mention#<principal编号>]，必须照抄"
+            "成员记录或 group_members 返回的句柄；不要输出 @#编号，也绝不能把 "
+            "principal 编号或 QQ 号自行填进 at。宿主会在发送前解析并校验当前群成员。"
+            "要重发当前会话中的图片或表情包，可照抄 [image#消息.段] 或 "
+            "[sticker#消息.段]；QQ 自带表情使用 [face#编号]。"
             "正经问题不能用沉默敷衍，控制标记不要放在普通句子中。\n"
             "需要贴代码时使用带语言名的 ``` 围栏，需要对比数据时使用 Markdown "
             "表格；宿主会把完整代码块和表格渲染为清晰图片。\n"
@@ -2373,6 +2408,7 @@ async def _finish_tracked_ai(
     stream_context: dict[str, int | None] = {"turn_id": None}
     final_stream_state = FinalStreamState()
     stream_message_count = 0
+    output_resolver = OneBotModelOutputResolver(bot, event, message_ledger)
 
     async def send_stream_fragment(fragment: str) -> None:
         nonlocal stream_message_count
@@ -2385,7 +2421,10 @@ async def _finish_tracked_ai(
                 event,
                 chunk,
                 first=stream_index == 0,
+                output_resolver=output_resolver,
             )
+            if not outgoing:
+                continue
             target_scope = scope_from_event(event)
             source_scope = _conversation_scope(event)
             turn_id = stream_context.get("turn_id")
@@ -2666,15 +2705,25 @@ async def _finish_tracked_ai(
                 raise FinishedException
             outgoing_messages = []
             for index, chunk in enumerate(reply_plan.chunks):
-                outgoing_messages.append(
-                    await _render_planned_chunk_message(
-                        event,
-                        chunk,
-                        first=index == 0 and stream_message_count == 0,
-                    )
+                outgoing = await _render_planned_chunk_message(
+                    event,
+                    chunk,
+                    first=index == 0 and stream_message_count == 0,
+                    output_resolver=output_resolver,
                 )
+                if outgoing:
+                    outgoing_messages.append(outgoing)
         else:
-            outgoing_messages = [_reply_message(event, result.reply)]
+            decoded_reply = decode_onebot_message(result.reply)
+            resolved_reply = Message()
+            for node in decoded_reply.body.nodes:
+                if isinstance(node, TextNode):
+                    resolved_reply.extend(await output_resolver.render(node.text))
+                else:
+                    resolved_reply.extend(render_onebot_body(MessageBody((node,))))
+            outgoing_messages = (
+                [_reply_message(event, resolved_reply)] if resolved_reply else []
+            )
 
         if not outgoing_messages:
             raise FinishedException
@@ -3777,7 +3826,7 @@ async def handle_memory_command(
             lines = ["最近的长期记忆变更："]
             for mutation in mutations:
                 actor = (
-                    f"@#{mutation.actor_principal_id}"
+                    f"[mention#{mutation.actor_principal_id}]"
                     if mutation.actor_principal_id > 0
                     else "本地操作者"
                 )

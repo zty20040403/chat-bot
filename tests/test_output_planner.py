@@ -47,6 +47,20 @@ class OutputPlannerTests(unittest.TestCase):
             [(42, "第一条"), (51, "第二条")],
         )
 
+    def test_extracts_reply_token_anywhere_but_not_from_code(self) -> None:
+        plan = plan_reply(
+            "先看 [reply#42: 原消息] 这一条\n\n"
+            "`[reply#77]` 保持原样\n\n"
+            "```text\n[reply#88]\n```"
+        )
+
+        self.assertEqual(plan.chunks[0].reply_message_id, 42)
+        self.assertEqual(plan.chunks[0].text, "先看 这一条")
+        self.assertEqual(plan.chunks[1].reply_message_id, None)
+        self.assertEqual(plan.chunks[1].text, "`[reply#77]` 保持原样")
+        self.assertEqual(plan.chunks[2].reply_message_id, None)
+        self.assertIn("[reply#88]", plan.chunks[2].text)
+
     def test_exact_silence_can_name_a_reaction(self) -> None:
         plan = plan_reply("[reply#42] [silence:吃瓜]")
         self.assertTrue(plan.silence)

@@ -71,7 +71,7 @@ class SemanticRecallTests(unittest.TestCase):
                         source_type="message",
                         source_handle="msg#1",
                         content="Arch Linux package manager",
-                        metadata={"sender": "@#1"},
+                        metadata={"sender": "[mention#1]"},
                     )
                 ]
             )

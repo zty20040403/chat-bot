@@ -162,7 +162,7 @@ class PinStore:
         used = 0
         for _pin, message in self.messages(ledger, scope):
             sender = (
-                f"@#{message.sender_principal_id} {message.sender_display}"
+                f"[mention#{message.sender_principal_id}] {message.sender_display}"
                 if message.sender_principal_id is not None
                 else message.sender_display
             )

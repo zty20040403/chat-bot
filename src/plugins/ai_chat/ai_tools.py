@@ -687,7 +687,8 @@ GROUP_MEMBERS_TOOL: ToolDefinition = {
         "name": GROUP_MEMBERS_TOOL_NAME,
         "description": (
             "按需读取当前 QQ 群成员名单。平时使用上下文中的精简成员记录；"
-            "只有需要确认成员、群名片、角色或搜索某人时调用。"
+            "只有需要确认成员、群名片、角色或搜索某人时调用。返回的 principal "
+            "是可直接照抄到最终回答中的 [mention#编号] 句柄，不是 QQ 号。"
         ),
         "parameters": {
             "type": "object",

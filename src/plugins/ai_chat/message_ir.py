@@ -191,7 +191,7 @@ def render_prompt_text(
     for node in body.nodes:
         if isinstance(node, MentionNode) and node.principal_id is not None:
             label = node.display or f"用户{node.principal_id}"
-            parts.append(f"[@#{node.principal_id}: {label}]")
+            parts.append(f"[mention#{node.principal_id}: {label}]")
             continue
         if isinstance(node, MediaNode) and canonical_message_id is not None:
             handle_kind = {

@@ -246,7 +246,13 @@ def compose_onebot_reply(
     message = Message(
         [MessageSegment.reply(int(reply_native_message_id))]
     )
-    if mention_native_user_id is not None:
+    already_mentioned = any(
+        segment.type == "at"
+        and str(segment.data.get("qq") or "")
+        == str(mention_native_user_id)
+        for segment in rendered
+    )
+    if mention_native_user_id is not None and not already_mentioned:
         message.append(MessageSegment.at(int(mention_native_user_id)))
         message.append(MessageSegment.text(" "))
     message.extend(rendered)

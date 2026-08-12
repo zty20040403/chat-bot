@@ -59,6 +59,18 @@ class ReplyMessageTests(unittest.TestCase):
         self.assertEqual(retry[1].data["qq"], "123")
         self.assertEqual(retry.extract_plain_text().lstrip(), "你好")
 
+    def test_reply_does_not_duplicate_an_explicit_at_for_sender(self) -> None:
+        content = Message(
+            [MessageSegment.at(123), MessageSegment.text(" 你来看一下")]
+        )
+
+        message = _reply_message(_group_event(), content)
+
+        self.assertEqual(
+            [segment.type for segment in message],
+            ["reply", "at", "text"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

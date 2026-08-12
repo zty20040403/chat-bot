@@ -25,6 +25,7 @@ _learned_stickers_state = open_json_state(
 STICKER_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 LEARNABLE_SEGMENT_TYPES = {"face", "image"}
 MAX_STABLE_FACE_ID = 348
+EXTENDED_STABLE_FACE_IDS = frozenset({350, 353, 355, 356, 357, 428})
 QQ_BUILTIN_FACE_IDS = (
     0,
     1,
@@ -338,7 +339,10 @@ def _stable_face_id(value: object) -> int | None:
     except (TypeError, ValueError):
         return None
 
-    if 0 <= face_id <= MAX_STABLE_FACE_ID:
+    if (
+        0 <= face_id <= MAX_STABLE_FACE_ID
+        or face_id in EXTENDED_STABLE_FACE_IDS
+    ):
         return face_id
     return None
 
@@ -396,7 +400,11 @@ def qq_face_message(text: str = "") -> MessageSegment | str:
 
     stable_face_id = _stable_face_id(face_id)
     if stable_face_id is None:
-        return f"QQ 自带表情 ID 只支持 0 到 {MAX_STABLE_FACE_ID}。"
+        extended = "、".join(str(item) for item in sorted(EXTENDED_STABLE_FACE_IDS))
+        return (
+            f"QQ 自带表情 ID 只支持 0 到 {MAX_STABLE_FACE_ID}，"
+            f"以及扩展 ID {extended}。"
+        )
 
     return MessageSegment.face(stable_face_id)
 

@@ -152,7 +152,7 @@ ws://127.0.0.1:8080/onebot/v11/ws
 [`docs/operations-v3.md`](docs/operations-v3.md)。
 机器人会引用触发它的原消息。QQ 消息进入机器人后，会先转换成统一的
 Message IR，再存入 PostgreSQL 规范消息账本。模型在群聊上下文和消息工具里
-只看到 `msg#12`、`@#3` 这类机器人内部句柄；原始群号、QQ 号和 NapCat
+只看到 `msg#12`、`[mention#3]` 这类机器人内部句柄；原始群号、QQ 号和 NapCat
 消息 ID 只留在本地适配层，不直接交给模型，也不会提交到 Git 仓库。
 群聊累计一定数量的普通消息后，机器人会低概率参考上下文主动接一句。
 群成员连续 30 分钟没有发言时，机器人会主动暖场；每个群每天最多暖场 2 次，
@@ -172,6 +172,10 @@ OneBot 消息重复到达只会命中原记录，不会覆盖原文。较旧聊�
 
 - 按空行或模型给出的 `[split]` 把长回答拆成最多 10 条，代码块不会从中间截断。
 - 用 `[reply#编号]` 把某一段引用到当前会话内的指定 `msg#`；句柄在发送前重新校验 Scope。
+- 用 `[mention#人物编号]` 指定群成员；发送前会把人物映射到当前群真实 QQ 账号，
+  确认成员仍在群里后才生成 OneBot `at` 消息段，内部编号永远不会直接作为 QQ 号。
+- 用 `[face#编号]`、`[image#消息.段]` 和 `[sticker#消息.段]` 发送 QQ 表情或
+  重用当前会话中的媒体；代码块和行内代码里的这些文本不会被执行。
 - 把严格的 `[silence]` 变成 QQ 反应，不把控制标记泄漏到聊天文本。
 - 开始处理时临时添加“正在想”反应，成功、失败和静默都有各自的宿主侧状态。
 - 第一段默认引用并 @ 提问者，后续拆分段不重复刷引用；语音仍作为独立消息发送。
@@ -200,7 +204,7 @@ OneBot 消息重复到达只会命中原记录，不会覆盖原文。较旧聊�
 宿主只把简短技能目录放进 system prompt。模型需要某项能力时再调用 `use_skill`
 读取完整说明，避免所有操作手册永久占用上下文。`inspect_source` 只允许查看本仓库
 白名单目录，禁止访问 `.env`、状态数据库、隐藏文件、绝对路径、符号链接和目录
-穿越；`group_members` 只返回 `@#principal`，不会把原始 QQ 号交给模型。
+穿越；`group_members` 只返回 `[mention#principal]`，不会把原始 QQ 号交给模型。
 
 ## 工作回合与连续任务
 
@@ -263,7 +267,7 @@ API Key 或验证码。所有记忆都可以手动审计：
 
 个人记忆只能用于“当前群 + 当前 QQ 用户”；群记忆只有群管理员或
 `AI_SANDBOX_ALLOWED_USERS` 中明确授权的用户可以修改。每条记忆记录版本、创建者
-`@#principal`、来源 `msg#` 和更新时间；新增、更新、删除、清空与容量淘汰都会
+`[mention#principal]`、来源 `msg#` 和更新时间；新增、更新、删除、清空与容量淘汰都会
 写入 mutation 审计记录，更新接口使用版本比较避免静默覆盖。
 
 长时间执行沙盒任务时，可以查看或取消自己的当前任务：
@@ -556,7 +560,7 @@ pgvector 在同一数据库内保存可重建的语义派生索引：
 | 001 Context/Memory | 不可变账本、token 水位、`episode#`、来源哈希、pgvector 混合召回、Historian 与 Dream CAS |
 | 002 Partial Plans | 宿主 schema、规范效果事件、outbox 租约与 `outcome-unknown`、沙箱观测清单；ADR 标为未来工作的完整 Plan/Hole 执行机仍未伪装启用 |
 | 003 Message IR | 富 IR 只存一次；OneBot/Matrix/iMessage 从 IR 降级；统一 outbox、echo、镜像、富截图和 UTF-8 分块 |
-| 004 Canonical Handles | 模型只使用 `msg#`、`image#/file#消息.段序号`、`groupfile#`、`@#principal`、`episode#`、`t#`；原生 QQ ID 留在适配层，所有读取重新校验 Scope |
+| 004 Canonical Handles | 模型只使用 `msg#`、`image#/file#消息.段序号`、`groupfile#`、`[mention#principal]`、`episode#`、`t#`；原生 QQ ID 留在适配层，所有读取和发送重新校验 Scope |
 | 005 Turn Continuity | durable turn、`fork-from`、Level 0/1/2、trace TTL/LRU、有效性判定、原样回放、ledger 去重和 digest 退化 |
 
 更细的模块和数据流见 [`docs/architecture-five-adrs.md`](docs/architecture-five-adrs.md)。

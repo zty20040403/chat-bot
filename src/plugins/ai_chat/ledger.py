@@ -8,7 +8,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Iterator, Literal
+from typing import Any, Iterable, Iterator, Literal
 
 from src.bot_storage import (
     DatabaseSource,
@@ -521,7 +521,7 @@ class MessageLedger:
             if not message.prompt_text:
                 continue
             sender = (
-                f"@#{message.sender_principal_id} {message.sender_display}"
+                f"[mention#{message.sender_principal_id}] {message.sender_display}"
                 if message.sender_principal_id is not None
                 else message.sender_display
             )
@@ -550,6 +550,16 @@ class MessageLedger:
         scope: ConversationScope,
         limit: int = 40,
     ) -> str:
+        return "\n".join(
+            f"[mention#{principal_id}]={display}"
+            for display, principal_id in self.principal_roster(scope, limit)
+        )
+
+    def principal_roster(
+        self,
+        scope: ConversationScope,
+        limit: int = 40,
+    ) -> tuple[tuple[str, int], ...]:
         limit = min(max(int(limit), 1), 100)
         with self._lock:
             rows = self._connection.execute(
@@ -582,8 +592,8 @@ class MessageLedger:
                 """,
                 (scope.key, limit),
             ).fetchall()
-        return "\n".join(
-            f"@#{int(row['sender_principal_id'])}: {row['sender_display']}"
+        return tuple(
+            (str(row["sender_display"]), int(row["sender_principal_id"]))
             for row in rows
         )
 
@@ -604,7 +614,7 @@ class MessageLedger:
             ).fetchone()
         if row is None:
             return None
-        return f"@#{int(row['principal_id'])} {row['display_name']}"
+        return f"[mention#{int(row['principal_id'])}] {row['display_name']}"
 
     def principal_id_for_native(
         self,
@@ -620,6 +630,79 @@ class MessageLedger:
                 (platform, str(native_user_id)),
             ).fetchone()
         return int(row[0]) if row is not None else None
+
+    def ensure_principal_identity(
+        self,
+        platform: str,
+        native_user_id: str | int,
+        display: str,
+        *,
+        seen_at: int | None = None,
+    ) -> int:
+        identities = self.ensure_principal_identities(
+            platform,
+            [(native_user_id, display)],
+            seen_at=seen_at,
+        )
+        native_id = str(native_user_id).strip()
+        if native_id not in identities:
+            raise ValueError("invalid principal identity")
+        return identities[native_id]
+
+    def ensure_principal_identities(
+        self,
+        platform: str,
+        identities: Iterable[tuple[str | int, str]],
+        *,
+        seen_at: int | None = None,
+    ) -> dict[str, int]:
+        normalized_platform = platform.strip()
+        if not normalized_platform:
+            raise ValueError("invalid principal identity platform")
+        normalized: dict[str, str] = {}
+        for raw_native_id, raw_display in identities:
+            native_id = str(raw_native_id).strip()
+            if not native_id or native_id == "all":
+                continue
+            normalized[native_id] = str(raw_display).strip()
+        if not normalized:
+            return {}
+
+        timestamp = int(seen_at or time.time())
+        principals: dict[str, int] = {}
+        with self._transaction() as cursor:
+            for native_id, display in normalized.items():
+                _identity_id, principal_id = self._ensure_identity(
+                    cursor,
+                    normalized_platform,
+                    native_id,
+                    display,
+                    timestamp,
+                )
+                principals[native_id] = principal_id
+        return principals
+
+    def native_identity_for_principal(
+        self,
+        platform: str,
+        principal_id: int,
+    ) -> tuple[str, str] | None:
+        if int(principal_id) <= 0:
+            return None
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT native_user_id, display_name
+                FROM principal_identities
+                WHERE platform = ? AND principal_id = ?
+                ORDER BY last_seen_at DESC, identity_id DESC
+                LIMIT 1
+                """,
+                (platform, int(principal_id)),
+            ).fetchone()
+        if row is None:
+            return None
+        return str(row["native_user_id"]), str(row["display_name"])
 
     def activity_since(
         self,

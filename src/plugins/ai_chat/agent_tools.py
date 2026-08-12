@@ -51,8 +51,10 @@ from .message_ir import ForwardNode, MediaNode, MessageBody, TextNode, render_fa
 from .onebot_codec import (
     decode_onebot_message,
     record_onebot_api_message,
+    record_onebot_outgoing,
     render_api_attachments,
 )
+from .onebot_model_output import OneBotModelOutputResolver
 from .sandbox import DockerSandboxManager, SandboxError
 from .turn_journal import TurnJournal
 
@@ -171,6 +173,12 @@ class AgentToolExecutor:
         self.turn_journal = turn_journal
         self.turn_id = turn_id
         self.browser_manager = browser_manager
+        self.output_resolver = OneBotModelOutputResolver(
+            bot,
+            event,
+            ledger,
+            scope=scope,
+        )
 
     @property
     def canonical_messages_enabled(self) -> bool:
@@ -400,7 +408,7 @@ class AgentToolExecutor:
                         or "未知用户"
                     ),
                     "sender_handle": (
-                        f"@#{sender_principal_id}"
+                        f"[mention#{sender_principal_id}]"
                         if sender_principal_id is not None
                         else None
                     ),
@@ -825,7 +833,7 @@ class AgentToolExecutor:
         payload: dict[str, Any] = {
             "handle": f"msg#{message.canonical_message_id}",
             "sender": (
-                f"@#{message.sender_principal_id} {message.sender_display}"
+                f"[mention#{message.sender_principal_id}] {message.sender_display}"
                 if message.sender_principal_id is not None
                 else message.sender_display
             ),
@@ -852,9 +860,12 @@ class AgentToolExecutor:
         if not text:
             return _json_result(ok=False, error="进度消息不能为空。")
 
+        outgoing = await self.output_resolver.render(text[:200])
+        if not outgoing:
+            return _json_result(ok=False, error="进度消息解析后没有可发送内容。")
         response = await self.bot.send_group_msg(
             group_id=self.event.group_id,
-            message=MessageSegment.text(text[:200]),
+            message=outgoing,
         )
         canonical_message_id = None
         if self.canonical_messages_enabled and isinstance(response, dict):
@@ -862,14 +873,12 @@ class AgentToolExecutor:
             if native_message_id:
                 assert self.ledger is not None
                 assert self.scope is not None
-                stored = self.ledger.record_message(
+                stored = record_onebot_outgoing(
+                    self.ledger,
                     self.scope,
                     native_message_id=str(native_message_id),
-                    sender_native_user_id=self.scope.bot_native_user_id,
-                    sender_display="机器人",
-                    body=MessageBody((TextNode(0, text[:200]),)),
+                    message=outgoing,
                     occurred_at=int(time.time()),
-                    direction="outbound",
                 )
                 canonical_message_id = stored.canonical_message_id
                 self._link_turn_send(canonical_message_id, "say")

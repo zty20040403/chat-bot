@@ -77,7 +77,7 @@ class MessageIRTests(unittest.TestCase):
         )
         prompt = render_prompt_text(resolved, canonical_message_id=12)
 
-        self.assertIn("[@#7: Alice]", prompt)
+        self.assertIn("[mention#7: Alice]", prompt)
         self.assertIn("[image#12.1: 截图]", prompt)
 
     def test_versioned_json_round_trip_handles_raw_bytes(self) -> None:
@@ -163,6 +163,18 @@ class MessageIRTests(unittest.TestCase):
         self.assertEqual(
             [segment.type for segment in reply],
             ["reply", "at", "text", "text"],
+        )
+
+    def test_explicit_mention_does_not_duplicate_reply_target(self) -> None:
+        reply = compose_onebot_reply(
+            Message([MessageSegment.at(123), MessageSegment.text(" 收到")]),
+            reply_native_message_id=99,
+            mention_native_user_id=123,
+        )
+
+        self.assertEqual(
+            [segment.type for segment in reply],
+            ["reply", "at", "text"],
         )
 
     def test_file_attachment_exposes_only_canonical_handle(self) -> None:

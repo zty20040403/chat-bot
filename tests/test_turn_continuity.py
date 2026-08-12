@@ -216,6 +216,100 @@ class TurnContinuityTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(segment.type != "reply" for segment in FakeMatcher.sent[1]))
         self.assertEqual(FakeMatcher.sent[1].extract_plain_text(), "第二段")
 
+    async def test_final_reply_resolves_model_mention_to_onebot_at(self) -> None:
+        event = group_event(10, Message("叫 Bob 来看"))
+        principal_id = self.ledger.ensure_principal_identity(
+            "onebot-v11",
+            88,
+            "Bob",
+        )
+        bot = AsyncMock()
+        bot.get_group_member_list.return_value = [
+            {"user_id": 7, "nickname": "Alice", "role": "member"},
+            {"user_id": 88, "card": "Bob", "role": "member"},
+            {"user_id": 999, "nickname": "Bot", "role": "member"},
+        ]
+        with (
+            patch.object(ai_chat, "message_ledger", self.ledger),
+            patch.object(ai_chat, "turn_journal", self.journal),
+            patch.object(
+                ai_chat,
+                "_run_tracked_ai",
+                new=AsyncMock(
+                    return_value=ai_chat.TrackedAIResult(
+                        reply=f"[mention#{principal_id}] 过来看一下",
+                        turn_id=None,
+                    )
+                ),
+            ),
+        ):
+            with self.assertRaises(FinishedException):
+                await ai_chat._finish_tracked_ai(
+                    FakeMatcher,
+                    bot,
+                    event,
+                    "叫 Bob 来看",
+                    label="test",
+                )
+
+        sent = FakeMatcher.sent[0]
+        self.assertEqual(
+            [segment.type for segment in sent],
+            ["reply", "at", "text", "at", "text"],
+        )
+        self.assertEqual(sent[1].data["qq"], "7")
+        self.assertEqual(sent[3].data["qq"], "88")
+        self.assertNotIn("mention#", str(sent))
+
+    async def test_native_model_segments_bypass_rich_table_rendering(self) -> None:
+        event = group_event(10, Message("叫 Bob 看表格"))
+        principal_id = self.ledger.ensure_principal_identity(
+            "onebot-v11",
+            88,
+            "Bob",
+        )
+        bot = AsyncMock()
+        bot.get_group_member_list.return_value = [
+            {"user_id": 7, "nickname": "Alice", "role": "member"},
+            {"user_id": 88, "card": "Bob", "role": "member"},
+            {"user_id": 999, "nickname": "Bot", "role": "member"},
+        ]
+        renderer = AsyncMock()
+        renderer.render.return_value = b"unexpected-image"
+        with (
+            patch.object(ai_chat, "message_ledger", self.ledger),
+            patch.object(ai_chat, "turn_journal", self.journal),
+            patch.object(ai_chat, "rich_renderer", renderer),
+            patch.object(
+                ai_chat,
+                "_run_tracked_ai",
+                new=AsyncMock(
+                    return_value=ai_chat.TrackedAIResult(
+                        reply=(
+                            "| 成员 | 状态 |\n"
+                            "| --- | --- |\n"
+                            f"| [mention#{principal_id}] | 请查看 |"
+                        ),
+                        turn_id=None,
+                    )
+                ),
+            ),
+        ):
+            with self.assertRaises(FinishedException):
+                await ai_chat._finish_tracked_ai(
+                    FakeMatcher,
+                    bot,
+                    event,
+                    "叫 Bob 看表格",
+                    label="test",
+                )
+
+        renderer.render.assert_not_awaited()
+        sent = FakeMatcher.sent[0]
+        self.assertTrue(any(segment.type == "at" for segment in sent))
+        self.assertTrue(all(segment.type != "image" for segment in sent))
+        self.assertNotIn("mention#", str(sent))
+
     async def test_silence_sends_no_message_and_reacts_to_trigger(self) -> None:
         event = group_event(10, Message("ambient ping"))
         bot = AsyncMock()

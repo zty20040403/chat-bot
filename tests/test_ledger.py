@@ -185,7 +185,7 @@ class MessageLedgerTests(unittest.TestCase):
         rendered = self.ledger.render_recent(self.group_a)
 
         self.assertIn(f"msg#{message.canonical_message_id}", rendered)
-        self.assertIn(f"@#{message.sender_principal_id}", rendered)
+        self.assertIn(f"[mention#{message.sender_principal_id}]", rendered)
         self.assertNotIn("987654", rendered)
 
     def test_roster_uses_each_principals_latest_display_name(self) -> None:
@@ -210,7 +210,21 @@ class MessageLedgerTests(unittest.TestCase):
 
         self.assertEqual(
             roster,
-            f"@#{first.sender_principal_id}: New Name",
+            f"[mention#{first.sender_principal_id}]=New Name",
+        )
+
+    def test_roster_registration_and_reverse_identity_lookup(self) -> None:
+        principals = self.ledger.ensure_principal_identities(
+            "onebot-v11",
+            [(88, "Bob"), (99, "Carol")],
+            seen_at=123,
+        )
+
+        self.assertEqual(
+            self.ledger.native_identity_for_principal(
+                "onebot-v11", principals["88"]
+            ),
+            ("88", "Bob"),
         )
 
     def test_commands_are_audited_but_excluded_from_prompt_projection(self) -> None:
