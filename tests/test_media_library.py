@@ -9,7 +9,11 @@ import nonebot
 
 nonebot.init()
 
-from src.plugins.ai_chat.media_library import MediaLibrary, MediaLibraryError
+from src.plugins.ai_chat.media_library import (
+    MediaLibrary,
+    MediaLibraryError,
+    MediaRecord,
+)
 
 
 class MediaLibraryParsingTests(unittest.TestCase):
@@ -84,6 +88,49 @@ class MediaLibraryParsingTests(unittest.TestCase):
         )
         self.assertFalse(
             MediaLibrary._supported_source("https://qq.com.example.test/a.jpg")
+        )
+
+    def test_catgirl_alias_ranks_cat_ears_above_unrelated_cute_sticker(self) -> None:
+        def record(media_id: int, summary: str) -> MediaRecord:
+            return MediaRecord(
+                media_id=media_id,
+                handle=f"media#{media_id}",
+                summary=summary,
+                description="",
+                extracted_text="",
+                emotions=(),
+                usage=(),
+                is_sticker=True,
+                safety="safe",
+                storage_path=Path("unused"),
+                mime_type="image/png",
+            )
+
+        terms = MediaLibrary._sticker_query_terms("发个猫娘卖萌表情")
+        catgirl = MediaLibrary._sticker_relevance(
+            record(1, "可爱猫耳精灵少女卖萌"),
+            terms,
+        )
+        rabbit = MediaLibrary._sticker_relevance(
+            record(2, "粉色兔耳少女闭眼卖萌"),
+            terms,
+        )
+        required = MediaLibrary._sticker_required_alias_groups(
+            "发个猫娘卖萌表情"
+        )
+
+        self.assertGreater(catgirl, rabbit)
+        self.assertTrue(
+            MediaLibrary._record_matches_sticker_groups(
+                record(1, "可爱猫耳精灵少女卖萌"),
+                required,
+            )
+        )
+        self.assertFalse(
+            MediaLibrary._record_matches_sticker_groups(
+                record(2, "粉色兔耳少女闭眼卖萌"),
+                required,
+            )
         )
 
 

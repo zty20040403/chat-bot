@@ -6,6 +6,7 @@ import hashlib
 import json
 import mimetypes
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -48,6 +49,37 @@ VISION_SYSTEM_PROMPT = """你是 QQ 机器人后台的图片理解服务。
 - safety：safe、review、blocked 之一。
 真人照片和含隐私截图不能进入自动发送表情库；不确定时 safety 返回 review。"""
 GLOBAL_STICKER_SCOPE_KEY = "global:stickers"
+STICKER_ALIAS_GROUPS = (
+    ("猫娘", "猫耳", "猫耳少女", "猫女"),
+    ("男娘", "伪娘", "女装少年"),
+    ("开心", "高兴", "大笑", "欢快", "笑"),
+    ("震惊", "惊讶", "吃惊", "瞪眼"),
+    ("无语", "质问", "疑问", "问号", "懵"),
+    ("可爱", "卖萌", "呆萌", "俏皮", "萌"),
+    ("生气", "愤怒", "发火", "咆哮"),
+    ("难过", "伤心", "委屈", "可怜", "哭"),
+    ("饿", "挨饿", "饥饿"),
+    ("狗", "小狗", "狗狗"),
+    ("猫", "猫咪", "橘猫"),
+    ("鲸鱼", "小鲸鱼"),
+    ("吐舌", "搞怪"),
+)
+STICKER_QUERY_FILLERS = (
+    "给我",
+    "帮我",
+    "来一张",
+    "来一个",
+    "来个",
+    "发一张",
+    "发一个",
+    "发个",
+    "发张",
+    "表情包",
+    "表情",
+    "贴纸",
+    "图片",
+    "一下",
+)
 
 
 class MediaLibraryError(RuntimeError):
@@ -725,11 +757,30 @@ class MediaLibrary:
     ) -> list[MediaRecord]:
         cleaned = " ".join(str(query).split()).strip()
         bounded = min(max(int(limit), 1), 20)
-        wildcard = f"%{cleaned}%"
+        terms = self._sticker_query_terms(cleaned)
+        required_groups = self._sticker_required_alias_groups(cleaned)
+        if cleaned and not terms:
+            return []
+        term_groups: list[str] = []
+        term_parameters: list[object] = []
+        for term in terms:
+            term_groups.append(
+                "(analysis.summary ILIKE ? OR analysis.description ILIKE ? "
+                "OR analysis.extracted_text ILIKE ? "
+                "OR analysis.emotions_json ILIKE ? OR analysis.usage_json ILIKE ?)"
+            )
+            wildcard = f"%{term}%"
+            term_parameters.extend([wildcard] * 5)
+        term_filter = (
+            "AND (" + " OR ".join(term_groups) + ")"
+            if term_groups
+            else ""
+        )
+        candidate_limit = min(max(bounded * 10, 50), 500)
         connection = self.database.store_connection()
         try:
             rows = connection.execute(
-                """
+                f"""
                 SELECT blob.media_id, blob.storage_path, blob.mime_type,
                        analysis.summary, analysis.description,
                        analysis.extracted_text, analysis.emotions_json,
@@ -740,34 +791,34 @@ class MediaLibrary:
                 WHERE analysis.safety = 'safe'
                   AND analysis.is_sticker = 1
                   AND stickers.enabled = 1 AND stickers.banned = 0
-                  AND (
-                      ? = '' OR analysis.summary ILIKE ?
-                      OR analysis.description ILIKE ?
-                      OR analysis.extracted_text ILIKE ?
-                      OR analysis.emotions_json ILIKE ?
-                      OR analysis.usage_json ILIKE ?
-                  )
+                  {term_filter}
                 ORDER BY stickers.times_sent ASC,
                          stickers.last_sent_at ASC NULLS FIRST,
                          blob.last_seen_at DESC
                 LIMIT ?
                 """,
-                (
-                    cleaned,
-                    wildcard,
-                    wildcard,
-                    wildcard,
-                    wildcard,
-                    wildcard,
-                    bounded,
-                ),
+                (*term_parameters, candidate_limit),
             ).fetchall()
         finally:
             connection.close()
-        return [
-            MediaRecord(**{**self._record_from_row(row).__dict__, "score": 1.0})
-            for row in rows
+        records = [self._record_from_row(row) for row in rows]
+        if not cleaned:
+            return records[:bounded]
+        ranked = [
+            MediaRecord(
+                **{
+                    **record.__dict__,
+                    "score": self._sticker_relevance(record, terms),
+                }
+            )
+            for record in records
+            if self._record_matches_sticker_groups(record, required_groups)
         ]
+        return sorted(
+            (record for record in ranked if record.score > 0),
+            key=lambda record: (record.score, record.media_id),
+            reverse=True,
+        )[:bounded]
 
     async def search_stickers(
         self,
@@ -779,6 +830,7 @@ class MediaLibrary:
         cleaned = " ".join(str(query).split()).strip()
         bounded = min(max(int(limit), 1), 20)
         lexical = self.find_stickers(cleaned, limit=bounded)
+        required_groups = self._sticker_required_alias_groups(cleaned)
         if self.semantic_recall is None or not cleaned:
             return lexical
         try:
@@ -799,6 +851,8 @@ class MediaLibrary:
                 continue
             record = self.get_sticker(media_id)
             if record is None:
+                continue
+            if not self._record_matches_sticker_groups(record, required_groups):
                 continue
             existing = by_id.get(media_id)
             if existing is None or hit.score > existing.score:
@@ -1308,6 +1362,64 @@ class MediaLibrary:
             )
             if part and part not in {"[]", ""}
         )
+
+    @classmethod
+    def _sticker_query_terms(cls, query: str) -> tuple[str, ...]:
+        normalized = cls._normalize_sticker_text(query)
+        content = normalized
+        for filler in STICKER_QUERY_FILLERS:
+            content = content.replace(cls._normalize_sticker_text(filler), "")
+        terms: list[str] = [content] if content else []
+        for group in STICKER_ALIAS_GROUPS:
+            if any(cls._normalize_sticker_text(alias) in content for alias in group):
+                terms.extend(cls._normalize_sticker_text(alias) for alias in group)
+        return tuple(dict.fromkeys(term for term in terms if term))
+
+    @classmethod
+    def _sticker_required_alias_groups(
+        cls,
+        query: str,
+    ) -> tuple[tuple[str, ...], ...]:
+        normalized = cls._normalize_sticker_text(query)
+        return tuple(
+            tuple(cls._normalize_sticker_text(alias) for alias in group)
+            for group in STICKER_ALIAS_GROUPS
+            if any(cls._normalize_sticker_text(alias) in normalized for alias in group)
+        )
+
+    @classmethod
+    def _record_matches_sticker_groups(
+        cls,
+        record: MediaRecord,
+        groups: Sequence[Sequence[str]],
+    ) -> bool:
+        if not groups:
+            return True
+        content = cls._normalize_sticker_text(cls._record_search_content(record))
+        return all(any(alias in content for alias in group) for group in groups)
+
+    @classmethod
+    def _sticker_relevance(
+        cls,
+        record: MediaRecord,
+        terms: Sequence[str],
+    ) -> float:
+        fields = (
+            (record.summary, 3.0),
+            (record.description, 2.0),
+            (record.extracted_text, 1.0),
+            (" ".join(record.emotions), 2.0),
+            (" ".join(record.usage), 2.0),
+        )
+        score = 0.0
+        for value, weight in fields:
+            normalized = cls._normalize_sticker_text(value)
+            score += sum(weight for term in terms if term in normalized)
+        return min(score / 12.0, 1.0)
+
+    @staticmethod
+    def _normalize_sticker_text(value: str) -> str:
+        return re.sub(r"[\W_]+", "", str(value).casefold())
 
     def _vision_profile(self) -> ModelProfile:
         return self.model_catalog.resolve(self.vision_profile_name)
