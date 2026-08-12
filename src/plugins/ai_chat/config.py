@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 
@@ -48,6 +49,34 @@ def _get_group_ids(name: str) -> set[int]:
     return group_ids
 
 
+def _get_group_model_profiles(name: str) -> dict[int, str]:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return {}
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{name} must be valid JSON: {exc.msg}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"{name} must be a JSON object")
+
+    profiles: dict[int, str] = {}
+    for raw_group_id, raw_profile in payload.items():
+        try:
+            group_id = int(str(raw_group_id).strip())
+        except ValueError as exc:
+            raise ValueError(
+                f"{name} contains an invalid QQ group id: {raw_group_id!r}"
+            ) from exc
+        profile = str(raw_profile).strip()
+        if group_id <= 0 or not profile:
+            raise ValueError(
+                f"{name} requires positive group ids and non-empty profile names"
+            )
+        profiles[group_id] = profile
+    return profiles
+
+
 @dataclass(frozen=True)
 class Settings:
     deepseek_api_key: str
@@ -56,6 +85,7 @@ class Settings:
     deepseek_thinking: str
     model_default_profile: str
     model_profiles_json: str
+    group_model_profiles: dict[int, str]
     system_prompt: str
     max_context_turns: int
     group_context_messages: int
@@ -197,6 +227,9 @@ class Settings:
                 or "deepseek"
             ),
             model_profiles_json=os.getenv("AI_MODEL_PROFILES_JSON", "").strip(),
+            group_model_profiles=_get_group_model_profiles(
+                "AI_GROUP_MODEL_PROFILES_JSON"
+            ),
             system_prompt=os.getenv(
                 "AI_SYSTEM_PROMPT",
                 "你是QQ群里的友好助手。回答要简洁、准确、有帮助；不知道就说不知道。",

@@ -71,6 +71,7 @@ class MessageLedger:
 class Settings:
     enabled_groups = {930690526}
     disabled_groups = {201644592}
+    group_model_profiles = {930690526: "main"}
 
     @staticmethod
     def is_group_enabled(group_id):
@@ -192,6 +193,7 @@ class AdminTests(unittest.TestCase):
             [201644592, 930690526],
         )
         self.assertFalse(group_rows[0]["enabled"])
+        self.assertTrue(group_rows[1]["group_override"])
         self.assertEqual(group_rows[1]["overrides"][0]["profile"], "main")
         self.assertNotIn("never-return-this-secret", group_models.text)
 

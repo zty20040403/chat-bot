@@ -579,9 +579,22 @@ def _conversation_id(event: MessageEvent) -> str:
     return f"unknown:{event.get_session_id()}"
 
 
+_GROUP_CONVERSATION_ID_PATTERN = re.compile(r"^group:(\d+):user:\d+$")
+
+
+def _group_default_model_preference(conversation_id: str) -> str | None:
+    match = _GROUP_CONVERSATION_ID_PATTERN.fullmatch(conversation_id)
+    if match is None:
+        return None
+    return settings.group_model_profiles.get(int(match.group(1)))
+
+
 def _preferred_model_profile(conversation_id: str) -> ModelProfile:
+    preference = model_preferences.get_explicit(conversation_id)
+    if preference is None:
+        preference = _group_default_model_preference(conversation_id)
     return model_profiles.resolve_preference(
-        model_preferences.get_explicit(conversation_id)
+        preference
     )
 
 
@@ -2267,8 +2280,11 @@ async def _run_tracked_ai(
     journal_turn_id: int | None = None
     trace: DeepSeekTrace | None = None
     explicit_profile = model_preferences.get_explicit(conversation_id)
-    selected_profile = model_profiles.resolve_preference(explicit_profile)
-    if explicit_profile is None:
+    group_default_profile = _group_default_model_preference(conversation_id)
+    selected_profile = model_profiles.resolve_preference(
+        explicit_profile or group_default_profile
+    )
+    if explicit_profile is None and group_default_profile is None:
         previous_turn = _reply_target_turn(event)
         if previous_turn is not None:
             inherited_profile = model_profiles.find_runtime(
@@ -3644,12 +3660,17 @@ async def handle_model_command(
 
     if requested.lower() in {"默认", "default", "reset", "重置"}:
         model_preferences.clear(conversation_id)
-        default_profile = model_profiles.default
+        default_profile = _preferred_model_profile(conversation_id)
+        default_scope = (
+            "当前群默认模型"
+            if _group_default_model_preference(conversation_id) is not None
+            else "全局默认模型"
+        )
         await _finish_safely(
             model_command,
             _reply_message(
                 event,
-                "已恢复默认模型："
+                f"已恢复{default_scope}："
                 f"{default_profile.name}（{default_profile.model}）",
             ),
         )

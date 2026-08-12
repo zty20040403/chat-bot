@@ -291,7 +291,9 @@ API Key 或验证码。所有记忆都可以手动审计：
 ```
 
 `/模型` 会显示 profile 名、provider、真实模型和工具/流式/JSON 能力。选择只保存
-profile 名，不保存 API Key；它不影响同群其他用户，也不会提交到 Git 仓库。
+profile 名，不保存 API Key；它不影响同群其他用户，也不会提交到 Git 仓库。可用
+`AI_GROUP_MODEL_PROFILES_JSON={"201644592":"gpt-5.6-sol"}` 为群配置默认 profile；
+群友自己的 `/模型` 选择优先级更高，执行 `/模型 默认` 后会恢复该群默认值。
 
 ## 项目沙箱和群文件工具
 

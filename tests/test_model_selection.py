@@ -4,6 +4,7 @@ import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import nonebot
@@ -16,7 +17,9 @@ from src.plugins.ai_chat.model_preferences import ModelPreferenceStore
 
 
 class ModelSelectionTests(unittest.TestCase):
-    def test_preferences_are_profile_names_and_remain_conversation_scoped(self) -> None:
+    def test_user_preference_overrides_group_default_and_remains_scoped(
+        self,
+    ) -> None:
         catalog = ModelCatalog.from_json(
             json.dumps(
                 {
@@ -42,17 +45,24 @@ class ModelSelectionTests(unittest.TestCase):
         )
         with TemporaryDirectory() as tmp:
             preferences = ModelPreferenceStore(Path(tmp) / "models.json")
-            preferences.set("group:1:user:10", "strong")
+            preferences.set("group:1:user:10", "fast")
             with (
                 patch.object(ai_chat, "model_profiles", catalog),
                 patch.object(ai_chat, "model_preferences", preferences),
+                patch.object(
+                    ai_chat,
+                    "settings",
+                    SimpleNamespace(group_model_profiles={1: "strong"}),
+                ),
             ):
                 selected = ai_chat._preferred_model_profile("group:1:user:10")
                 neighbor = ai_chat._preferred_model_profile("group:1:user:11")
+                other_group = ai_chat._preferred_model_profile("group:2:user:11")
 
-        self.assertEqual(selected.name, "strong")
-        self.assertEqual(selected.protocol, "anthropic-messages")
-        self.assertEqual(neighbor.name, "fast")
+        self.assertEqual(selected.name, "fast")
+        self.assertEqual(selected.protocol, "openai-chat")
+        self.assertEqual(neighbor.name, "strong")
+        self.assertEqual(other_group.name, "fast")
 
     def test_removed_profile_preference_falls_back_without_exposing_secret(self) -> None:
         catalog = ModelCatalog.from_json(

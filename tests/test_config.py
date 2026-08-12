@@ -56,6 +56,32 @@ class SettingsGroupFilterTests(unittest.TestCase):
         self.assertFalse(settings.is_group_enabled(201644592))
         self.assertTrue(settings.is_group_enabled(930690526))
 
+    def test_group_model_profiles_parse_group_ids_and_profile_names(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "AI_GROUP_MODEL_PROFILES_JSON": (
+                    '{"201644592":"gpt-5.6-sol","930690526":"deepseek"}'
+                )
+            },
+            clear=True,
+        ):
+            settings = Settings.from_env()
+
+        self.assertEqual(
+            settings.group_model_profiles,
+            {201644592: "gpt-5.6-sol", 930690526: "deepseek"},
+        )
+
+    def test_group_model_profiles_reject_invalid_json(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"AI_GROUP_MODEL_PROFILES_JSON": "not-json"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "must be valid JSON"):
+                Settings.from_env()
+
 
 if __name__ == "__main__":
     unittest.main()

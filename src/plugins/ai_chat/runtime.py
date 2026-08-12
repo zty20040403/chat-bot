@@ -227,6 +227,14 @@ def build_app_context(
         store_source("model_preferences.json")
     )
     model_catalog = ModelCatalog.from_settings(settings)
+    for group_id, profile_name in settings.group_model_profiles.items():
+        try:
+            model_catalog.resolve(profile_name)
+        except ValueError as exc:
+            raise RuntimeError(
+                "AI_GROUP_MODEL_PROFILES_JSON maps QQ group "
+                f"{group_id} to unknown model profile {profile_name!r}"
+            ) from exc
     if settings.historian_enabled and settings.historian_profile:
         model_catalog.resolve(settings.historian_profile)
     if settings.dream_enabled and settings.dream_profile:

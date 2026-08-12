@@ -343,6 +343,9 @@ def _group_model_overview(
     if settings is not None:
         group_ids.update(getattr(settings, "enabled_groups", set()) or set())
         group_ids.update(getattr(settings, "disabled_groups", set()) or set())
+        group_ids.update(
+            (getattr(settings, "group_model_profiles", {}) or {}).keys()
+        )
 
     if message_ledger is not None:
         try:
@@ -393,13 +396,20 @@ def _group_model_overview(
             if settings is not None
             else True
         )
+        stored_group_default = (
+            (getattr(settings, "group_model_profiles", {}) or {}).get(group_id)
+            if settings is not None
+            else None
+        )
+        group_default = catalog.resolve_preference(stored_group_default)
         rows.append(
             {
                 "group_id": group_id,
                 "enabled": enabled,
-                "default_profile": default_profile.name,
-                "default_provider": default_profile.provider,
-                "default_model": default_profile.model,
+                "default_profile": group_default.name,
+                "default_provider": group_default.provider,
+                "default_model": group_default.model,
+                "group_override": stored_group_default is not None,
                 "overrides": overrides,
             }
         )

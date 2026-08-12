@@ -30,6 +30,7 @@ OPENAI_API_KEY=你的OpenAIKey
 ANTHROPIC_API_KEY=你的AnthropicKey
 AI_MODEL_DEFAULT_PROFILE=deepseek
 AI_MODEL_PROFILES_JSON={"default":"deepseek","profiles":{"deepseek":{"provider":"deepseek","protocol":"openai-chat","base_url":"https://api.deepseek.com","api_key_env":"DEEPSEEK_API_KEY","model":"deepseek-v4-flash","thinking":"disabled","aliases":["ds","flash"]},"openai":{"provider":"openai","protocol":"openai-chat","base_url":"https://api.openai.com/v1","api_key_env":"OPENAI_API_KEY","model":"gpt-5-mini","aliases":["gpt"]},"claude":{"provider":"anthropic","protocol":"anthropic-messages","base_url":"https://api.anthropic.com","api_key_env":"ANTHROPIC_API_KEY","model":"claude-sonnet-4-6","max_output_tokens":4096}}}
+AI_GROUP_MODEL_PROFILES_JSON={"201644592":"openai"}
 ```
 
 每个 profile 支持这些主要字段：
@@ -64,7 +65,8 @@ profile 若声明不支持工具，机器人仍能普通回答，但不会给该
 /模型 默认
 ```
 
-选择按用户和会话隔离，只持久化 profile 名。回合重放还会同时核对 provider、profile、
+选择按用户和会话隔离，只持久化 profile 名。群级默认可由
+`AI_GROUP_MODEL_PROFILES_JSON` 声明，优先级为用户选择、群级默认、全局默认。回合重放还会同时核对 provider、profile、
 真实 model、提示词版本和工具目录；切换供应商后旧回合自动退化成摘要，不会把两种协议
 的原样 tool segment 混在一起。配置变更需要重启。当前不会在 Agent 工具回合中自动
 故障转移，因为重跑可能重复发送文件、写记忆或执行其他有副作用操作。
