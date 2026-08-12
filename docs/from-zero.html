@@ -2043,13 +2043,8 @@ handle_group_context_recorder()  把普通群消息写入群上下文</code></pr
                 <tr><td><code>_resolve_voice_message_id(bot, event)</code></td><td>事件 → 消息 ID 或空</td><td>按“当前语音、被回复语音、最近语音”顺序查找，并刷新最近语音缓存。</td></tr>
                 <tr><td><code>_finish_image_ocr(...)</code></td><td>处理器+事件+问题</td><td>检查 OCR 开关和图片来源，没有问题文本时补默认问题，再强制模型调用 <code>read_image_text</code>。</td></tr>
                 <tr><td><code>_finish_voice_transcription(...)</code></td><td>处理器+事件+问题</td><td>找到语音消息 ID，没有问题时补默认问题，再强制调用 <code>transcribe_voice</code>。</td></tr>
-                <tr><td><code>_generate_proactive_reply(...)</code></td><td>最后群消息 → 文本/空</td><td>让 DeepSeek 判断此时插话是否自然；模型返回 <code>NO_REPLY</code> 时保持沉默，成功时写入群上下文。</td></tr>
-                <tr><td><code>_generate_warmup_reply(group_id)</code></td><td>群号 → 文本/空</td><td>根据最近群聊生成最多指定长度的轻松暖场消息，不 @任何人。</td></tr>
-                <tr><td><code>_send_group_message_safely(...)</code></td><td>Bot+群号+文本 → 布尔值</td><td>直接发送暖场消息；NapCat 超时时缩短后重试一次，返回是否成功。</td></tr>
-                <tr><td><code>_is_warmup_quiet_hour(hour)</code></td><td>小时 → 布尔值</td><td>支持普通时间段和跨午夜时间段，判断当前是否应保持安静。</td></tr>
-                <tr><td><code>_warmup_loop()</code></td><td>无 → 长期后台协程</td><td>按配置间隔醒来，找出到期群，生成暖场，再次确认群仍空闲后发送并记录次数。</td></tr>
-                <tr><td><code>start_warmup_task()</code></td><td>NoneBot 启动事件</td><td>开启暖场时创建唯一后台任务；没有开启则什么都不做。</td></tr>
-                <tr><td><code>stop_warmup_task()</code></td><td>NoneBot 关闭事件</td><td>取消并等待暖场协程结束，避免程序退出后留下悬挂任务。</td></tr>
+                <tr><td><code>_generate_proactive_reply(...)</code></td><td>最后群消息 → 兴趣决定</td><td>每条未点名的普通群消息都会调用一次模型。模型返回 0 到 100 的兴趣分、候选回复和是否适合语音；只有达到高阈值才会真正发送。</td></tr>
+                <tr><td><code>handle_proactive_chat(...)</code></td><td>群消息 → 可选发送</td><td>过滤命令和空消息后逐条判断，不做随机抽样、冷却或每日限额。允许回复时可按配置概率合成独立 QQ 语音，TTS 失败退回文字。</td></tr>
                 <tr><td><code>stop_running_ai_tasks()</code></td><td>NoneBot 关闭事件</td><td>取消任务注册表中仍在运行的 AI 请求。</td></tr>
               </tbody>
             </table>
@@ -2329,17 +2324,10 @@ handle_group_context_recorder()  把普通群消息写入群上下文</code></pr
             <table class="method-table">
               <thead><tr><th>方法</th><th>输入与输出</th><th>具体作用</th></tr></thead>
               <tbody>
-                <tr><td><code>ProactiveChatScheduler.__init__()</code></td><td>消息数+冷却+概率</td><td>保存触发规则，并允许测试传入可控随机函数。计数和冷却只在内存中，不跨重启。</td></tr>
-                <tr><td><code>should_trigger(group, text, now)</code></td><td>群号+消息 → 布尔值</td><td>先过滤不适合消息，再累计数量，检查冷却和随机概率；命中时清零计数并记录触发时间。</td></tr>
-                <tr><td><code>reset(group)</code></td><td>群号 → 无</td><td>删除该群主动接话的消息计数和上次触发时间。</td></tr>
-                <tr><td><code>IdleWarmupScheduler.__init__()</code></td><td>空闲/冷却/每日限制+路径</td><td>初始化人类活跃时间、上次暖场时间，并从 JSON 恢复每日次数。</td></tr>
-                <tr><td><code>record_human_activity(group)</code></td><td>群号 → 无</td><td>使用单调时钟记录最后一条人类消息；机器人自己的消息不会调用它。</td></tr>
-                <tr><td><code>due_groups(day, now)</code></td><td>日期 → 到期群列表</td><td>筛选空闲时间足够、暖场冷却结束、当天次数未满的群。</td></tr>
-                <tr><td><code>is_still_idle(group, now)</code></td><td>群号 → 布尔值</td><td>生成暖场回答后再次检查，防止模型思考期间群友已经开始聊天。</td></tr>
-                <tr><td><code>mark_warmup(group, day)</code></td><td>群号+日期 → 无</td><td>记录本次暖场时间并增加当日次数，然后持久化。当前主流程是在真正发送前调用，所以发送失败也会占一次计数。</td></tr>
-                <tr><td><code>_load_daily_counts()</code></td><td>JSON → 次数字典</td><td>验证群号、日期和非负次数；损坏文件返回空。</td></tr>
-                <tr><td><code>_save_daily_counts()</code></td><td>内存 → JSON</td><td>保存每群的日期和次数，使用临时文件替换。</td></tr>
-                <tr><td><code>_is_candidate_message(text)</code></td><td>文字 → 布尔值</td><td>只接受 3 到 500 字、不是斜杠命令、且包含文字或数字的消息。</td></tr>
+                <tr><td><code>ProactiveDecision</code></td><td>兴趣分+回复+语音标记</td><td>保存模型的结构化判断；只有回复非空且兴趣分达到配置阈值时，<code>should_reply()</code> 才返回真。</td></tr>
+                <tr><td><code>parse_proactive_decision(payload)</code></td><td>JSON 对象 → 兴趣决定</td><td>把模型 JSON 安全转换成决定对象，将兴趣分限制在 0 到 100，并拒绝含糊的语音布尔值。</td></tr>
+                <tr><td><code>is_candidate_message(text)</code></td><td>文字 → 布尔值</td><td>只过滤空消息和斜杠命令；其他普通群消息都会进入一次 LLM 兴趣判断。</td></tr>
+                <tr><td><code>should_use_proactive_voice(percent)</code></td><td>语音百分比 → 布尔值</td><td>只在已经通过高兴趣判断且模型标记适合语音时抽取发送形式，不影响是否回复。</td></tr>
               </tbody>
             </table>
           </div>

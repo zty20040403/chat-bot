@@ -60,7 +60,6 @@ JSON_STATES = {
     "long_term_memory.json": "long_term_memory",
     "user_profiles.json": "user_profiles",
     "model_preferences.json": "model_preferences",
-    "warmup_state.json": "warmup_state",
     "learned_stickers.json": "learned_stickers",
 }
 

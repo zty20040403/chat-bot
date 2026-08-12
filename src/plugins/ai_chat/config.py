@@ -111,18 +111,9 @@ class Settings:
     voice_timeout_seconds: int
     voice_recent_seconds: int
     proactive_enabled: bool
-    proactive_chance_percent: int
-    proactive_cooldown_seconds: int
-    proactive_min_messages: int
+    proactive_interest_threshold: int
+    proactive_voice_percent: int
     proactive_max_reply_chars: int
-    warmup_enabled: bool
-    warmup_idle_seconds: int
-    warmup_cooldown_seconds: int
-    warmup_daily_limit: int
-    warmup_check_seconds: int
-    warmup_max_reply_chars: int
-    warmup_quiet_start_hour: int
-    warmup_quiet_end_hour: int
     reminders_enabled: bool
     reminder_check_seconds: int
     reminder_max_per_scope: int
@@ -359,39 +350,14 @@ class Settings:
                 _get_int("AI_VOICE_RECENT_SECONDS", 300), 30
             ),
             proactive_enabled=_get_bool("AI_PROACTIVE_ENABLED", False),
-            proactive_chance_percent=min(
-                max(_get_int("AI_PROACTIVE_CHANCE_PERCENT", 15), 0), 100
+            proactive_interest_threshold=min(
+                max(_get_int("AI_PROACTIVE_INTEREST_THRESHOLD", 90), 0), 100
             ),
-            proactive_cooldown_seconds=max(
-                _get_int("AI_PROACTIVE_COOLDOWN_SECONDS", 120), 0
-            ),
-            proactive_min_messages=max(
-                _get_int("AI_PROACTIVE_MIN_MESSAGES", 4), 1
+            proactive_voice_percent=min(
+                max(_get_int("AI_PROACTIVE_VOICE_PERCENT", 60), 0), 100
             ),
             proactive_max_reply_chars=max(
                 _get_int("AI_PROACTIVE_MAX_REPLY_CHARS", 180), 20
-            ),
-            warmup_enabled=_get_bool("AI_WARMUP_ENABLED", False),
-            warmup_idle_seconds=max(
-                _get_int("AI_WARMUP_IDLE_SECONDS", 1800), 60
-            ),
-            warmup_cooldown_seconds=max(
-                _get_int("AI_WARMUP_COOLDOWN_SECONDS", 1800), 60
-            ),
-            warmup_daily_limit=max(
-                _get_int("AI_WARMUP_DAILY_LIMIT", 2), 0
-            ),
-            warmup_check_seconds=max(
-                _get_int("AI_WARMUP_CHECK_SECONDS", 60), 10
-            ),
-            warmup_max_reply_chars=max(
-                _get_int("AI_WARMUP_MAX_REPLY_CHARS", 80), 20
-            ),
-            warmup_quiet_start_hour=min(
-                max(_get_int("AI_WARMUP_QUIET_START_HOUR", 1), 0), 23
-            ),
-            warmup_quiet_end_hour=min(
-                max(_get_int("AI_WARMUP_QUIET_END_HOUR", 8), 0), 23
             ),
             reminders_enabled=_get_bool("AI_REMINDERS_ENABLED", True),
             reminder_check_seconds=max(

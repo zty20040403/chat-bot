@@ -31,7 +31,7 @@ iMessage ────┘
 - `runtime.py` 是 composition root。`build_app_context()` 根据配置创建模型目录、LLM
   Gateway、所有存储、桥接、浏览器和领域服务，并放进唯一的 `AppContext`。
 - `bootstrap.py` 只把已经创建好的服务注册到 FastAPI 管理面和桥接 webhook。
-- `lifecycle.py` 用 `BackgroundTaskSupervisor` 管理 warmup、提醒、outbox、Matrix、
+- `lifecycle.py` 用 `BackgroundTaskSupervisor` 管理提醒、outbox、Matrix、
   semantic、Historian 和 Dream 循环；同名任务不能重复启动，未捕获异常会留下日志，
   关闭时集中取消并等待任务退出。
 

@@ -38,7 +38,6 @@ from .model_catalog import ModelCatalog
 from .model_preferences import ModelPreferenceStore
 from .ocr import RecentImageStore
 from .pins import PinStore
-from .proactive import IdleWarmupScheduler, ProactiveChatScheduler
 from .quota import UsageStore
 from .reminders import ReminderStore
 from .sandbox import DockerSandboxManager
@@ -93,8 +92,6 @@ class AppContext:
     skill_registry: SkillRegistry
     recent_images: RecentImageStore
     recent_voices: RecentVoiceStore
-    proactive_scheduler: ProactiveChatScheduler
-    idle_warmup_scheduler: IdleWarmupScheduler
     sandbox_manager: DockerSandboxManager
     bridge_router: MirrorRouter
     message_ledger: MessageLedger | None = None
@@ -523,17 +520,6 @@ def build_app_context(
         skill_registry=SkillRegistry(project_root / "skills"),
         recent_images=RecentImageStore(settings.ocr_recent_image_seconds),
         recent_voices=RecentVoiceStore(settings.voice_recent_seconds),
-        proactive_scheduler=ProactiveChatScheduler(
-            min_messages=settings.proactive_min_messages,
-            cooldown_seconds=settings.proactive_cooldown_seconds,
-            chance_percent=settings.proactive_chance_percent,
-        ),
-        idle_warmup_scheduler=IdleWarmupScheduler(
-            idle_seconds=settings.warmup_idle_seconds,
-            cooldown_seconds=settings.warmup_cooldown_seconds,
-            daily_limit=settings.warmup_daily_limit,
-            state_path=store_source("warmup_state.json"),
-        ),
         sandbox_manager=DockerSandboxManager(
             max_per_owner=settings.sandbox_max_per_user,
             max_total=settings.sandbox_max_total,

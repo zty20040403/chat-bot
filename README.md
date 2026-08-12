@@ -154,9 +154,10 @@ ws://127.0.0.1:8080/onebot/v11/ws
 Message IR，再存入 PostgreSQL 规范消息账本。模型在群聊上下文和消息工具里
 只看到 `msg#12`、`[mention#3]` 这类机器人内部句柄；原始群号、QQ 号和 NapCat
 消息 ID 只留在本地适配层，不直接交给模型，也不会提交到 Git 仓库。
-群聊累计一定数量的普通消息后，机器人会低概率参考上下文主动接一句。
-群成员连续 30 分钟没有发言时，机器人会主动暖场；每个群每天最多暖场 2 次，
-凌晨 1 点到 8 点保持安静。
+每条未点名的普通群消息都会经过一次轻量 LLM 兴趣判断；只有模型给出很高兴趣分，
+并且确实有自然、有用或有趣的话可说时才主动接一句。主动回复没有随机抽样、冷却或
+每日次数限制，但默认阈值为 90，因此大多数消息保持沉默。适合短口语表达的主动回复
+有 60% 概率直接发送为独立 QQ 语音；语音生成失败会退回文字。机器人不再定时暖场。
 消息、上下文、长期记忆、提醒、配额和工具执行记录统一写入 PostgreSQL；
 `AI_STATE_DIR` 只保留浏览器 profile 等主机本地状态。生产启动必须配置
 `AI_POSTGRES_DSN`，不会自动退回 SQLite。旧 SQLite/JSON 数据只由一次性迁移工具
@@ -491,18 +492,9 @@ AI_OCR_MAX_CHARS=4000
 AI_OCR_TIMEOUT_SECONDS=30
 AI_OCR_RECENT_IMAGE_SECONDS=300
 AI_PROACTIVE_ENABLED=true
-AI_PROACTIVE_CHANCE_PERCENT=15
-AI_PROACTIVE_COOLDOWN_SECONDS=120
-AI_PROACTIVE_MIN_MESSAGES=4
+AI_PROACTIVE_INTEREST_THRESHOLD=90
+AI_PROACTIVE_VOICE_PERCENT=60
 AI_PROACTIVE_MAX_REPLY_CHARS=180
-AI_WARMUP_ENABLED=true
-AI_WARMUP_IDLE_SECONDS=1800
-AI_WARMUP_COOLDOWN_SECONDS=1800
-AI_WARMUP_DAILY_LIMIT=2
-AI_WARMUP_CHECK_SECONDS=60
-AI_WARMUP_MAX_REPLY_CHARS=80
-AI_WARMUP_QUIET_START_HOUR=1
-AI_WARMUP_QUIET_END_HOUR=8
 AI_REMINDERS_ENABLED=true
 AI_REMINDER_CHECK_SECONDS=20
 AI_REMINDER_MAX_PER_SCOPE=50
@@ -547,7 +539,7 @@ AI_ENABLED_GROUPS=123456789,987654321
 AI_DISABLED_GROUPS=201644592
 ```
 
-禁用名单优先于允许名单，并同时阻止命令回复、主动聊天、暖场、提醒和待投递消息。
+禁用名单优先于允许名单，并同时阻止命令回复、主动聊天、提醒和待投递消息。
 
 ## 五份 ADR 的落地范围
 

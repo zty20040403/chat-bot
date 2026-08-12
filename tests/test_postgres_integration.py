@@ -34,7 +34,6 @@ from src.plugins.ai_chat.memory import ConversationMemory, GroupContextMemory
 from src.plugins.ai_chat.message_ir import MessageBody, TextNode
 from src.plugins.ai_chat.model_preferences import ModelPreferenceStore
 from src.plugins.ai_chat.pins import PinStore
-from src.plugins.ai_chat.proactive import IdleWarmupScheduler
 from src.plugins.ai_chat.quota import UsageStore
 from src.plugins.ai_chat.reminders import ReminderStore
 from src.plugins.ai_chat.semantic_recall import (
@@ -410,11 +409,6 @@ class PostgresIntegrationTests(unittest.TestCase):
                 ModelPreferenceStore(self.database).get(scope.key, "default"),
                 "deepseek-chat",
             )
-            warmup = IdleWarmupScheduler(10, 10, 2, self.database)
-            warmup.record_human_activity(930690526, now=0)
-            self.assertEqual(warmup.due_groups("2026-08-10", now=11), [930690526])
-            warmup.mark_warmup(930690526, "2026-08-10", now=11)
-
             vector_backend = PgVectorBackend(
                 TEST_DSN,
                 dimensions=1536,
