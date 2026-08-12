@@ -28,6 +28,14 @@ class SettingsGroupFilterTests(unittest.TestCase):
 
         self.assertEqual(settings.sandbox_max_file_bytes, 0)
 
+    def test_media_defaults_use_luna_and_are_disabled_locally(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            settings = Settings.from_env()
+
+        self.assertFalse(settings.media_enabled)
+        self.assertEqual(settings.vision_profile, "gpt-5.6-luna")
+        self.assertEqual(settings.media_max_vision_bytes, 20 * 1024 * 1024)
+
     def test_disabled_groups_override_allowlist(self) -> None:
         with patch.dict(
             os.environ,

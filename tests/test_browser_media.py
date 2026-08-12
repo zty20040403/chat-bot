@@ -119,6 +119,7 @@ class BrowserAndMediaTests(unittest.TestCase):
             include_image_ocr=False,
             include_conversation_tools=True,
             include_browser_tools=True,
+            include_media_tools=True,
         )
         names = {
             item["function"]["name"]
@@ -128,6 +129,9 @@ class BrowserAndMediaTests(unittest.TestCase):
         self.assertIn(VIEW_BILIBILI_TOOL_NAME, names)
         self.assertIn(BROWSER_NAVIGATE_TOOL_NAME, names)
         self.assertIn(BROWSER_CLEAR_TOOL_NAME, names)
+        self.assertIn("view_image", names)
+        self.assertIn("find_images", names)
+        self.assertIn("find_stickers", names)
 
 
 if __name__ == "__main__":

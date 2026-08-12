@@ -130,6 +130,18 @@ class Settings:
     ocr_max_chars: int
     ocr_timeout_seconds: int
     ocr_recent_image_seconds: int
+    media_enabled: bool
+    media_root: str
+    vision_profile: str
+    media_max_source_bytes: int
+    media_max_vision_bytes: int
+    media_prepare_threshold_bytes: int
+    media_max_edge_pixels: int
+    media_timeout_seconds: int
+    media_max_attempts: int
+    media_lease_seconds: int
+    media_batch_size: int
+    media_worker_concurrency: int
     voice_enabled: bool
     voice_provider: str
     voice_name: str
@@ -351,6 +363,45 @@ class Settings:
             ),
             ocr_recent_image_seconds=max(
                 _get_int("AI_OCR_RECENT_IMAGE_SECONDS", 300), 30
+            ),
+            media_enabled=_get_bool("AI_MEDIA_ENABLED", False),
+            media_root=os.getenv("AI_MEDIA_ROOT", "").strip(),
+            vision_profile=(
+                os.getenv("AI_VISION_PROFILE", "gpt-5.6-luna").strip()
+                or "gpt-5.6-luna"
+            ),
+            media_max_source_bytes=max(
+                _get_int("AI_MEDIA_MAX_SOURCE_MB", 100), 1
+            )
+            * 1024
+            * 1024,
+            media_max_vision_bytes=max(
+                _get_int("AI_VISION_MAX_IMAGE_MB", 20), 1
+            )
+            * 1024
+            * 1024,
+            media_prepare_threshold_bytes=max(
+                _get_int("AI_MEDIA_PREPARE_THRESHOLD_MB", 1), 0
+            )
+            * 1024
+            * 1024,
+            media_max_edge_pixels=min(
+                max(_get_int("AI_MEDIA_MAX_EDGE_PX", 1568), 256), 4096
+            ),
+            media_timeout_seconds=min(
+                max(_get_int("AI_VISION_TIMEOUT_SECONDS", 180), 5), 600
+            ),
+            media_max_attempts=min(
+                max(_get_int("AI_MEDIA_MAX_ATTEMPTS", 5), 1), 20
+            ),
+            media_lease_seconds=min(
+                max(_get_int("AI_MEDIA_LEASE_SECONDS", 240), 30), 1800
+            ),
+            media_batch_size=min(
+                max(_get_int("AI_MEDIA_BATCH_SIZE", 4), 1), 20
+            ),
+            media_worker_concurrency=min(
+                max(_get_int("AI_MEDIA_WORKER_CONCURRENCY", 2), 1), 8
             ),
             voice_enabled=_get_bool("AI_VOICE_ENABLED", True),
             voice_provider=(

@@ -54,8 +54,10 @@ AI_GROUP_MODEL_PROFILES_JSON={"201644592":"openai"}
 Completions 协议的兼容 endpoint。`anthropic-messages` 已支持普通对话和客户端工具调用，
 但当前适配器使用完整响应而不是流式事件；JSON 后台任务通过严格提示和宿主解析完成。
 profile 若声明不支持工具，机器人仍能普通回答，但不会给该模型执行工具。
-`vision` 是协议能力记录；当前 QQ 图片仍统一走受限 OCR 工具，不会因把它设为 `true`
-就把原图直接上传给模型。
+`vision` 表示该 profile 可以接收图片。启用新版媒体库后，机器人会把 QQ 图片原件按
+SHA-256 去重保存在宿主机，把元数据和处理任务写入 PostgreSQL，再统一交给
+`AI_VISION_PROFILE` 指定的视觉模型生成标签。普通聊天 profile 即使不支持视觉，
+也能通过 `view_image` 工具读取这份分析结果；原图只会发送给配置的视觉模型服务。
 
 重启后在群里使用：
 
@@ -70,6 +72,32 @@ profile 若声明不支持工具，机器人仍能普通回答，但不会给该
 真实 model、提示词版本和工具目录；切换供应商后旧回合自动退化成摘要，不会把两种协议
 的原样 tool segment 混在一起。配置变更需要重启。当前不会在 Agent 工具回合中自动
 故障转移，因为重跑可能重复发送文件、写记忆或执行其他有副作用操作。
+
+### 2.1 持久图片与表情库
+
+```text
+AI_MEDIA_ENABLED=true
+AI_MEDIA_ROOT=/var/lib/qq-deepseek-bot/media
+AI_VISION_PROFILE=gpt-5.6-luna
+AI_MEDIA_MAX_SOURCE_MB=100
+AI_VISION_MAX_IMAGE_MB=20
+AI_MEDIA_PREPARE_THRESHOLD_MB=1
+AI_MEDIA_MAX_EDGE_PX=1568
+AI_VISION_TIMEOUT_SECONDS=180
+AI_MEDIA_MAX_ATTEMPTS=5
+AI_MEDIA_LEASE_SECONDS=600
+AI_MEDIA_BATCH_SIZE=4
+AI_MEDIA_WORKER_CONCURRENCY=2
+```
+
+媒体库需要 PostgreSQL，并建议把 `ffmpeg` 放进服务的 `PATH`。消息中的图片会先进入
+持久任务队列，进程重启后继续处理；GIF 和过大的图片用 `ffmpeg` 提取并压缩首帧后
+再识别。模型可调用 `view_image`、`find_images`、`find_stickers` 和
+`send_sticker`。检索和发送始终限制在当前会话 Scope，不能从其他群取图。
+
+自动表情库采取 fail-closed 策略：包含真人、聊天记录、二维码、联系方式或其他隐私
+信息的图片不会成为可发送表情；`review` 和 `blocked` 状态也不能被 `send_sticker`
+绕过。管理页的“媒体库”可以查看 Blob、识别标签、任务状态和失败原因。
 
 ## 3. 持久 outbox 与流式发送
 

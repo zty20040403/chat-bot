@@ -29,6 +29,7 @@ class AdminServices:
     settings: Any = None
     sandbox_manager: Any = None
     sticker_inventory: Any = None
+    media_library: Any = None
 
 
 def register_admin(
@@ -298,6 +299,33 @@ def register_admin(
             services.settings,
             services.message_ledger,
         )
+
+    @router.get("/api/media")
+    async def media(
+        limit: int = Query(default=100, ge=1, le=500),
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
+        authorize(authorization)
+        if services.media_library is None:
+            return {
+                "counts": {},
+                "items": [],
+                "jobs": [],
+                "configured": False,
+                "available": False,
+            }
+        try:
+            snapshot = services.media_library.admin_snapshot(limit=limit)
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            return {
+                "counts": {},
+                "items": [],
+                "jobs": [],
+                "configured": True,
+                "available": False,
+                "error": str(exc)[:500],
+            }
+        return {**snapshot, "configured": True, "available": True}
 
     app.include_router(router)
 

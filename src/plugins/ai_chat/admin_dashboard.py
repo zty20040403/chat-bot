@@ -72,6 +72,10 @@ _DASHBOARD_TEMPLATE = r"""<!doctype html>
             data-title="表情包" data-subtitle="本地资源与 QQ 学习库存">
             <span data-icon="smile"></span><span>表情包</span><b id="nav-sticker-count">0</b>
           </button>
+          <button class="nav-item" type="button" data-view="media"
+            data-title="媒体库" data-subtitle="图片识别、存储与后台任务">
+            <span data-icon="image"></span><span>媒体库</span><b id="nav-media-count">0</b>
+          </button>
           <button class="nav-item" type="button" data-view="group-models"
             data-title="群模型" data-subtitle="各群默认配置与用户覆盖">
             <span data-icon="users"></span><span>群模型</span>
@@ -210,6 +214,18 @@ _DASHBOARD_TEMPLATE = r"""<!doctype html>
             <th>来源</th><th>类型</th><th>名称</th><th>保存的引用</th><th>大小</th>
           </tr></thead><tbody id="sticker-body"></tbody></table></div>
           <div class="table-footer" data-pager-wrap="stickers"></div>
+        </section>
+
+        <section class="view" id="media" hidden>
+          <div class="section-heading"><div><h2>媒体库</h2><p>h610 Blob、Luna 识图与任务队列</p></div><span class="count-label" id="media-count">0 张</span></div>
+          <div class="table-wrap"><table class="wide-table"><thead><tr>
+            <th>Media</th><th>识图标签</th><th>类型 / 大小</th><th>安全状态</th><th>视觉模型</th><th>发送</th>
+          </tr></thead><tbody id="media-body"></tbody></table></div>
+          <div class="table-footer" data-pager-wrap="media"></div>
+          <div class="section-heading compact-heading"><div><h2>后台任务</h2><p>等待、运行和最终失败任务</p></div><span class="count-label" id="media-job-count">0 条</span></div>
+          <div class="table-wrap"><table><thead><tr>
+            <th>任务</th><th>类型</th><th>状态</th><th>尝试</th><th>错误</th><th>更新时间</th>
+          </tr></thead><tbody id="media-job-body"></tbody></table></div>
         </section>
 
         <section class="view" id="group-models" hidden>
@@ -743,6 +759,7 @@ const ICONS = {
   chart: '<path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/>',
   box: '<path d="m21 8-9 5-9-5"/><path d="m3 8 9-5 9 5v8l-9 5-9-5Z"/><path d="M12 13v8"/>',
   smile: '<circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2M9 9h.01M15 9h.01"/>',
+  image: '<rect width="18" height="18" x="3" y="3" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 21"/>',
   users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>',
   cpu: '<rect width="16" height="16" x="4" y="4" rx="2"/><rect width="6" height="6" x="9" y="9" rx="1"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/>',
   menu: '<path d="M4 12h16M4 6h16M4 18h16"/>',
@@ -777,10 +794,11 @@ const state = {
   tasks: [],
   sandboxes: { items: [] },
   stickers: { counts: {}, items: [] },
+  media: { counts: {}, items: [], jobs: [] },
   groups: { items: [] },
   usageDays: 30,
-  pages: { deliveries: 0, usage: 0, stickers: 0 },
-  pageSizes: { deliveries: 10, usage: 10, stickers: 10 }
+  pages: { deliveries: 0, usage: 0, stickers: 0, media: 0 },
+  pageSizes: { deliveries: 10, usage: 10, stickers: 10, media: 10 }
 };
 
 let loading = false;
@@ -1024,6 +1042,7 @@ function renderOverview() {
   document.querySelector('#nav-delivery-count').textContent = number(state.deliveries.length);
   document.querySelector('#nav-sandbox-count').textContent = number(sandboxItems.length);
   document.querySelector('#nav-sticker-count').textContent = number(stickerCounts.total);
+  document.querySelector('#nav-media-count').textContent = number((state.media.counts || {}).total);
 }
 
 function renderTasks() {
@@ -1081,6 +1100,33 @@ function renderStickers() {
     `<td>${esc(item.name)}</td><td><code class="truncate-cell" title="${esc(item.reference)}">${esc(item.reference)}</code></td>` +
     `<td>${fmtBytes(item.size_bytes)}</td></tr>`
   ), '还没有保存表情包');
+}
+
+function renderMedia() {
+  const data = state.media;
+  const items = data.items || [];
+  const jobs = data.jobs || [];
+  const counts = data.counts || {};
+  document.querySelector('#media-count').textContent = `${number(counts.total)} 张 · ${fmtBytes(counts.bytes)}`;
+  document.querySelector('#media-job-count').textContent = `${number(jobs.length)} 条 · ${number(counts.queued)} 处理中 · ${number(counts.failed)} 失败`;
+  if (!data.available) {
+    document.querySelector('#media-body').innerHTML = emptyRow(6, data.error || '媒体库未启用');
+    document.querySelector('#media-job-body').innerHTML = emptyRow(6, '没有任务数据');
+    document.querySelector('[data-pager-wrap="media"]').innerHTML = '';
+    return;
+  }
+  renderPaged('media', items, 'media-body', 6, (item) => (
+    `<tr><td><code>media#${esc(item.media_id)}</code><div class="subtle">${esc((item.sha256 || '').slice(0, 12))}</div></td>` +
+    `<td><span class="truncate-cell" title="${esc(item.summary || '')}">${esc(item.summary || '等待识图')}</span></td>` +
+    `<td>${esc(item.mime_type)}<div class="subtle">${fmtBytes(item.byte_size)}</div></td>` +
+    `<td>${statusBadge(item.safety === 'safe' ? 'enabled' : (item.safety === 'blocked' ? 'danger' : 'pending'), item.safety || '等待')}</td>` +
+    `<td><code>${esc(item.vision_model || '-')}</code></td><td>${number(item.times_sent)}</td></tr>`
+  ), '还没有保存图片');
+  document.querySelector('#media-job-body').innerHTML = jobs.length
+    ? jobs.map((job) => `<tr><td><code>#${esc(job.job_id)}</code></td><td>${esc(job.job_type)}</td>` +
+      `<td>${statusBadge(job.status === 'running' ? 'running' : (job.status === 'failed' ? 'danger' : 'pending'), job.status)}</td>` +
+      `<td>${number(job.attempts)}</td><td><span class="truncate-cell" title="${esc(job.last_error || '')}">${esc(job.last_error || '-')}</span></td><td>${fmt(job.updated_at)}</td></tr>`).join('')
+    : emptyRow(6, '当前没有等待或失败任务');
 }
 
 function renderGroups() {
@@ -1228,6 +1274,7 @@ function renderAll() {
   renderUsage();
   renderSandboxes();
   renderStickers();
+  renderMedia();
   renderGroups();
   renderModels();
   drawChart();
@@ -1239,13 +1286,14 @@ async function load() {
   setLoading(true);
   clearError();
   try {
-    const [overview, deliveries, usage, tasks, sandboxes, stickers, groups] = await Promise.all([
+    const [overview, deliveries, usage, tasks, sandboxes, stickers, media, groups] = await Promise.all([
       api('/overview'),
       api('/deliveries'),
       api(`/usage?days=${state.usageDays}`),
       api('/tasks'),
       api('/sandboxes'),
       api('/stickers'),
+      api('/media'),
       api('/group-models')
     ]);
     state.overview = overview;
@@ -1254,6 +1302,7 @@ async function load() {
     state.tasks = tasks.items || [];
     state.sandboxes = sandboxes;
     state.stickers = stickers;
+    state.media = media;
     state.groups = groups;
     chartRows = state.usage;
     renderAll();
@@ -1320,6 +1369,7 @@ document.addEventListener('click', (event) => {
     if (key === 'deliveries') renderDeliveries();
     if (key === 'usage') renderUsage();
     if (key === 'stickers') renderStickers();
+    if (key === 'media') renderMedia();
   }
 
   const retry = event.target.closest('[data-retry]');
@@ -1341,6 +1391,7 @@ document.addEventListener('change', (event) => {
     if (key === 'deliveries') renderDeliveries();
     if (key === 'usage') renderUsage();
     if (key === 'stickers') renderStickers();
+    if (key === 'media') renderMedia();
   }
 });
 

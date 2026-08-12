@@ -34,6 +34,7 @@ from .lifecycle import BackgroundTaskSupervisor
 from .long_term_memory import LongTermMemoryStore, MemoryEntry
 from .llm_gateway import LLMGateway
 from .memory import ConversationMemory, GroupContextMemory
+from .media_library import MediaLibrary
 from .model_catalog import ModelCatalog
 from .model_preferences import ModelPreferenceStore
 from .ocr import RecentImageStore
@@ -110,6 +111,7 @@ class AppContext:
     turn_journal: TurnJournal | None = None
     browser_manager: BrowserManager | None = None
     rich_renderer: RichMessageRenderer | None = None
+    media_library: MediaLibrary | None = None
     _closed: bool = field(default=False, init=False, repr=False)
 
     async def shutdown(self) -> None:
@@ -131,6 +133,7 @@ class AppContext:
             ("bridge manager", self.bridge_manager),
             ("browser manager", self.browser_manager),
             ("rich renderer", self.rich_renderer),
+            ("media library", self.media_library),
         ):
             if resource is None:
                 continue
@@ -508,6 +511,36 @@ def build_app_context(
             timeout_seconds=settings.browser_timeout_seconds,
         )
 
+    media_library: MediaLibrary | None = None
+    if settings.media_enabled:
+        if database is None:
+            raise RuntimeError("The durable media library requires PostgreSQL.")
+        media_root = (
+            Path(settings.media_root).expanduser()
+            if settings.media_root
+            else state_dir / "media"
+        )
+        try:
+            media_library = MediaLibrary(
+                database,
+                root=media_root,
+                model_catalog=model_catalog,
+                llm_gateway=llm_gateway,
+                vision_profile=settings.vision_profile,
+                semantic_recall=semantic_recall,
+                max_source_bytes=settings.media_max_source_bytes,
+                max_vision_bytes=settings.media_max_vision_bytes,
+                prepare_threshold_bytes=settings.media_prepare_threshold_bytes,
+                max_edge_pixels=settings.media_max_edge_pixels,
+                timeout_seconds=settings.media_timeout_seconds,
+                max_attempts=settings.media_max_attempts,
+                lease_seconds=settings.media_lease_seconds,
+                batch_size=settings.media_batch_size,
+                worker_concurrency=settings.media_worker_concurrency,
+            )
+        except (OSError, RuntimeError, TypeError, ValueError, DatabaseError) as exc:
+            raise RuntimeError(f"Durable media library could not start: {exc}") from exc
+
     return AppContext(
         settings=settings,
         state_dir=state_dir,
@@ -551,4 +584,5 @@ def build_app_context(
         turn_journal=turn_journal,
         browser_manager=browser_manager,
         rich_renderer=rich_renderer,
+        media_library=media_library,
     )

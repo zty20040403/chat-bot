@@ -7,6 +7,9 @@ ToolChoice = Union[str, dict[str, Any]]
 
 WEB_SEARCH_TOOL_NAME = "web_search"
 READ_IMAGE_TEXT_TOOL_NAME = "read_image_text"
+VIEW_IMAGE_TOOL_NAME = "view_image"
+FIND_IMAGES_TOOL_NAME = "find_images"
+FIND_STICKERS_TOOL_NAME = "find_stickers"
 TRANSCRIBE_VOICE_TOOL_NAME = "transcribe_voice"
 REPLY_WITH_VOICE_TOOL_NAME = "reply_with_voice"
 SEND_STICKER_TOOL_NAME = "send_sticker"
@@ -96,6 +99,69 @@ READ_IMAGE_TEXT_TOOL: ToolDefinition = {
     },
 }
 
+VIEW_IMAGE_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": VIEW_IMAGE_TOOL_NAME,
+        "description": (
+            "理解当前消息或当前群一条指定消息中的完整图片画面，不只读取文字。"
+            "用户要求看图、分析截图、解释表情包或询问图片内容时调用。"
+            "未提供 message_handle 时查看当前触发消息；可提供 msg# 句柄查看当前群历史图片。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "message_handle": {
+                    "type": "string",
+                    "pattern": "^msg#[1-9][0-9]*$",
+                },
+                "segment_index": {
+                    "type": "integer",
+                    "minimum": 0,
+                },
+            },
+            "additionalProperties": False,
+        },
+    },
+}
+
+FIND_IMAGES_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": FIND_IMAGES_TOOL_NAME,
+        "description": "按画面、文字、情绪或用途搜索当前群已经识别的历史图片。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "minLength": 1, "maxLength": 500},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 10},
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+FIND_STICKERS_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": FIND_STICKERS_TOOL_NAME,
+        "description": (
+            "按当前语境、情绪或用途搜索当前群安全可发送的表情包。"
+            "先调用它取得 media# 句柄，再调用 send_sticker 发送选中的一张。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "minLength": 1, "maxLength": 500},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 10},
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    },
+}
+
 TRANSCRIBE_VOICE_TOOL: ToolDefinition = {
     "type": "function",
     "function": {
@@ -141,13 +207,18 @@ SEND_STICKER_TOOL: ToolDefinition = {
     "function": {
         "name": SEND_STICKER_TOOL_NAME,
         "description": (
-            "发送一张机器人已学习或本地保存的 QQ 图片表情包。"
-            "仅当用户明确要求发送表情包、贴纸或 meme 时调用；"
-            "普通回答不要为了装饰而调用。"
+            "发送 find_stickers 返回的一张安全表情包。"
+            "media_handle 必须是当前群可见的 media# 句柄。"
         ),
         "parameters": {
             "type": "object",
-            "properties": {},
+            "properties": {
+                "media_handle": {
+                    "type": "string",
+                    "pattern": "^media#[1-9][0-9]*$",
+                }
+            },
+            "required": ["media_handle"],
             "additionalProperties": False,
         },
     },
@@ -984,12 +1055,15 @@ def available_tools(
     include_self_tools: bool = False,
     include_group_tools: bool = False,
     include_reminder_tools: bool = False,
+    include_media_tools: bool = False,
 ) -> list[ToolDefinition]:
     tools: list[ToolDefinition] = []
     if include_web_search:
         tools.append(WEB_SEARCH_TOOL)
     if include_image_ocr:
         tools.append(READ_IMAGE_TEXT_TOOL)
+    if include_media_tools:
+        tools.extend([VIEW_IMAGE_TOOL, FIND_IMAGES_TOOL, FIND_STICKERS_TOOL])
     if include_voice_transcription:
         tools.append(TRANSCRIBE_VOICE_TOOL)
     if include_voice_reply:

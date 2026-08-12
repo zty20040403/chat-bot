@@ -89,6 +89,7 @@ class AppContextTests(unittest.IsolatedAsyncioTestCase):
             mirror_routes_json="",
             browser_enabled=False,
             rich_render_enabled=False,
+            media_enabled=False,
         )
 
         async def historian(_candidate):

@@ -125,6 +125,15 @@ class AdminTests(unittest.TestCase):
                         }
                     ],
                 },
+                media_library=SimpleNamespace(
+                    admin_snapshot=lambda limit=100: {
+                        "counts": {"total": 1, "bytes": 123},
+                        "items": [{"media_id": 1, "summary": "测试图片"}],
+                        "jobs": [],
+                        "vision_profile": "gpt-5.6-luna",
+                        "root": "/var/lib/qq-deepseek-bot/media",
+                    }
+                ),
             ),
             token="secret",
         )
@@ -153,9 +162,13 @@ class AdminTests(unittest.TestCase):
                     "/bot-admin/api/group-models",
                     headers={"Authorization": "Bearer secret"},
                 )
-                return page, denied, allowed, sandboxes, stickers, group_models
+                media = await client.get(
+                    "/bot-admin/api/media",
+                    headers={"Authorization": "Bearer secret"},
+                )
+                return page, denied, allowed, sandboxes, stickers, group_models, media
 
-        page, denied, allowed, sandboxes, stickers, group_models = asyncio.run(
+        page, denied, allowed, sandboxes, stickers, group_models, media = asyncio.run(
             run()
         )
         self.assertEqual(page.status_code, 200)
@@ -187,6 +200,8 @@ class AdminTests(unittest.TestCase):
             [],
         )
         self.assertEqual(stickers.json()["counts"]["total"], 1)
+        self.assertEqual(media.json()["counts"]["total"], 1)
+        self.assertEqual(media.json()["vision_profile"], "gpt-5.6-luna")
         group_rows = group_models.json()["items"]
         self.assertEqual(
             [row["group_id"] for row in group_rows],
