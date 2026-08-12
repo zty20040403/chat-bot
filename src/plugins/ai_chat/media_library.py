@@ -759,8 +759,6 @@ class MediaLibrary:
         bounded = min(max(int(limit), 1), 20)
         terms = self._sticker_query_terms(cleaned)
         required_groups = self._sticker_required_alias_groups(cleaned)
-        if cleaned and not terms:
-            return []
         term_groups: list[str] = []
         term_parameters: list[object] = []
         for term in terms:
@@ -802,7 +800,7 @@ class MediaLibrary:
         finally:
             connection.close()
         records = [self._record_from_row(row) for row in rows]
-        if not cleaned:
+        if not terms:
             return records[:bounded]
         ranked = [
             MediaRecord(
@@ -831,7 +829,10 @@ class MediaLibrary:
         bounded = min(max(int(limit), 1), 20)
         lexical = self.find_stickers(cleaned, limit=bounded)
         required_groups = self._sticker_required_alias_groups(cleaned)
-        if self.semantic_recall is None or not cleaned:
+        if (
+            self.semantic_recall is None
+            or not self._sticker_query_terms(cleaned)
+        ):
             return lexical
         try:
             hits = await self.semantic_recall.search(

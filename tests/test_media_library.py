@@ -133,6 +133,12 @@ class MediaLibraryParsingTests(unittest.TestCase):
             )
         )
 
+    def test_generic_sticker_request_is_treated_as_random(self) -> None:
+        self.assertEqual(
+            MediaLibrary._sticker_query_terms("给我发个表情包"),
+            (),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
