@@ -1904,6 +1904,7 @@ async def _ask_ai(
                 )
             scope = scope_from_event(event)
             native_message_id: str | int = event.message_id
+            inferred_segment_index: int | None = None
             requested_handle = str(arguments.get("message_handle") or "").strip()
             if requested_handle:
                 canonical_id = _canonical_message_id(requested_handle)
@@ -1918,62 +1919,101 @@ async def _ask_ai(
                         ensure_ascii=False,
                     )
                 native_message_id = target.native_message_id
-            elif not image_sources(event.original_message):
+            elif image_sources(event.original_message):
+                native_message_id = event.message_id
+            else:
                 replied_id = reply_message_id(event.original_message)
                 if replied_id is not None:
                     native_message_id = replied_id
-            segment_index = arguments.get("segment_index")
+                else:
+                    recent = media_library.latest_message_for_sender(
+                        scope,
+                        event.user_id,
+                        max_age_seconds=settings.ocr_recent_image_seconds,
+                    )
+                    if recent is None:
+                        return json.dumps(
+                            {
+                                "ok": False,
+                                "error": (
+                                    "当前消息没有图片，且没有找到你在当前会话"
+                                    "最近 5 分钟发送的图片。请先发图或回复图片。"
+                                ),
+                            },
+                            ensure_ascii=False,
+                        )
+                    native_message_id, inferred_segment_index = recent
+            raw_segment_index = arguments.get("segment_index")
+            segment_index = (
+                int(raw_segment_index)
+                if raw_segment_index is not None
+                else inferred_segment_index
+            )
             try:
                 if media_library.latest_for_message(
                     scope,
                     native_message_id,
-                    segment_index=(
-                        int(segment_index) if segment_index is not None else None
-                    ),
+                    segment_index=segment_index,
                 ) is None:
-                    raw_target = await bot.get_msg(message_id=int(native_message_id))
-                    raw_segments = raw_target.get("message") if isinstance(raw_target, dict) else []
-                    if isinstance(raw_segments, Message):
-                        ingest_segments = [
-                            {"type": segment.type, "data": dict(segment.data)}
-                            for segment in raw_segments
-                        ]
-                    elif isinstance(raw_segments, list):
-                        ingest_segments = [
-                            item for item in raw_segments if isinstance(item, dict)
-                        ]
-                    else:
-                        ingest_segments = []
-                    media_library.ingest_message(
+                    if not media_library.has_message_media(
                         scope,
-                        native_message_id=native_message_id,
-                        sender_native_user_id=(
-                            raw_target.get("user_id") or event.user_id
+                        native_message_id,
+                        segment_index=segment_index,
+                    ):
+                        raw_target = await bot.get_msg(message_id=int(native_message_id))
+                        raw_segments = (
+                            raw_target.get("message")
                             if isinstance(raw_target, dict)
-                            else event.user_id
-                        ),
-                        segments=ingest_segments,
-                        canonical_message_id=(
-                            message_ledger.canonical_id_for_native(
-                                scope,
-                                native_message_id,
-                            )
-                            if message_ledger is not None
-                            else None
-                        ),
-                        occurred_at=(
-                            int(raw_target.get("time") or time.time())
-                            if isinstance(raw_target, dict)
-                            else int(time.time())
-                        ),
-                    )
+                            else []
+                        )
+                        if isinstance(raw_segments, Message):
+                            ingest_segments = [
+                                {"type": segment.type, "data": dict(segment.data)}
+                                for segment in raw_segments
+                            ]
+                        elif isinstance(raw_segments, list):
+                            ingest_segments = [
+                                item for item in raw_segments if isinstance(item, dict)
+                            ]
+                        else:
+                            ingest_segments = []
+                        media_library.ingest_message(
+                            scope,
+                            native_message_id=native_message_id,
+                            sender_native_user_id=(
+                                raw_target.get("user_id") or event.user_id
+                                if isinstance(raw_target, dict)
+                                else event.user_id
+                            ),
+                            segments=ingest_segments,
+                            canonical_message_id=(
+                                message_ledger.canonical_id_for_native(
+                                    scope,
+                                    native_message_id,
+                                )
+                                if message_ledger is not None
+                                else None
+                            ),
+                            occurred_at=(
+                                int(raw_target.get("time") or time.time())
+                                if isinstance(raw_target, dict)
+                                else int(time.time())
+                            ),
+                        )
+                    if not media_library.has_message_media(
+                        scope,
+                        native_message_id,
+                        segment_index=segment_index,
+                    ):
+                        return json.dumps(
+                            {"ok": False, "error": "目标消息中没有可识别的图片。"},
+                            ensure_ascii=False,
+                        )
                 record = await media_library.wait_for_message(
                     scope,
                     native_message_id,
-                    segment_index=(
-                        int(segment_index) if segment_index is not None else None
-                    ),
-                    timeout_seconds=settings.media_timeout_seconds,
+                    segment_index=segment_index,
+                    timeout_seconds=min(settings.media_timeout_seconds, 45),
                 )
             except (
                 ActionFailed,

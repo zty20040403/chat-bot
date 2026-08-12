@@ -737,6 +737,60 @@ class MediaLibrary:
             connection.close()
         return self._record_from_row(row) if row is not None else None
 
+    def has_message_media(
+        self,
+        scope: ConversationScope,
+        native_message_id: str | int,
+        *,
+        segment_index: int | None = None,
+    ) -> bool:
+        parameters: list[object] = [scope.key, str(native_message_id)]
+        segment_sql = ""
+        if segment_index is not None:
+            segment_sql = " AND segment_index = ?"
+            parameters.append(int(segment_index))
+        connection = self.database.store_connection()
+        try:
+            row = connection.execute(
+                f"""
+                SELECT 1 FROM message_media
+                WHERE scope_key = ? AND native_message_id = ?
+                {segment_sql}
+                LIMIT 1
+                """,
+                parameters,
+            ).fetchone()
+        finally:
+            connection.close()
+        return row is not None
+
+    def latest_message_for_sender(
+        self,
+        scope: ConversationScope,
+        sender_native_user_id: str | int,
+        *,
+        max_age_seconds: int = 300,
+    ) -> tuple[str, int] | None:
+        cutoff = int(time.time()) - max(int(max_age_seconds), 1)
+        connection = self.database.store_connection()
+        try:
+            row = connection.execute(
+                """
+                SELECT native_message_id, segment_index
+                FROM message_media
+                WHERE scope_key = ? AND sender_native_user_id = ?
+                  AND created_at >= ?
+                ORDER BY created_at DESC, message_media_id DESC
+                LIMIT 1
+                """,
+                (scope.key, str(sender_native_user_id), cutoff),
+            ).fetchone()
+        finally:
+            connection.close()
+        if row is None:
+            return None
+        return str(row["native_message_id"]), int(row["segment_index"])
+
     def mark_sent(self, media_id: int) -> None:
         now = int(time.time())
         connection = self.database.store_connection()

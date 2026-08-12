@@ -334,7 +334,7 @@ class Settings:
                 max(_get_int("AI_TOOL_MAX_ROUNDS", 30), 1), 100
             ),
             tool_simple_max_rounds=min(
-                max(_get_int("AI_TOOL_SIMPLE_MAX_ROUNDS", 3), 1), 20
+                max(_get_int("AI_TOOL_SIMPLE_MAX_ROUNDS", 5), 1), 20
             ),
             tool_max_calls_per_round=min(
                 max(_get_int("AI_TOOL_MAX_CALLS_PER_ROUND", 4), 1), 20
