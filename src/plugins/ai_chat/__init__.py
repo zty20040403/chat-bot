@@ -1186,6 +1186,7 @@ async def _ask_ai(
     voice_reply_segment: MessageSegment | None = None
     voice_reply_text = ""
     visual_reply_segment: MessageSegment | None = None
+    sticker_handles_this_turn: set[str] = set()
     replay_prefix: list[dict[str, Any]] = []
     replay_covered_message_ids: tuple[int, ...] = ()
     replay_digest_prefix = ""
@@ -2066,6 +2067,9 @@ async def _ask_ai(
                         query,
                         limit=limit,
                     )
+                    sticker_handles_this_turn.update(
+                        item.handle for item in records
+                    )
                 else:
                     records = await media_library.search_media(
                         scope_from_event(event),
@@ -2170,16 +2174,41 @@ async def _ask_ai(
             media_handle = str(arguments.get("media_handle") or "").strip()
             query = str(arguments.get("query") or "").strip()
             record = None
-            if media_library is not None and media_handle.startswith("media#"):
+            searched_stickers = False
+            if media_library is not None and query:
+                searched_stickers = True
+                try:
+                    candidates = await media_library.search_stickers(
+                        query,
+                        limit=5,
+                    )
+                    record = candidates[0] if candidates else None
+                except (
+                    OSError,
+                    RuntimeError,
+                    TypeError,
+                    ValueError,
+                    DatabaseError,
+                ) as exc:
+                    logger.warning(f"Sticker search-and-send tool failed: {exc}")
+            elif (
+                media_library is not None
+                and media_handle in sticker_handles_this_turn
+                and media_handle.startswith("media#")
+            ):
                 try:
                     media_id = int(media_handle.removeprefix("media#"))
                     record = media_library.get_sticker(media_id)
                 except (OSError, RuntimeError, TypeError, ValueError, DatabaseError):
                     record = None
-            if media_library is not None and record is None:
+            if (
+                media_library is not None
+                and record is None
+                and not searched_stickers
+            ):
                 try:
                     candidates = await media_library.search_stickers(
-                        query,
+                        query or user_text,
                         limit=5,
                     )
                     record = candidates[0] if candidates else None
@@ -2284,6 +2313,7 @@ async def _ask_ai(
             "[sticker#消息.段]；QQ 自带表情使用 [face#编号]。"
             "用户要求从已有表情包中发一张时，直接调用 send_sticker(query)，"
             "它会在全局安全表情库检索并发送，不要先反复调用 find_stickers；"
+            "query 只保留用户明确说出的核心标签，不要添加泛化形容词；"
             "用户只说随便发一个时省略 query。"
             "正经问题不能用沉默敷衍，控制标记不要放在普通句子中。\n"
             "需要贴代码时使用带语言名的 ``` 围栏，需要对比数据时使用 Markdown "

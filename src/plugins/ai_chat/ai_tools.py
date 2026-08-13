@@ -208,8 +208,10 @@ SEND_STICKER_TOOL: ToolDefinition = {
         "name": SEND_STICKER_TOOL_NAME,
         "description": (
             "从机器人在所有群收集的全局安全表情包中搜索最合适的一张并立即发送。"
-            "用户要求发图、发表情包或用表情回应时直接调用；通常传 query，"
-            "不需要先调用 find_stickers。已有明确 media# 句柄时也可精确发送。"
+            "用户要求发图、发表情包或用表情回应时直接调用；通常传 query，query "
+            "只写用户明确要求的核心对象或情绪标签，例如‘哆啦A梦’‘Orz’‘橘猫’，"
+            "不要擅自补充‘可爱’‘搞笑’等泛化标签。不需要先调用 find_stickers。"
+            "只有本轮 find_stickers 返回的 media# 句柄才可精确发送，不能复用旧句柄。"
             "普通的随机表情请求可省略 query；指定内容没有匹配时会明确失败。"
         ),
         "parameters": {
@@ -224,7 +226,7 @@ SEND_STICKER_TOOL: ToolDefinition = {
                 "media_handle": {
                     "type": "string",
                     "pattern": "^media#[1-9][0-9]*$",
-                    "description": "可选；find_stickers 返回的全局 media# 句柄。",
+                    "description": "可选；仅限本轮 find_stickers 返回的全局 media# 句柄。",
                 }
             },
             "additionalProperties": False,

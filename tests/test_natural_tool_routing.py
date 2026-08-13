@@ -142,7 +142,7 @@ class NaturalToolRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(answer), 1)
         self.assertEqual(answer[0].type, "face")
 
-    async def test_send_sticker_searches_global_library_and_sends_match(self) -> None:
+    async def test_send_sticker_query_overrides_stale_media_handle(self) -> None:
         async def fake_deepseek(
             user_text,
             history,
@@ -151,7 +151,10 @@ class NaturalToolRoutingTests(unittest.IsolatedAsyncioTestCase):
             **kwargs,
         ) -> str:
             del user_text, history, tools, kwargs
-            await execute_tool(SEND_STICKER_TOOL_NAME, {"query": "猫娘卖萌"})
+            await execute_tool(
+                SEND_STICKER_TOOL_NAME,
+                {"query": "猫娘卖萌", "media_handle": "media#46"},
+            )
             return ""
 
         with TemporaryDirectory() as directory:
@@ -173,7 +176,7 @@ class NaturalToolRoutingTests(unittest.IsolatedAsyncioTestCase):
             )
             fake_library = SimpleNamespace(
                 search_stickers=AsyncMock(return_value=[record]),
-                get_sticker=lambda *args, **kwargs: None,
+                get_sticker=Mock(),
                 mark_sent=Mock(),
             )
             with (
@@ -196,6 +199,7 @@ class NaturalToolRoutingTests(unittest.IsolatedAsyncioTestCase):
             "猫娘卖萌",
             limit=5,
         )
+        fake_library.get_sticker.assert_not_called()
         fake_library.mark_sent.assert_called_once_with(42)
 
 
