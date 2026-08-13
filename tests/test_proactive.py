@@ -12,6 +12,7 @@ from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message
 
 import src.plugins.ai_chat as ai_chat
 from src.plugins.ai_chat.proactive import (
+    ProactiveCheckGate,
     ProactiveDecision,
     is_candidate_message,
     parse_proactive_decision,
@@ -47,6 +48,9 @@ def proactive_settings(**overrides: object) -> SimpleNamespace:
     values: dict[str, object] = {
         "proactive_enabled": True,
         "proactive_interest_threshold": 90,
+        "proactive_gate_percent": 100,
+        "proactive_max_checks_per_hour": 100,
+        "proactive_classifier_profile": "deepseek",
         "proactive_voice_percent": 60,
         "voice_enabled": True,
         "voice_provider": "edge",
@@ -74,11 +78,52 @@ class ProactivePolicyTests(unittest.TestCase):
         self.assertFalse(ProactiveDecision(100, "", True).should_reply(90))
         self.assertFalse(ProactiveDecision(89, "想说话", True).should_reply(90))
 
-    def test_candidate_filter_only_skips_empty_and_commands(self) -> None:
-        self.assertTrue(is_candidate_message("哦"))
-        self.assertTrue(is_candidate_message("[图片]"))
+    def test_candidate_filter_skips_low_value_messages_without_llm(self) -> None:
+        self.assertTrue(is_candidate_message("这个架构为什么这样设计"))
+        self.assertFalse(is_candidate_message("哦"))
+        self.assertFalse(is_candidate_message("[图片]"))
+        self.assertFalse(is_candidate_message("https://example.com"))
         self.assertFalse(is_candidate_message("   "))
         self.assertFalse(is_candidate_message("/ai 问题"))
+
+    def test_check_gate_samples_and_enforces_hourly_group_limit(self) -> None:
+        gate = ProactiveCheckGate()
+        self.assertTrue(
+            gate.allows(
+                100,
+                percent=100,
+                max_checks_per_hour=2,
+                now=lambda: 1000,
+                random_value=lambda: 0,
+            )
+        )
+        self.assertTrue(
+            gate.allows(
+                100,
+                percent=100,
+                max_checks_per_hour=2,
+                now=lambda: 1001,
+                random_value=lambda: 0,
+            )
+        )
+        self.assertFalse(
+            gate.allows(
+                100,
+                percent=100,
+                max_checks_per_hour=2,
+                now=lambda: 1002,
+                random_value=lambda: 0,
+            )
+        )
+        self.assertTrue(
+            gate.allows(
+                100,
+                percent=100,
+                max_checks_per_hour=2,
+                now=lambda: 4601,
+                random_value=lambda: 0,
+            )
+        )
 
     def test_voice_probability_is_independent_of_reply_frequency(self) -> None:
         self.assertTrue(should_use_proactive_voice(60, random_value=lambda: 0.59))
@@ -94,8 +139,12 @@ class ProactiveHandlerTests(unittest.IsolatedAsyncioTestCase):
             patch.object(ai_chat, "_generate_proactive_reply", decide),
             patch.object(ai_chat, "_finish_safely", finish),
         ):
-            await ai_chat.handle_proactive_chat(AsyncMock(), group_event(1, "第一条"))
-            await ai_chat.handle_proactive_chat(AsyncMock(), group_event(2, "第二条"))
+            await ai_chat.handle_proactive_chat(
+                AsyncMock(), group_event(1, "第一条值得认真讨论")
+            )
+            await ai_chat.handle_proactive_chat(
+                AsyncMock(), group_event(2, "第二条也值得认真讨论")
+            )
 
         self.assertEqual(decide.await_count, 2)
         finish.assert_not_awaited()
@@ -119,7 +168,9 @@ class ProactiveHandlerTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch.object(ai_chat, "_finish_safely", finish),
         ):
-            await ai_chat.handle_proactive_chat(AsyncMock(), group_event(3, "聊到兴趣"))
+            await ai_chat.handle_proactive_chat(
+                AsyncMock(), group_event(3, "这里聊到了一个有趣话题")
+            )
 
         outgoing = finish.await_args.args[1]
         self.assertEqual([segment.type for segment in outgoing], ["record"])
@@ -142,7 +193,9 @@ class ProactiveHandlerTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch.object(ai_chat, "_finish_safely", finish),
         ):
-            await ai_chat.handle_proactive_chat(AsyncMock(), group_event(4, "继续聊"))
+            await ai_chat.handle_proactive_chat(
+                AsyncMock(), group_event(4, "继续聊聊这个有趣的话题")
+            )
 
         self.assertIsInstance(finish.await_args.args[1], str)
         self.assertTrue(finish.await_args.kwargs["retry_on_timeout"])

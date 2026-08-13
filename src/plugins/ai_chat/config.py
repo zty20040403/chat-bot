@@ -154,6 +154,9 @@ class Settings:
     voice_recent_seconds: int
     proactive_enabled: bool
     proactive_interest_threshold: int
+    proactive_gate_percent: int
+    proactive_max_checks_per_hour: int
+    proactive_classifier_profile: str
     proactive_voice_percent: int
     proactive_max_reply_chars: int
     reminders_enabled: bool
@@ -443,6 +446,16 @@ class Settings:
             proactive_enabled=_get_bool("AI_PROACTIVE_ENABLED", False),
             proactive_interest_threshold=min(
                 max(_get_int("AI_PROACTIVE_INTEREST_THRESHOLD", 98), 0), 100
+            ),
+            proactive_gate_percent=min(
+                max(_get_int("AI_PROACTIVE_GATE_PERCENT", 10), 0), 100
+            ),
+            proactive_max_checks_per_hour=max(
+                _get_int("AI_PROACTIVE_MAX_CHECKS_PER_HOUR", 6), 0
+            ),
+            proactive_classifier_profile=(
+                os.getenv("AI_PROACTIVE_CLASSIFIER_PROFILE", "deepseek").strip()
+                or "deepseek"
             ),
             proactive_voice_percent=min(
                 max(_get_int("AI_PROACTIVE_VOICE_PERCENT", 60), 0), 100

@@ -114,6 +114,7 @@ from .output_planner import (
     plan_reply,
 )
 from .proactive import (
+    ProactiveCheckGate,
     ProactiveDecision,
     is_candidate_message,
     parse_proactive_decision,
@@ -192,8 +193,9 @@ from .matchers import (
 SEND_RETRY_DELAY_SECONDS = 2.0
 SEND_RETRY_MAX_CHARS = 800
 TURN_PROMPT_VERSION = "qqbot-turn-v5"
-BOT_VERSION = "0.5.3"
+BOT_VERSION = "0.5.4"
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+proactive_check_gate = ProactiveCheckGate()
 
 app_context = build_app_context(
     settings,
@@ -3314,7 +3316,10 @@ async def _generate_proactive_reply(
     )
 
     try:
-        selected_profile = _preferred_model_profile(_conversation_id(event))
+        selected_profile = (
+            model_profiles.try_resolve(settings.proactive_classifier_profile)
+            or model_profiles.default
+        )
         trace = DeepSeekTrace(
             provider=selected_profile.provider_identity,
             model=selected_profile.model,
@@ -4753,6 +4758,12 @@ async def handle_proactive_chat(bot: Bot, event: MessageEvent) -> None:
 
     latest_text = _render_message_text(event.original_message)
     if not is_candidate_message(latest_text):
+        return
+    if not proactive_check_gate.allows(
+        event.group_id,
+        percent=settings.proactive_gate_percent,
+        max_checks_per_hour=settings.proactive_max_checks_per_hour,
+    ):
         return
 
     decision = await _generate_proactive_reply(event, latest_text)

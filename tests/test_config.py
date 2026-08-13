@@ -17,6 +17,9 @@ class SettingsGroupFilterTests(unittest.TestCase):
             settings = Settings.from_env()
 
         self.assertEqual(settings.proactive_interest_threshold, 98)
+        self.assertEqual(settings.proactive_gate_percent, 10)
+        self.assertEqual(settings.proactive_max_checks_per_hour, 6)
+        self.assertEqual(settings.proactive_classifier_profile, "deepseek")
         self.assertEqual(settings.proactive_voice_percent, 60)
 
     def test_zero_sandbox_file_limit_means_unlimited(self) -> None:
