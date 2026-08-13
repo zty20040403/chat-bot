@@ -5,6 +5,7 @@ import hashlib
 import json
 import tempfile
 import unittest
+from pathlib import Path
 
 import httpx
 import nonebot
@@ -21,6 +22,7 @@ from src.plugins.ai_chat.ai_tools import (
 from src.plugins.ai_chat.browser_tools import (
     BrowserManager,
     BrowserPolicyError,
+    RichMessageRenderer,
     parse_rich_block,
 )
 from src.plugins.ai_chat.media_tools import BilibiliClient, find_bilibili_ref
@@ -37,6 +39,43 @@ class BrowserAndMediaTests(unittest.TestCase):
             "table",
         )
         self.assertIsNone(parse_rich_block("ordinary reply"))
+
+    def test_codesnap_renderer_caches_valid_png_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            executable = root / "fake-codesnap"
+            counter = root / "calls"
+            executable.write_text(
+                "#!/bin/sh\n"
+                "output=''\n"
+                "while [ \"$#\" -gt 0 ]; do\n"
+                "  if [ \"$1\" = '--output' ]; then output=\"$2\"; shift 2; "
+                "else shift; fi\n"
+                "done\n"
+                "cat >/dev/null\n"
+                f"printf x >>'{counter}'\n"
+                "printf '\\211PNG\\r\\n\\032\\n012345678901234567890123' >\"$output\"\n",
+                encoding="utf-8",
+            )
+            executable.chmod(0o755)
+            renderer = RichMessageRenderer(
+                codesnap_executable_path=str(executable),
+                codesnap_cache_root=root / "cache",
+            )
+
+            async def run() -> tuple[bytes | None, bytes | None]:
+                first = await renderer.render(
+                    '```python\nprint("中文不会乱码")\n```'
+                )
+                second = await renderer.render(
+                    '```python\nprint("中文不会乱码")\n```'
+                )
+                return first, second
+
+            first, second = asyncio.run(run())
+            self.assertTrue(first.startswith(b"\x89PNG"))  # type: ignore[union-attr]
+            self.assertEqual(first, second)
+            self.assertEqual(counter.read_text(encoding="utf-8"), "x")
 
     def test_browser_policy_blocks_loopback_before_launching_playwright(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

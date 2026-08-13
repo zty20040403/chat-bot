@@ -119,7 +119,7 @@ from .proactive import (
     parse_proactive_decision,
     should_use_proactive_voice,
 )
-from .paths import PROJECT_ROOT, STATE_DIR
+from .paths import CACHE_DIR, PROJECT_ROOT, STATE_DIR
 from .ocr import (
     OCRError,
     image_sources,
@@ -192,12 +192,13 @@ from .matchers import (
 SEND_RETRY_DELAY_SECONDS = 2.0
 SEND_RETRY_MAX_CHARS = 800
 TURN_PROMPT_VERSION = "qqbot-turn-v5"
-BOT_VERSION = "0.5.0"
+BOT_VERSION = "0.5.1"
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 
 app_context = build_app_context(
     settings,
     state_dir=STATE_DIR,
+    cache_dir=CACHE_DIR,
     project_root=PROJECT_ROOT,
     logger=logger,
     historian_generator=lambda candidate: _generate_historian(candidate),

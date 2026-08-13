@@ -172,6 +172,7 @@ def build_app_context(
     settings: Settings,
     *,
     state_dir: Path,
+    cache_dir: Path | None = None,
     project_root: Path,
     logger: RuntimeLogger,
     historian_generator: HistorianGenerator,
@@ -180,6 +181,8 @@ def build_app_context(
     started_at: int | None = None,
 ) -> AppContext:
     state_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir = cache_dir or state_dir / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
 
     database: PostgresDatabase | None = None
     if settings.postgres_dsn:
@@ -509,6 +512,14 @@ def build_app_context(
         rich_renderer = RichMessageRenderer(
             executable_path=settings.browser_executable_path,
             timeout_seconds=settings.browser_timeout_seconds,
+            codesnap_enabled=settings.codesnap_enabled,
+            codesnap_executable_path=settings.codesnap_executable_path,
+            codesnap_config_path=settings.codesnap_config_path,
+            codesnap_font_family=settings.codesnap_font_family,
+            codesnap_theme=settings.codesnap_theme,
+            codesnap_timeout_seconds=settings.codesnap_timeout_seconds,
+            codesnap_cache_root=cache_dir / "codesnap",
+            codesnap_cache_entries=settings.codesnap_cache_entries,
         )
 
     media_library: MediaLibrary | None = None

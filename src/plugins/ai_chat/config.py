@@ -217,6 +217,13 @@ class Settings:
     browser_executable_path: str
     browser_allow_private_network: bool
     rich_render_enabled: bool
+    codesnap_enabled: bool
+    codesnap_executable_path: str
+    codesnap_config_path: str
+    codesnap_font_family: str
+    codesnap_theme: str
+    codesnap_timeout_seconds: int
+    codesnap_cache_entries: int
     sandbox_enabled: bool
     sandbox_allowed_users: set[int]
     sandbox_max_per_user: int
@@ -605,6 +612,25 @@ class Settings:
                 "AI_BROWSER_ALLOW_PRIVATE_NETWORK", False
             ),
             rich_render_enabled=_get_bool("AI_RICH_RENDER_ENABLED", True),
+            codesnap_enabled=_get_bool("AI_CODESNAP_ENABLED", True),
+            codesnap_executable_path=os.getenv(
+                "AI_CODESNAP_EXECUTABLE_PATH", "codesnap"
+            ).strip(),
+            codesnap_config_path=os.getenv(
+                "AI_CODESNAP_CONFIG_PATH", ""
+            ).strip(),
+            codesnap_font_family=os.getenv(
+                "AI_CODESNAP_FONT_FAMILY", "Sarasa Mono SC"
+            ).strip(),
+            codesnap_theme=os.getenv(
+                "AI_CODESNAP_THEME", "candy"
+            ).strip(),
+            codesnap_timeout_seconds=min(
+                max(_get_int("AI_CODESNAP_TIMEOUT_SECONDS", 12), 3), 60
+            ),
+            codesnap_cache_entries=min(
+                max(_get_int("AI_CODESNAP_CACHE_ENTRIES", 256), 16), 2048
+            ),
             sandbox_enabled=_get_bool("AI_SANDBOX_ENABLED", False),
             sandbox_allowed_users=_get_group_ids(
                 "AI_SANDBOX_ALLOWED_USERS"

@@ -4,9 +4,11 @@ import asyncio
 import hashlib
 import html
 import ipaddress
+import os
 import re
 import shutil
 import socket
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +21,10 @@ class BrowserUnavailable(RuntimeError):
 
 
 class BrowserPolicyError(RuntimeError):
+    pass
+
+
+class CodeSnapUnavailable(RuntimeError):
     pass
 
 
@@ -357,12 +363,36 @@ class RichMessageRenderer:
         *,
         executable_path: str = "",
         timeout_seconds: int = 20,
+        codesnap_enabled: bool = True,
+        codesnap_executable_path: str = "codesnap",
+        codesnap_config_path: str = "",
+        codesnap_font_family: str = "Sarasa Mono SC",
+        codesnap_theme: str = "candy",
+        codesnap_timeout_seconds: int = 12,
+        codesnap_cache_root: str | Path | None = None,
+        codesnap_cache_entries: int = 256,
     ) -> None:
         self.executable_path = executable_path.strip()
         self.timeout_ms = min(max(int(timeout_seconds), 5), 60) * 1000
+        self.codesnap_enabled = bool(codesnap_enabled)
+        self.codesnap_executable_path = codesnap_executable_path.strip()
+        self.codesnap_config_path = codesnap_config_path.strip()
+        self.codesnap_font_family = codesnap_font_family.strip()
+        self.codesnap_theme = codesnap_theme.strip()
+        self.codesnap_timeout_seconds = min(
+            max(int(codesnap_timeout_seconds), 3), 60
+        )
+        self.codesnap_cache_root = Path(
+            codesnap_cache_root or Path(tempfile.gettempdir()) / "qq-bot-codesnap"
+        )
+        self.codesnap_cache_root.mkdir(parents=True, exist_ok=True)
+        self.codesnap_cache_entries = min(
+            max(int(codesnap_cache_entries), 16), 2048
+        )
         self._playwright: Any = None
         self._browser: Any = None
         self._render_lock: asyncio.Lock | None = None
+        self._codesnap_semaphore: asyncio.Semaphore | None = None
 
     async def close(self) -> None:
         async with self._lock():
@@ -379,6 +409,8 @@ class RichMessageRenderer:
         if block is None:
             return None
         kind, language, source = block
+        if kind == "code" and self.codesnap_enabled:
+            return await self._render_codesnap(source, language)
         markup = _render_code_html(source, language) if kind == "code" else _render_table_html(source)
         if markup is None:
             return None
@@ -394,6 +426,128 @@ class RichMessageRenderer:
                 return await target.screenshot(type="png", timeout=self.timeout_ms)
             finally:
                 await page.close()
+
+    async def _render_codesnap(self, source: str, language: str) -> bytes:
+        executable = shutil.which(self.codesnap_executable_path)
+        if executable is None:
+            raise CodeSnapUnavailable(
+                f"CodeSnap executable was not found: {self.codesnap_executable_path}"
+            )
+        if not source.strip():
+            raise ValueError("CodeSnap cannot render an empty code block")
+        if (
+            len(source) > 30_000
+            or source.count("\n") >= 400
+            or any(len(line) > 500 for line in source.splitlines())
+        ):
+            raise ValueError("CodeSnap input is too large for a QQ image")
+        normalized_language = _codesnap_language(language)
+        cache_key = self._codesnap_cache_key(source, normalized_language)
+        cached_path = self.codesnap_cache_root / f"{cache_key}.png"
+        cached = await asyncio.to_thread(_read_valid_png, cached_path)
+        if cached is not None:
+            return cached
+
+        async with self._codesnap_limit():
+            cached = await asyncio.to_thread(_read_valid_png, cached_path)
+            if cached is not None:
+                return cached
+            fd, temporary_name = tempfile.mkstemp(
+                prefix=f"{cache_key}.",
+                suffix=".png",
+                dir=self.codesnap_cache_root,
+            )
+            os.close(fd)
+            temporary_path = Path(temporary_name)
+            temporary_path.unlink(missing_ok=True)
+            command = [
+                executable,
+                "--from-code",
+                "--output",
+                str(temporary_path),
+                "--silent",
+                "--has-line-number",
+                "--has-breadcrumbs",
+                "false",
+                "--mac-window-bar",
+                "true",
+                "--scale-factor",
+                "2",
+            ]
+            if normalized_language:
+                command.extend(("--language", normalized_language))
+            if self.codesnap_font_family:
+                command.extend(
+                    ("--code-font-family", self.codesnap_font_family)
+                )
+            if self.codesnap_theme:
+                command.extend(("--code-theme", self.codesnap_theme))
+            if self.codesnap_config_path:
+                command.extend(("--config", self.codesnap_config_path))
+            codesnap_home = self.codesnap_cache_root / "home"
+            codesnap_home.mkdir(parents=True, exist_ok=True)
+            environment = os.environ.copy()
+            environment["HOME"] = str(codesnap_home)
+            environment["XDG_CONFIG_HOME"] = str(codesnap_home / ".config")
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    *command,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=environment,
+                )
+                try:
+                    _stdout, stderr = await asyncio.wait_for(
+                        process.communicate(source.encode("utf-8")),
+                        timeout=self.codesnap_timeout_seconds,
+                    )
+                except TimeoutError:
+                    process.kill()
+                    await process.wait()
+                    raise CodeSnapUnavailable(
+                        f"CodeSnap exceeded {self.codesnap_timeout_seconds}s"
+                    ) from None
+                rendered = await asyncio.to_thread(
+                    _read_valid_png,
+                    temporary_path,
+                )
+                if process.returncode != 0 or rendered is None:
+                    detail = stderr.decode("utf-8", errors="replace").strip()
+                    raise CodeSnapUnavailable(
+                        "CodeSnap did not produce a valid PNG"
+                        + (f": {detail[:500]}" if detail else "")
+                    )
+                os.replace(temporary_path, cached_path)
+                await asyncio.to_thread(
+                    _trim_codesnap_cache,
+                    self.codesnap_cache_root,
+                    self.codesnap_cache_entries,
+                )
+                return rendered
+            finally:
+                temporary_path.unlink(missing_ok=True)
+
+    def _codesnap_cache_key(self, source: str, language: str) -> str:
+        config_fingerprint = ""
+        if self.codesnap_config_path:
+            try:
+                config_fingerprint = hashlib.sha256(
+                    Path(self.codesnap_config_path).read_bytes()
+                ).hexdigest()
+            except OSError:
+                config_fingerprint = self.codesnap_config_path
+        payload = "\0".join(
+            (
+                "codesnap-v1",
+                language,
+                self.codesnap_font_family,
+                self.codesnap_theme,
+                config_fingerprint,
+                source,
+            )
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     async def _ensure_browser(self) -> None:
         if self._browser is not None:
@@ -415,6 +569,11 @@ class RichMessageRenderer:
             self._render_lock = asyncio.Lock()
         return self._render_lock
 
+    def _codesnap_limit(self) -> asyncio.Semaphore:
+        if self._codesnap_semaphore is None:
+            self._codesnap_semaphore = asyncio.Semaphore(2)
+        return self._codesnap_semaphore
+
 
 def parse_rich_block(text: str) -> tuple[str, str, str] | None:
     source = str(text).strip()
@@ -425,6 +584,59 @@ def parse_rich_block(text: str) -> tuple[str, str, str] | None:
     if len(lines) >= 2 and _is_table_separator(lines[1]):
         return "table", "", source
     return None
+
+
+_CODESNAP_LANGUAGE_ALIASES = {
+    "bash": "sh",
+    "shell": "sh",
+    "zsh": "sh",
+    "console": "sh",
+    "py": "python",
+    "python3": "python",
+    "js": "javascript",
+    "jsx": "javascript",
+    "ts": "typescript",
+    "tsx": "typescript",
+    "yml": "yaml",
+    "rs": "rust",
+    "c++": "cpp",
+    "objective-c": "objectivec",
+    "objc": "objectivec",
+    "plaintext": "text",
+    "txt": "text",
+}
+
+
+def _codesnap_language(language: str) -> str:
+    value = language.strip().casefold()
+    value = re.sub(r"[^a-z0-9_+#.-]", "", value)[:40]
+    return _CODESNAP_LANGUAGE_ALIASES.get(value, value)
+
+
+def _read_valid_png(path: Path) -> bytes | None:
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    if len(data) < 32 or not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return None
+    return data
+
+
+def _trim_codesnap_cache(root: Path, max_entries: int) -> None:
+    try:
+        entries = sorted(
+            root.glob("*.png"),
+            key=lambda path: path.stat().st_mtime_ns,
+            reverse=True,
+        )
+    except OSError:
+        return
+    for path in entries[max_entries:]:
+        try:
+            path.unlink()
+        except OSError:
+            pass
 
 
 def _render_code_html(source: str, language: str) -> str:

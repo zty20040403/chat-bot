@@ -9,6 +9,53 @@
   statePath = "/var/lib/${cfg.stateDirectory}";
   cachePath = "/var/cache/${cfg.cacheDirectory}";
   defaultPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
+  codesnapFonts = pkgs.runCommand "qq-bot-codesnap-fonts" {} ''
+    mkdir -p "$out/share/fonts"
+    cp ${pkgs.sarasa-gothic}/share/fonts/truetype/Sarasa-Regular.ttc \
+      "$out/share/fonts/Sarasa-Regular.ttc"
+  '';
+  codesnapConfig = pkgs.writeText "qq-bot-codesnap.json" (builtins.toJSON {
+    print_eggs = false;
+    snapshot_config = {
+      theme = cfg.codesnap.theme;
+      fonts_folders = ["${codesnapFonts}/share/fonts"];
+      window = {
+        mac_window_bar = true;
+        shadow = {
+          radius = 16;
+          color = "#00000040";
+        };
+        margin = {
+          x = 42;
+          y = 42;
+        };
+        border = {
+          width = 1;
+          color = "#ffffff24";
+        };
+        title_config = {
+          color = "#d8dee9";
+          font_family = cfg.codesnap.fontFamily;
+        };
+        radius = 8;
+      };
+      code_config = {
+        font_family = cfg.codesnap.fontFamily;
+        breadcrumbs = {
+          enable = false;
+          separator = "/";
+          color = "#80848b";
+          font_family = cfg.codesnap.fontFamily;
+        };
+      };
+      watermark = {
+        content = "";
+        font_family = cfg.codesnap.fontFamily;
+        color = "#ffffff";
+      };
+      background = "#15171c";
+    };
+  });
   boolString = value:
     if value
     then "true"
@@ -116,6 +163,33 @@ in {
       };
     };
 
+    codesnap = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = "Render fenced code blocks with the CodeSnap CLI.";
+      };
+
+      package = lib.mkOption {
+        type = lib.types.package;
+        default = pkgs.codesnap;
+        defaultText = lib.literalExpression "pkgs.codesnap";
+        description = "CodeSnap CLI package used for code block images.";
+      };
+
+      fontFamily = lib.mkOption {
+        type = lib.types.str;
+        default = "Sarasa Mono SC";
+        description = "Chinese-capable monospace family used for code snapshots.";
+      };
+
+      theme = lib.mkOption {
+        type = lib.types.str;
+        default = "candy";
+        description = "Built-in CodeSnap syntax theme.";
+      };
+    };
+
     napcat = {
       enable = lib.mkEnableOption "a dedicated NapCat container for this bot";
 
@@ -206,7 +280,8 @@ in {
       path =
         cfg.runtimePackages
         ++ lib.optionals cfg.sandbox.enable [pkgs.docker]
-        ++ lib.optionals cfg.browser.enable [cfg.browser.package];
+        ++ lib.optionals cfg.browser.enable [cfg.browser.package]
+        ++ lib.optionals cfg.codesnap.enable [cfg.codesnap.package];
       environment =
         {
           HOME = statePath;
@@ -220,6 +295,16 @@ in {
         // lib.optionalAttrs cfg.browser.enable {
           AI_BROWSER_ENABLED = "true";
           AI_BROWSER_EXECUTABLE_PATH = lib.getExe cfg.browser.package;
+        }
+        // lib.optionalAttrs cfg.codesnap.enable {
+          AI_CODESNAP_ENABLED = "true";
+          AI_CODESNAP_EXECUTABLE_PATH = lib.getExe cfg.codesnap.package;
+          AI_CODESNAP_CONFIG_PATH = codesnapConfig;
+          AI_CODESNAP_FONT_FAMILY = cfg.codesnap.fontFamily;
+          AI_CODESNAP_THEME = cfg.codesnap.theme;
+        }
+        // lib.optionalAttrs (!cfg.codesnap.enable) {
+          AI_CODESNAP_ENABLED = "false";
         }
         // cfg.environment;
 
