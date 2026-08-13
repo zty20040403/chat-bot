@@ -192,7 +192,7 @@ from .matchers import (
 SEND_RETRY_DELAY_SECONDS = 2.0
 SEND_RETRY_MAX_CHARS = 800
 TURN_PROMPT_VERSION = "qqbot-turn-v5"
-BOT_VERSION = "0.5.1"
+BOT_VERSION = "0.5.2"
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 
 app_context = build_app_context(
@@ -952,6 +952,7 @@ async def _render_planned_chunk_message(
             logger.warning(f"Rich message rendering fell back to text: {exc}")
         else:
             if png:
+                logger.info("Rendered rich reply chunk as PNG.")
                 content = MessageSegment.image(png)
     if content is None and resolved_content is not None:
         content = resolved_content

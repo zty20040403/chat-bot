@@ -310,6 +310,44 @@ class TurnContinuityTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(segment.type != "image" for segment in sent))
         self.assertNotIn("mention#", str(sent))
 
+    async def test_fenced_code_reply_reaches_rich_image_renderer(self) -> None:
+        event = group_event(10, Message("写个代码块"))
+        bot = AsyncMock()
+        renderer = AsyncMock()
+        renderer.render.return_value = b"\x89PNG\r\n\x1a\nrendered-code"
+        fenced_code = '```python\nprint("中文")\n```'
+        decorated_reply = ai_chat.ai_reply_message(fenced_code, "写个代码块")
+
+        with (
+            patch.object(ai_chat, "message_ledger", self.ledger),
+            patch.object(ai_chat, "turn_journal", self.journal),
+            patch.object(ai_chat, "rich_renderer", renderer),
+            patch.object(
+                ai_chat,
+                "_run_tracked_ai",
+                new=AsyncMock(
+                    return_value=ai_chat.TrackedAIResult(
+                        reply=decorated_reply,
+                        turn_id=None,
+                    )
+                ),
+            ),
+        ):
+            with self.assertRaises(FinishedException):
+                await ai_chat._finish_tracked_ai(
+                    FakeMatcher,
+                    bot,
+                    event,
+                    "写个代码块",
+                    label="test",
+                )
+
+        self.assertEqual(decorated_reply, fenced_code)
+        renderer.render.assert_awaited_once_with(fenced_code)
+        self.assertTrue(
+            any(segment.type == "image" for segment in FakeMatcher.sent[0])
+        )
+
     async def test_silence_sends_no_message_and_reacts_to_trigger(self) -> None:
         event = group_event(10, Message("ambient ping"))
         bot = AsyncMock()

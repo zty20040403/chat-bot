@@ -414,6 +414,11 @@ def ai_reply_message(answer: str, user_text: str = "") -> str:
     if not text:
         return answer
 
+    # Keep the closing fence on its own line so the host can recognize and
+    # render the block. Normal conversational replies still receive kaomoji.
+    if text.splitlines()[-1].strip() == "```":
+        return text
+
     return f"{text} {choose_ai_reply_kaomoji(answer, user_text)}"
 
 
