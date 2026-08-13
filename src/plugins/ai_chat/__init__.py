@@ -192,7 +192,7 @@ from .matchers import (
 SEND_RETRY_DELAY_SECONDS = 2.0
 SEND_RETRY_MAX_CHARS = 800
 TURN_PROMPT_VERSION = "qqbot-turn-v5"
-BOT_VERSION = "0.5.2"
+BOT_VERSION = "0.5.3"
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 
 app_context = build_app_context(
@@ -3295,6 +3295,8 @@ async def _generate_proactive_reply(
         "让你判断一次，不代表你应该回复。结合你的人设和最近群聊，返回 JSON："
         "interest 是 0 到 100 的整数；reply 是你真想插话时的一句简短自然回复，否则"
         "必须是空字符串；voice_suitable 表示这句回复是否适合用轻松口语语音发出。"
+        "98 到 100 是极少使用的强信号：只有话题直接命中你最强的兴趣，而且你的回应"
+        "能明显改善当前对话时才可使用；只是相关、觉得有趣或能接一句，应不高于 95。"
         "只有你确实很感兴趣、能提供明显价值、或有特别自然有趣的回应时，interest "
         f"才可以达到 {settings.proactive_interest_threshold}；一般相关、礼貌附和、"
         "私人对话、信息不足、敏感争执、单纯表情"

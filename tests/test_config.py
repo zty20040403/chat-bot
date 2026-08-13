@@ -16,7 +16,7 @@ class SettingsGroupFilterTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             settings = Settings.from_env()
 
-        self.assertEqual(settings.proactive_interest_threshold, 90)
+        self.assertEqual(settings.proactive_interest_threshold, 98)
         self.assertEqual(settings.proactive_voice_percent, 60)
 
     def test_zero_sandbox_file_limit_means_unlimited(self) -> None:

@@ -442,7 +442,7 @@ class Settings:
             ),
             proactive_enabled=_get_bool("AI_PROACTIVE_ENABLED", False),
             proactive_interest_threshold=min(
-                max(_get_int("AI_PROACTIVE_INTEREST_THRESHOLD", 90), 0), 100
+                max(_get_int("AI_PROACTIVE_INTEREST_THRESHOLD", 98), 0), 100
             ),
             proactive_voice_percent=min(
                 max(_get_int("AI_PROACTIVE_VOICE_PERCENT", 60), 0), 100
