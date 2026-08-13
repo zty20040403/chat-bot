@@ -139,6 +139,34 @@ class MediaLibraryParsingTests(unittest.TestCase):
             (),
         )
 
+    def test_exact_sticker_label_ranks_above_broader_alias(self) -> None:
+        def record(media_id: int, summary: str) -> MediaRecord:
+            return MediaRecord(
+                media_id=media_id,
+                handle=f"media#{media_id}",
+                summary=summary,
+                description="",
+                extracted_text="",
+                emotions=(),
+                usage=(),
+                is_sticker=True,
+                safety="safe",
+                storage_path=Path("unused"),
+                mime_type="image/png",
+            )
+
+        terms = MediaLibrary._sticker_query_terms("橘猫")
+        orange_cat = MediaLibrary._sticker_relevance(
+            record(1, "震惊张嘴的橘猫表情"),
+            terms,
+        )
+        generic_cat = MediaLibrary._sticker_relevance(
+            record(2, "猫咪挥拳挑衅表情包"),
+            terms,
+        )
+
+        self.assertGreater(orange_cat, generic_cat)
+
 
 if __name__ == "__main__":
     unittest.main()

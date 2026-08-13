@@ -1416,6 +1416,16 @@ class MediaLibrary:
         for value, weight in fields:
             normalized = cls._normalize_sticker_text(value)
             score += sum(weight for term in terms if term in normalized)
+        if terms:
+            primary = terms[0]
+            score += max(
+                (
+                    weight * 2.0
+                    for value, weight in fields
+                    if primary in cls._normalize_sticker_text(value)
+                ),
+                default=0.0,
+            )
         return min(score / 12.0, 1.0)
 
     @staticmethod
