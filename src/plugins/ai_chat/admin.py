@@ -30,6 +30,7 @@ class AdminServices:
     sandbox_manager: Any = None
     sticker_inventory: Any = None
     media_library: Any = None
+    turn_journal: Any = None
 
 
 def register_admin(
@@ -326,6 +327,25 @@ def register_admin(
                 "error": str(exc)[:500],
             }
         return {**snapshot, "configured": True, "available": True}
+
+    @router.get("/api/context-plans")
+    async def context_plans(
+        limit: int = Query(default=100, ge=1, le=500),
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
+        authorize(authorization)
+        if services.turn_journal is None:
+            return {"items": [], "configured": False, "available": False}
+        try:
+            items = services.turn_journal.recent_context_plans(limit=limit)
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            return {
+                "items": [],
+                "configured": True,
+                "available": False,
+                "error": str(exc)[:500],
+            }
+        return {"items": items, "configured": True, "available": True}
 
     app.include_router(router)
 

@@ -68,6 +68,30 @@ class MessageLedger:
         ]
 
 
+class TurnJournal:
+    def recent_context_plans(self, limit=100):
+        del limit
+        return [
+            {
+                "turn_handle": "t#3",
+                "scope_key": "onebot-v11:group:930690526",
+                "current_message_id": 12,
+                "focus_message_id": 10,
+                "confidence": 0.87,
+                "reason_codes": ["recent_question", "same_scope"],
+                "related_message_ids": [11],
+                "candidates": [{"message_id": 10, "score": 89.0}],
+                "resolver_version": "reference-rules-v1",
+                "context_hash": "abc123",
+                "objective": "你觉得呢",
+                "status": "succeeded",
+                "model": "model-a",
+                "profile": "main",
+                "created_at": 123,
+            }
+        ]
+
+
 class Settings:
     enabled_groups = {930690526}
     disabled_groups = {201644592}
@@ -134,6 +158,7 @@ class AdminTests(unittest.TestCase):
                         "root": "/var/lib/qq-deepseek-bot/media",
                     }
                 ),
+                turn_journal=TurnJournal(),
             ),
             token="secret",
         )
@@ -166,11 +191,31 @@ class AdminTests(unittest.TestCase):
                     "/bot-admin/api/media",
                     headers={"Authorization": "Bearer secret"},
                 )
-                return page, denied, allowed, sandboxes, stickers, group_models, media
+                context_plans = await client.get(
+                    "/bot-admin/api/context-plans",
+                    headers={"Authorization": "Bearer secret"},
+                )
+                return (
+                    page,
+                    denied,
+                    allowed,
+                    sandboxes,
+                    stickers,
+                    group_models,
+                    media,
+                    context_plans,
+                )
 
-        page, denied, allowed, sandboxes, stickers, group_models, media = asyncio.run(
-            run()
-        )
+        (
+            page,
+            denied,
+            allowed,
+            sandboxes,
+            stickers,
+            group_models,
+            media,
+            context_plans,
+        ) = asyncio.run(run())
         self.assertEqual(page.status_code, 200)
         self.assertIn("QQ Bot", page.text)
         self.assertEqual(denied.status_code, 401)
@@ -187,6 +232,7 @@ class AdminTests(unittest.TestCase):
         self.assertTrue(allowed.json()["models"]["profiles"][0]["configured"])
         self.assertNotIn("never-return-this-secret", allowed.text)
         self.assertIn("data-view=\"sandboxes\"", page.text)
+        self.assertIn("data-view=\"context-plans\"", page.text)
         self.assertIn("class=\"sidebar\"", page.text)
         self.assertIn("id=\"usage-chart\"", page.text)
         self.assertIn("QQ Bot Control", page.text)
@@ -202,6 +248,8 @@ class AdminTests(unittest.TestCase):
         self.assertEqual(stickers.json()["counts"]["total"], 1)
         self.assertEqual(media.json()["counts"]["total"], 1)
         self.assertEqual(media.json()["vision_profile"], "gpt-5.6-luna")
+        self.assertEqual(context_plans.json()["items"][0]["focus_message_id"], 10)
+        self.assertNotIn("rendered_context", context_plans.text)
         group_rows = group_models.json()["items"]
         self.assertEqual(
             [row["group_id"] for row in group_rows],

@@ -69,6 +69,7 @@ from .ai_tools import (
 )
 from .config import settings
 from .context_store import CaptureCandidate
+from .context_pipeline import ReferenceResolver, TurnContextPlan
 from .conversation_scope import ConversationScope
 from .deepseek import (
     AgentLoopEvent,
@@ -190,8 +191,8 @@ from .matchers import (
 
 SEND_RETRY_DELAY_SECONDS = 2.0
 SEND_RETRY_MAX_CHARS = 800
-TURN_PROMPT_VERSION = "qqbot-turn-v4"
-BOT_VERSION = "0.4.0"
+TURN_PROMPT_VERSION = "qqbot-turn-v5"
+BOT_VERSION = "0.5.0"
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 
 app_context = build_app_context(
@@ -238,6 +239,7 @@ dream_service = app_context.dream_service
 turn_journal = app_context.turn_journal
 recent_images = app_context.recent_images
 recent_voices = app_context.recent_voices
+reference_resolver = ReferenceResolver()
 sandbox_manager = app_context.sandbox_manager
 browser_manager = app_context.browser_manager
 rich_renderer = app_context.rich_renderer
@@ -696,6 +698,37 @@ def _memory_scope_keys(
 def _current_long_term_memory(event: MessageEvent) -> str:
     group_scope, user_scope = _memory_scopes(event)
     return long_term_memory.render(group_scope, user_scope)
+
+
+def _group_turn_context_plan(
+    event: MessageEvent,
+    user_text: str,
+    journal_turn_id: int | None,
+) -> TurnContextPlan | None:
+    if not isinstance(event, GroupMessageEvent) or message_ledger is None:
+        return None
+    scope = scope_from_event(event)
+    current_message_id = message_ledger.canonical_id_for_native(
+        scope,
+        event.message_id,
+    )
+    if current_message_id is None:
+        return None
+    plan = reference_resolver.resolve(
+        message_ledger,
+        scope,
+        current_message_id=current_message_id,
+        current_text=user_text,
+        current_native_user_id=event.user_id,
+        now=event.time,
+    )
+    if turn_journal is not None and journal_turn_id is not None:
+        turn_journal.record_context_plan(
+            journal_turn_id,
+            plan.journal_payload(),
+            created_at=event.time,
+        )
+    return plan
 
 
 def _memory_entry_payload(entry: MemoryEntry) -> dict[str, object]:
@@ -1191,6 +1224,7 @@ async def _ask_ai(
     replay_covered_message_ids: tuple[int, ...] = ()
     replay_digest_prefix = ""
     replay_reason = ""
+    context_plan: TurnContextPlan | None = None
 
     if available_image_sources is None and settings.ocr_enabled:
         available_image_sources = await _resolve_ocr_sources(bot, event)
@@ -1283,6 +1317,15 @@ async def _ask_ai(
                     replay_covered_message_ids = (
                         replay.covered_canonical_message_ids
                     )
+
+    try:
+        context_plan = _group_turn_context_plan(
+            event,
+            user_text,
+            journal_turn_id,
+        )
+    except (OSError, RuntimeError, ValueError, sqlite3.Error, DatabaseError) as exc:
+        logger.warning(f"Group reference resolution failed softly: {exc}")
 
     async def execute_tool(name: str, arguments: dict[str, object]) -> str:
         nonlocal visual_reply_segment, voice_reply_segment, voice_reply_text
@@ -2325,6 +2368,8 @@ async def _ask_ai(
             context_parts.append(skill_index)
         if turn_context:
             context_parts.append(turn_context)
+        if context_plan is not None:
+            context_parts.append(context_plan.rendered_context)
         if replay_prefix:
             context_parts.append(
                 "[host replay status]\n"
@@ -2386,7 +2431,11 @@ async def _ask_ai(
 
         answer = await ask_deepseek_with_tools(
             user_text,
-            [] if replay_prefix else memory.get(conversation_id),
+            (
+                []
+                if replay_prefix or isinstance(event, GroupMessageEvent)
+                else memory.get(conversation_id)
+            ),
             tools,
             execute_tool,
             group_context=_current_group_context(

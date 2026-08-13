@@ -60,6 +60,10 @@ _DASHBOARD_TEMPLATE = r"""<!doctype html>
             data-title="模型用量" data-subtitle="调用次数与 Token 消耗">
             <span data-icon="chart"></span><span>用量</span>
           </button>
+          <button class="nav-item" type="button" data-view="context-plans"
+            data-title="上下文决策" data-subtitle="群聊焦点、候选评分与隔离范围">
+            <span data-icon="focus"></span><span>上下文</span>
+          </button>
         </div>
 
         <div class="nav-group">
@@ -199,6 +203,14 @@ _DASHBOARD_TEMPLATE = r"""<!doctype html>
             <th>日期</th><th>Scope</th><th>来源</th><th>调用</th><th>输入 Token</th><th>输出 Token</th>
           </tr></thead><tbody id="usage-body"></tbody></table></div>
           <div class="table-footer" data-pager-wrap="usage"></div>
+        </section>
+
+        <section class="view" id="context-plans" hidden>
+          <div class="section-heading"><div><h2>上下文决策</h2><p>每轮使用的群聊焦点与可解释评分</p></div><span class="count-label" id="context-plan-count">0 条</span></div>
+          <div class="table-wrap"><table class="wide-table"><thead><tr>
+            <th>回合</th><th>群 Scope</th><th>当前 / 焦点消息</th><th>置信度</th><th>判断依据</th><th>候选</th><th>时间</th>
+          </tr></thead><tbody id="context-plan-body"></tbody></table></div>
+          <div class="table-footer" data-pager-wrap="contextPlans"></div>
         </section>
 
         <section class="view" id="sandboxes" hidden>
@@ -767,7 +779,8 @@ const ICONS = {
   clock: '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
   'chevron-right': '<path d="m9 18 6-6-6-6"/>',
   'chevron-left': '<path d="m15 18-6-6 6-6"/>',
-  square: '<rect width="14" height="14" x="5" y="5" rx="1"/>'
+  square: '<rect width="14" height="14" x="5" y="5" rx="1"/>',
+  focus: '<circle cx="12" cy="12" r="3"/><path d="M3 8V5a2 2 0 0 1 2-2h3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M8 21H5a2 2 0 0 1-2-2v-3"/>'
 };
 
 const icon = (name) => (
@@ -796,9 +809,10 @@ const state = {
   stickers: { counts: {}, items: [] },
   media: { counts: {}, items: [], jobs: [] },
   groups: { items: [] },
+  contextPlans: { items: [] },
   usageDays: 30,
-  pages: { deliveries: 0, usage: 0, stickers: 0, media: 0 },
-  pageSizes: { deliveries: 10, usage: 10, stickers: 10, media: 10 }
+  pages: { deliveries: 0, usage: 0, stickers: 0, media: 0, contextPlans: 0 },
+  pageSizes: { deliveries: 10, usage: 10, stickers: 10, media: 10, contextPlans: 10 }
 };
 
 let loading = false;
@@ -1068,6 +1082,28 @@ function renderUsage() {
   ), '尚无用量记录');
 }
 
+function renderContextPlans() {
+  const data = state.contextPlans;
+  const items = data.items || [];
+  document.querySelector('#context-plan-count').textContent = `${number(items.length)} 条`;
+  if (!data.available) {
+    document.querySelector('#context-plan-body').innerHTML = emptyRow(7, data.error || '上下文决策记录不可用');
+    document.querySelector('[data-pager-wrap="contextPlans"]').innerHTML = '';
+    return;
+  }
+  renderPaged('contextPlans', items, 'context-plan-body', 7, (item) => {
+    const candidates = (item.candidates || []).slice(0, 3).map((candidate) => (
+      `<span><code>msg#${esc(candidate.message_id)}</code> · ${Number(candidate.score || 0).toFixed(1)}</span>`
+    )).join('') || '<span class="muted">独立问题</span>';
+    const reasons = (item.reason_codes || []).map((reason) => `<span class="capability">${esc(reason)}</span>`).join('') || '<span class="muted">-</span>';
+    return `<tr><td><code>${esc(item.turn_handle)}</code><div class="subtle">${esc(item.status)} · ${esc(item.profile)}</div></td>` +
+      `<td><code>${esc(item.scope_key)}</code></td>` +
+      `<td><div class="stack"><span>当前 <code>msg#${esc(item.current_message_id)}</code></span><span>焦点 ${item.focus_message_id ? `<code>msg#${esc(item.focus_message_id)}</code>` : '<span class="muted">未锁定</span>'}</span></div></td>` +
+      `<td>${statusBadge(Number(item.confidence) >= 0.7 ? 'enabled' : (Number(item.confidence) > 0 ? 'pending' : 'disabled'), `${Math.round(Number(item.confidence || 0) * 100)}%`)}</td>` +
+      `<td><div class="capability-list">${reasons}</div></td><td><div class="stack">${candidates}</div></td><td>${fmt(item.created_at)}</td></tr>`;
+  }, '还没有上下文决策记录');
+}
+
 function renderSandboxes() {
   const data = state.sandboxes;
   const items = data.items || [];
@@ -1272,6 +1308,7 @@ function renderAll() {
   renderTasks();
   renderDeliveries();
   renderUsage();
+  renderContextPlans();
   renderSandboxes();
   renderStickers();
   renderMedia();
@@ -1286,7 +1323,7 @@ async function load() {
   setLoading(true);
   clearError();
   try {
-    const [overview, deliveries, usage, tasks, sandboxes, stickers, media, groups] = await Promise.all([
+    const [overview, deliveries, usage, tasks, sandboxes, stickers, media, groups, contextPlans] = await Promise.all([
       api('/overview'),
       api('/deliveries'),
       api(`/usage?days=${state.usageDays}`),
@@ -1294,7 +1331,8 @@ async function load() {
       api('/sandboxes'),
       api('/stickers'),
       api('/media'),
-      api('/group-models')
+      api('/group-models'),
+      api('/context-plans')
     ]);
     state.overview = overview;
     state.deliveries = deliveries.items || [];
@@ -1304,6 +1342,7 @@ async function load() {
     state.stickers = stickers;
     state.media = media;
     state.groups = groups;
+    state.contextPlans = contextPlans;
     chartRows = state.usage;
     renderAll();
     setHealth(true);
@@ -1370,6 +1409,7 @@ document.addEventListener('click', (event) => {
     if (key === 'usage') renderUsage();
     if (key === 'stickers') renderStickers();
     if (key === 'media') renderMedia();
+    if (key === 'contextPlans') renderContextPlans();
   }
 
   const retry = event.target.closest('[data-retry]');
@@ -1392,6 +1432,7 @@ document.addEventListener('change', (event) => {
     if (key === 'usage') renderUsage();
     if (key === 'stickers') renderStickers();
     if (key === 'media') renderMedia();
+    if (key === 'contextPlans') renderContextPlans();
   }
 });
 

@@ -32,7 +32,7 @@ ToolState = Literal[
     "committed",
     "outcome-unknown",
 ]
-TURN_SCHEMA_VERSION = 2
+TURN_SCHEMA_VERSION = 3
 SEND_LOOP_SEQUENCE_BASE = 1_000_000
 
 
@@ -201,6 +201,108 @@ class TurnJournal:
                     int(turn_id),
                 ),
             )
+
+    def record_context_plan(
+        self,
+        turn_id: int,
+        payload: dict[str, Any],
+        *,
+        created_at: int | None = None,
+    ) -> None:
+        scope_key = str(payload.get("scope_key") or "").strip()
+        if not scope_key:
+            raise ValueError("context plan scope_key is required")
+        now = int(created_at or time.time())
+        with self._transaction() as cursor:
+            turn = self._turn_row(cursor, int(turn_id))
+            if turn is None or str(turn["scope_key"]) != scope_key:
+                raise ValueError("context plan must belong to the turn scope")
+            cursor.execute(
+                """
+                INSERT INTO turn_context_plans (
+                    turn_id, scope_key, current_message_id,
+                    current_principal_id, focus_message_id, confidence,
+                    reason_codes_json, related_message_ids_json,
+                    candidates_json, resolver_version, context_hash, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(turn_id) DO UPDATE SET
+                    scope_key = excluded.scope_key,
+                    current_message_id = excluded.current_message_id,
+                    current_principal_id = excluded.current_principal_id,
+                    focus_message_id = excluded.focus_message_id,
+                    confidence = excluded.confidence,
+                    reason_codes_json = excluded.reason_codes_json,
+                    related_message_ids_json = excluded.related_message_ids_json,
+                    candidates_json = excluded.candidates_json,
+                    resolver_version = excluded.resolver_version,
+                    context_hash = excluded.context_hash,
+                    created_at = excluded.created_at
+                """,
+                (
+                    int(turn_id),
+                    scope_key,
+                    max(int(payload.get("current_message_id") or 0), 0),
+                    payload.get("current_principal_id"),
+                    payload.get("focus_message_id"),
+                    min(max(float(payload.get("confidence") or 0.0), 0.0), 1.0),
+                    _safe_json(payload.get("reason_codes") or [], 2000),
+                    _safe_json(payload.get("related_message_ids") or [], 4000),
+                    _safe_json(payload.get("candidates") or [], 8000),
+                    _safe_text(str(payload.get("resolver_version") or ""), 100),
+                    _safe_text(str(payload.get("context_hash") or ""), 64),
+                    now,
+                ),
+            )
+
+    def recent_context_plans(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        bounded = min(max(int(limit), 1), 500)
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT plan.*, turn.turn_ordinal, turn.objective,
+                       turn.status, turn.model, turn.profile
+                FROM turn_context_plans AS plan
+                JOIN agent_turns AS turn ON turn.turn_id = plan.turn_id
+                JOIN turn_visibility AS visibility
+                  ON visibility.scope_key = turn.scope_key
+                WHERE turn.turn_ordinal >= visibility.min_turn_ordinal
+                ORDER BY plan.created_at DESC, plan.turn_id DESC
+                LIMIT ?
+                """,
+                (bounded,),
+            ).fetchall()
+        return [
+            {
+                "turn_id": int(row["turn_id"]),
+                "turn_handle": f"t#{int(row['turn_ordinal'])}",
+                "scope_key": str(row["scope_key"]),
+                "current_message_id": int(row["current_message_id"]),
+                "current_principal_id": (
+                    int(row["current_principal_id"])
+                    if row["current_principal_id"] is not None
+                    else None
+                ),
+                "focus_message_id": (
+                    int(row["focus_message_id"])
+                    if row["focus_message_id"] is not None
+                    else None
+                ),
+                "confidence": float(row["confidence"]),
+                "reason_codes": _json_list(row["reason_codes_json"]),
+                "related_message_ids": _json_list(
+                    row["related_message_ids_json"]
+                ),
+                "candidates": _json_list(row["candidates_json"]),
+                "resolver_version": str(row["resolver_version"]),
+                "context_hash": str(row["context_hash"]),
+                "objective": str(row["objective"]),
+                "status": str(row["status"]),
+                "model": str(row["model"]),
+                "profile": str(row["profile"]),
+                "created_at": int(row["created_at"]),
+            }
+            for row in rows
+        ]
 
     def record_model_note(
         self,
@@ -512,9 +614,10 @@ class TurnJournal:
         with self._lock:
             rows = self._connection.execute(
                 f"""
-                SELECT t.*
+                SELECT t.*, plan.current_principal_id AS context_principal_id
                 FROM agent_turns AS t
                 JOIN turn_visibility AS v ON v.scope_key = t.scope_key
+                LEFT JOIN turn_context_plans AS plan ON plan.turn_id = t.turn_id
                 WHERE t.scope_key = ?
                   AND t.started_at >= ?
                   AND t.turn_ordinal >= v.min_turn_ordinal
@@ -529,9 +632,20 @@ class TurnJournal:
         if not rows:
             return ""
         lines = [
-            "[recent turns - 工作记录，需要细节时调用 context_expand]"
+            "[recent turns - 当前群共享工作记录，需要细节时调用 "
+            "context_expand；只能归属给标注的发起人，未标注时发起人未知]"
         ]
-        lines.extend(self._render_standing_line(self._row_to_turn(row)) for row in rows)
+        lines.extend(
+            self._render_standing_line(
+                self._row_to_turn(row),
+                principal_id=(
+                    int(row["context_principal_id"])
+                    if row["context_principal_id"] is not None
+                    else None
+                ),
+            )
+            for row in rows
+        )
         return "\n".join(lines)
 
     def render_turn(
@@ -1232,6 +1346,21 @@ class TurnJournal:
                     created_at INTEGER NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS turn_context_plans (
+                    turn_id INTEGER PRIMARY KEY REFERENCES agent_turns(turn_id) ON DELETE CASCADE,
+                    scope_key TEXT NOT NULL,
+                    current_message_id INTEGER NOT NULL,
+                    current_principal_id INTEGER,
+                    focus_message_id INTEGER,
+                    confidence REAL NOT NULL DEFAULT 0,
+                    reason_codes_json TEXT NOT NULL DEFAULT '[]',
+                    related_message_ids_json TEXT NOT NULL DEFAULT '[]',
+                    candidates_json TEXT NOT NULL DEFAULT '[]',
+                    resolver_version TEXT NOT NULL,
+                    context_hash TEXT NOT NULL,
+                    created_at INTEGER NOT NULL
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_agent_turns_scope_time
                     ON agent_turns(scope_key, started_at, turn_ordinal);
                 CREATE INDEX IF NOT EXISTS idx_turn_events_turn
@@ -1242,6 +1371,8 @@ class TurnJournal:
                     ON turn_send_links(turn_id, chunk_index);
                 CREATE INDEX IF NOT EXISTS idx_turn_archives_expiry
                     ON turn_archives(expires_at);
+                CREATE INDEX IF NOT EXISTS idx_turn_context_plans_scope_time
+                    ON turn_context_plans(scope_key, created_at, turn_id);
                 """
             )
             row = cursor.execute(
@@ -1352,7 +1483,11 @@ class TurnJournal:
         )
 
     @staticmethod
-    def _render_standing_line(turn: TurnRecord) -> str:
+    def _render_standing_line(
+        turn: TurnRecord,
+        *,
+        principal_id: int | None = None,
+    ) -> str:
         stamp = datetime.fromtimestamp(turn.started_at).strftime("%H:%M")
         status = {
             "succeeded": "OK",
@@ -1363,8 +1498,13 @@ class TurnJournal:
         summary = _first_line(turn.objective, 80)
         final = _first_line(turn.final_text, 80)
         suffix = f" -> {final}" if final else ""
+        actor = (
+            f" [发起人 mention#{principal_id}]"
+            if principal_id is not None
+            else " [发起人未知]"
+        )
         return (
-            f"{turn.handle} {stamp} {status} \"{summary}\""
+            f"{turn.handle} {stamp} {status}{actor} \"{summary}\""
             f" · {turn.tool_call_count} tools{suffix}"
         )
 
@@ -1438,6 +1578,14 @@ def _safe_json(value: Any, max_chars: int) -> str:
         default=str,
     )
     return encoded[:max_chars]
+
+
+def _json_list(value: Any) -> list[Any]:
+    try:
+        parsed = json.loads(str(value or "[]"))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return []
+    return parsed if isinstance(parsed, list) else []
 
 
 def _safe_result(value: str, max_chars: int) -> str:

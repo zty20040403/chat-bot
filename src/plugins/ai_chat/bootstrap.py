@@ -61,6 +61,7 @@ def register_http_surfaces(
                 sandbox_manager=context.sandbox_manager,
                 sticker_inventory=sticker_inventory,
                 media_library=context.media_library,
+                turn_journal=context.turn_journal,
             ),
             path=settings.admin_path,
             token=settings.admin_token,

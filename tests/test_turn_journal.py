@@ -82,6 +82,80 @@ class TurnJournalTests(unittest.TestCase):
             self.journal.render_turn(self.group_a, turn.turn_ordinal)
         )
 
+    def test_context_plan_is_scoped_and_visible_to_admin(self) -> None:
+        turn = self.start(self.group_a, "你觉得呢")
+        self.journal.record_context_plan(
+            turn.turn_id,
+            {
+                "scope_key": self.group_a.key,
+                "current_message_id": 12,
+                "current_principal_id": 3,
+                "focus_message_id": 10,
+                "confidence": 0.87,
+                "reason_codes": ["recent_question", "same_scope"],
+                "related_message_ids": [11],
+                "candidates": [
+                    {
+                        "message_id": 10,
+                        "score": 89.0,
+                        "reason_codes": ["recent_question"],
+                    }
+                ],
+                "resolver_version": "reference-rules-v1",
+                "context_hash": "abc123",
+            },
+            created_at=123,
+        )
+
+        item = self.journal.recent_context_plans()[0]
+        self.assertEqual(item["scope_key"], self.group_a.key)
+        self.assertEqual(item["focus_message_id"], 10)
+        self.assertEqual(item["reason_codes"], ["recent_question", "same_scope"])
+        with self.assertRaises(ValueError):
+            self.journal.record_context_plan(
+                turn.turn_id,
+                {
+                    "scope_key": self.group_b.key,
+                    "current_message_id": 12,
+                    "resolver_version": "v1",
+                    "context_hash": "bad",
+                },
+            )
+
+    def test_recent_work_labels_the_member_who_started_it(self) -> None:
+        turn = self.start(self.group_a, "部署项目")
+        self.journal.record_context_plan(
+            turn.turn_id,
+            {
+                "scope_key": self.group_a.key,
+                "current_message_id": 12,
+                "current_principal_id": 7,
+                "focus_message_id": None,
+                "resolver_version": "reference-rules-v1",
+                "context_hash": "abc123",
+            },
+        )
+        self.journal.record_tool_started(
+            turn.turn_id,
+            1,
+            "sandbox_exec",
+            {"command": "pytest"},
+            ("write:sandbox",),
+        )
+        self.journal.record_tool_finished(
+            turn.turn_id,
+            1,
+            "sandbox_exec",
+            "succeeded",
+            '{"ok":true}',
+            ("write:sandbox",),
+        )
+        self.journal.finish_turn(turn.turn_id, status="succeeded")
+
+        rendered = self.journal.render_recent_turns(self.group_a)
+        self.assertIn("发起人 mention#7", rendered)
+        self.assertIn("只能归属给标注的发起人", rendered)
+
     def test_usage_summary_is_scoped_and_respects_clear(self) -> None:
         first = self.start(self.group_a, "one")
         self.journal.finish_turn(

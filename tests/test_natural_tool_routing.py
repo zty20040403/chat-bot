@@ -75,6 +75,44 @@ class NaturalToolRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("正常回答", second)
         self.assertEqual(ask_deepseek.await_count, 2)
 
+    async def test_group_chat_does_not_send_personal_bot_history_to_model(self) -> None:
+        captured_history = None
+
+        async def fake_deepseek(
+            user_text,
+            history,
+            tools,
+            execute_tool,
+            **kwargs,
+        ) -> str:
+            nonlocal captured_history
+            del user_text, tools, execute_tool, kwargs
+            captured_history = history
+            return "基于群聊现场回答"
+
+        with (
+            patch(
+                "src.plugins.ai_chat.ask_deepseek_with_tools",
+                new=fake_deepseek,
+            ),
+            patch.object(
+                conversation_memory,
+                "get",
+                return_value=[
+                    {"role": "user", "content": "个人旧问题"},
+                    {"role": "assistant", "content": "个人旧回答"},
+                ],
+            ),
+        ):
+            answer = await _ask_ai(
+                AsyncMock(),
+                _group_event(user_id=320),
+                "你觉得呢",
+            )
+
+        self.assertIn("基于群聊现场回答", answer)
+        self.assertEqual(captured_history, [])
+
     async def test_natural_request_uses_auto_tool_choice(self) -> None:
         captured_tool_names: set[str] = set()
 
