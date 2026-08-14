@@ -320,6 +320,12 @@ def register_admin(
         if services.model_preferences is None:
             raise HTTPException(status_code=503, detail="模型偏好存储不可用")
         profile = _admin_model_profile(services.model_catalog, selection.profile)
+        _preserve_admin_model_selections(
+            services.model_catalog,
+            services.model_preferences,
+            services.settings,
+            group_id,
+        )
         if profile is None:
             services.model_preferences.clear_group_default(group_id)
         else:
@@ -443,6 +449,42 @@ def _admin_model_profile(catalog: Any, requested: str | None) -> Any:
     if not profile.configured:
         raise HTTPException(status_code=409, detail="这个模型还没有配置可用的密钥")
     return profile
+
+
+def _preserve_admin_model_selections(
+    catalog: Any,
+    preferences: Any,
+    settings: Any,
+    group_id: int,
+) -> None:
+    """Keep the admin lane independent when the shared member model changes."""
+    admin_user_ids = set(
+        getattr(settings, "admin_user_ids", set()) or set()
+    )
+    if not admin_user_ids or catalog is None:
+        return
+
+    dynamic_default = (
+        preferences.get_group_default(group_id)
+        if hasattr(preferences, "get_group_default")
+        else None
+    )
+    deployed_default = (
+        (getattr(settings, "group_model_profiles", {}) or {}).get(group_id)
+        if settings is not None
+        else None
+    )
+    effective_default = catalog.resolve_preference(
+        dynamic_default or deployed_default
+    )
+    stored_keys = {
+        str(conversation_id)
+        for conversation_id, _stored in preferences.items()
+    }
+    for user_id in admin_user_ids:
+        conversation_id = f"group:{group_id}:user:{int(user_id)}"
+        if conversation_id not in stored_keys:
+            preferences.set(conversation_id, effective_default.name)
 
 
 _GROUP_CONVERSATION_PATTERN = re.compile(r"^group:(\d+):user:(\d+)$")

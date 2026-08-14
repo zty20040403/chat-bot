@@ -81,7 +81,7 @@ _DASHBOARD_TEMPLATE = r"""<!doctype html>
             <span data-icon="image"></span><span>媒体库</span><b id="nav-media-count">0</b>
           </button>
           <button class="nav-item" type="button" data-view="group-models"
-            data-title="群模型" data-subtitle="各群默认配置与用户覆盖">
+            data-title="群模型" data-subtitle="我自己与其他群友的模型分配">
             <span data-icon="users"></span><span>群模型</span>
           </button>
           <button class="nav-item" type="button" data-view="models"
@@ -241,9 +241,9 @@ _DASHBOARD_TEMPLATE = r"""<!doctype html>
         </section>
 
         <section class="view" id="group-models" hidden>
-          <div class="section-heading"><div><h2>群模型</h2><p>群默认、我的账号与其他群友</p></div><span class="count-label" id="group-count">0 个群</span></div>
+          <div class="section-heading"><div><h2>群模型</h2><p>我自己与其他群友</p></div><span class="count-label" id="group-count">0 个群</span></div>
           <div class="table-wrap"><table class="model-routing-table"><thead><tr>
-            <th>QQ群</th><th>群默认</th><th>我自己</th><th>其他群友</th>
+            <th>QQ群</th><th>我自己</th><th>其他群友</th>
           </tr></thead><tbody id="group-model-body"></tbody></table></div>
         </section>
 
@@ -256,6 +256,17 @@ _DASHBOARD_TEMPLATE = r"""<!doctype html>
       </main>
     </div>
   </div>
+  <button class="drawer-backdrop" id="member-model-backdrop" type="button"
+    aria-label="关闭其他群友配置" hidden></button>
+  <aside class="member-model-drawer" id="member-model-drawer"
+    aria-labelledby="member-model-title" aria-modal="true" role="dialog" hidden>
+    <header class="drawer-header">
+      <div><h2 id="member-model-title">其他群友</h2><p id="member-model-subtitle"></p></div>
+      <button class="icon-button" id="member-model-close" type="button"
+        title="关闭" aria-label="关闭"><span data-icon="x"></span></button>
+    </header>
+    <div class="drawer-body" id="member-model-body"></div>
+  </aside>
   <script>__DASHBOARD_SCRIPT__</script>
 </body>
 </html>
@@ -640,7 +651,9 @@ main { width: 100%; max-width: 1500px; margin: 0 auto; padding: 24px; }
 
 table { width: 100%; min-width: 760px; border-collapse: collapse; }
 .wide-table { min-width: 1080px; }
-.model-routing-table { min-width: 1180px; }
+.model-routing-table { min-width: 860px; }
+.model-routing-table th:first-child { width: 160px; }
+.model-routing-table th:nth-child(2) { width: 34%; }
 th, td { padding: 11px 13px; text-align: left; vertical-align: middle; border-bottom: 1px solid var(--border); }
 th { color: var(--muted-foreground); background: #f4f4f5; font-size: 12px; font-weight: 550; white-space: nowrap; }
 tbody tr:last-child td { border-bottom: 0; }
@@ -695,6 +708,47 @@ code {
 .member-identity { display: grid; min-width: 0; }
 .member-identity strong { overflow: hidden; font-size: 12px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .member-identity code { color: var(--muted-foreground); }
+.other-model-control { display: grid; grid-template-columns: minmax(220px, 1fr) 36px; align-items: center; gap: 10px; }
+.other-model-summary { grid-column: 1 / -1; color: var(--muted-foreground); font-size: 12px; }
+.more-button { align-self: start; margin-top: 0; }
+
+.drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  padding: 0;
+  background: rgba(24, 24, 27, .3);
+  border: 0;
+}
+.drawer-backdrop[hidden], .member-model-drawer[hidden] { display: none; }
+.member-model-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  z-index: 70;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  width: min(620px, 100vw);
+  height: 100vh;
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  box-shadow: -18px 0 48px rgba(0, 0, 0, .14);
+}
+.drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 74px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+}
+.drawer-header h2 { margin: 0; font-size: 16px; font-weight: 650; }
+.drawer-header p { margin: 2px 0 0; color: var(--muted-foreground); font-size: 12px; }
+.drawer-body { min-height: 0; padding: 16px 18px 24px; overflow-y: auto; }
+.drawer-body .member-model-list { min-width: 0; max-height: none; gap: 0; }
+.drawer-body .member-model-row { padding: 12px 0; border-bottom: 1px solid var(--border); }
+.drawer-body .member-model-row:last-child { border-bottom: 0; }
 .command { max-width: 360px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .truncate-cell { display: block; max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .empty { padding: 34px 14px; color: var(--muted-foreground); text-align: center; }
@@ -771,6 +825,8 @@ details summary { color: #3f3f46; cursor: pointer; white-space: nowrap; }
   .table-footer { align-items: flex-start; }
   .pager-controls label { display: none; }
   .secondary-button { height: 32px; }
+  .member-model-drawer { width: 100vw; }
+  .drawer-body .member-model-row { grid-template-columns: 1fr; }
 }
 """
 
@@ -797,7 +853,9 @@ const ICONS = {
   'chevron-right': '<path d="m9 18 6-6-6-6"/>',
   'chevron-left': '<path d="m15 18-6-6 6-6"/>',
   square: '<rect width="14" height="14" x="5" y="5" rx="1"/>',
-  focus: '<circle cx="12" cy="12" r="3"/><path d="M3 8V5a2 2 0 0 1 2-2h3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M8 21H5a2 2 0 0 1-2-2v-3"/>'
+  focus: '<circle cx="12" cy="12" r="3"/><path d="M3 8V5a2 2 0 0 1 2-2h3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M8 21H5a2 2 0 0 1-2-2v-3"/>',
+  more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
+  x: '<path d="M18 6 6 18M6 6l12 12"/>'
 };
 
 const icon = (name) => (
@@ -834,6 +892,7 @@ const state = {
 
 let loading = false;
 let chartRows = [];
+let activeMemberGroupId = null;
 
 tokenInput.value = localStorage.getItem('qqbot-admin-token') || '';
 document.querySelector('#token-wrap').hidden = !requiresToken;
@@ -1196,32 +1255,48 @@ function renderGroups() {
         inheritLabel: deploymentDefault,
         effectiveProfile: item.default_profile
       });
-      const admins = memberModelList(item.group_id, item.admins || [], '还没有配置管理员 QQ');
-      const members = memberModelList(item.group_id, item.members || [], '还没有观察到其他群友');
+      const admins = memberModelList(
+        item.group_id,
+        item.admins || [],
+        '还没有识别到我的 QQ',
+        '跟随其他群友统一模型',
+        false
+      );
+      const members = item.members || [];
+      const overrideCount = members.filter((member) => member.explicit_profile).length;
+      const otherControl = `<div class="other-model-control">${groupControl}` +
+        `<button class="icon-button more-button" type="button" data-open-member-models="${esc(item.group_id)}"` +
+        ` title="配置其他群友模型" aria-label="配置群 ${esc(item.group_id)} 的其他群友模型"><span data-icon="more"></span></button>` +
+        `<span class="other-model-summary">${number(members.length)} 位群友 · ${number(overrideCount)} 位单独配置</span></div>`;
       return `<tr><td><div class="stack"><code>${esc(item.group_id)}</code>` +
         `${statusBadge(item.enabled ? 'enabled' : 'disabled', item.enabled ? '已启用' : '已禁用')}</div></td>` +
-        `<td>${groupControl}</td><td>${admins}</td><td>${members}</td></tr>`;
+        `<td>${admins}</td><td>${otherControl}</td></tr>`;
     }).join('')
-    : emptyRow(4, '还没有观察到 QQ 群');
+    : emptyRow(3, '还没有观察到 QQ 群');
+  mountIcons(document.querySelector('#group-models'));
+  renderMemberModelDrawer();
 }
 
-function profileOptions(selected, inheritLabel) {
+function profileOptions(selected, inheritLabel, allowInherit = true) {
   const profiles = state.groups.profiles || [];
   const current = String(selected || '');
-  return `<option value=""${current ? '' : ' selected'}>${esc(inheritLabel)}</option>` + profiles.map((profile) => {
+  const inheritOption = allowInherit
+    ? `<option value=""${current ? '' : ' selected'}>${esc(inheritLabel)}</option>`
+    : '';
+  return inheritOption + profiles.map((profile) => {
     const label = `${profile.name} · ${profile.model}${profile.configured ? '' : '（未配置）'}`;
     return `<option value="${esc(profile.name)}"${current === profile.name ? ' selected' : ''}${profile.configured ? '' : ' disabled'}>${esc(label)}</option>`;
   }).join('');
 }
 
-function modelSelectHtml({ groupId, userId = null, selected = null, inheritLabel, effectiveProfile }) {
+function modelSelectHtml({ groupId, userId = null, selected = null, inheritLabel, effectiveProfile, allowInherit = true }) {
   const scope = userId === null ? 'group' : 'user';
   return `<div class="model-control"><select data-model-scope="${scope}" data-group-id="${esc(groupId)}"` +
-    `${userId === null ? '' : ` data-user-id="${esc(userId)}"`}>${profileOptions(selected, inheritLabel)}</select>` +
+    `${userId === null ? '' : ` data-user-id="${esc(userId)}"`}>${profileOptions(selected, inheritLabel, allowInherit)}</select>` +
     `<span class="subtle">当前生效：<code>${esc(effectiveProfile || '-')}</code></span></div>`;
 }
 
-function memberModelList(groupId, members, emptyText) {
+function memberModelList(groupId, members, emptyText, inheritLabel = '跟随统一模型', allowInherit = true) {
   if (!members.length) return `<span class="muted">${esc(emptyText)}</span>`;
   return `<div class="member-model-list">${members.map((member) => (
     `<div class="member-model-row"><div class="member-identity"><strong title="${esc(member.display_name)}">${esc(member.display_name)}</strong>` +
@@ -1229,11 +1304,47 @@ function memberModelList(groupId, members, emptyText) {
     modelSelectHtml({
       groupId,
       userId: member.user_id,
-      selected: member.explicit_profile,
-      inheritLabel: '继承群默认',
-      effectiveProfile: member.effective_profile
+      selected: member.explicit_profile || (allowInherit ? null : member.effective_profile),
+      inheritLabel,
+      effectiveProfile: member.effective_profile,
+      allowInherit
     }) + `</div>`
   )).join('')}</div>`;
+}
+
+function renderMemberModelDrawer() {
+  if (activeMemberGroupId === null) return;
+  const item = (state.groups.items || []).find(
+    (group) => String(group.group_id) === String(activeMemberGroupId)
+  );
+  if (!item) {
+    closeMemberModelDrawer();
+    return;
+  }
+  const members = item.members || [];
+  document.querySelector('#member-model-title').textContent = '其他群友';
+  document.querySelector('#member-model-subtitle').textContent = `群 ${item.group_id} · ${members.length} 位`;
+  document.querySelector('#member-model-body').innerHTML = memberModelList(
+    item.group_id,
+    members,
+    '还没有观察到其他群友'
+  );
+  mountIcons(document.querySelector('#member-model-drawer'));
+}
+
+function openMemberModelDrawer(groupId) {
+  activeMemberGroupId = String(groupId);
+  document.querySelector('#member-model-backdrop').hidden = false;
+  document.querySelector('#member-model-drawer').hidden = false;
+  document.body.style.overflow = 'hidden';
+  renderMemberModelDrawer();
+}
+
+function closeMemberModelDrawer() {
+  activeMemberGroupId = null;
+  document.querySelector('#member-model-backdrop').hidden = true;
+  document.querySelector('#member-model-drawer').hidden = true;
+  document.body.style.overflow = '';
 }
 
 function renderModels() {
@@ -1469,6 +1580,13 @@ document.addEventListener('click', (event) => {
   const openButton = event.target.closest('[data-open-view]');
   if (openButton) openView(openButton.dataset.openView);
 
+  const memberModelsButton = event.target.closest('[data-open-member-models]');
+  if (memberModelsButton) openMemberModelDrawer(memberModelsButton.dataset.openMemberModels);
+
+  if (event.target.closest('#member-model-close, #member-model-backdrop')) {
+    closeMemberModelDrawer();
+  }
+
   const dayButton = event.target.closest('[data-days]');
   if (dayButton) {
     state.usageDays = Number(dayButton.dataset.days);
@@ -1524,7 +1642,10 @@ tokenInput.addEventListener('change', load);
 document.querySelector('#menu-button').addEventListener('click', () => document.body.classList.add('nav-open'));
 document.querySelector('#sidebar-overlay').addEventListener('click', () => document.body.classList.remove('nav-open'));
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape') document.body.classList.remove('nav-open');
+  if (event.key === 'Escape') {
+    document.body.classList.remove('nav-open');
+    closeMemberModelDrawer();
+  }
 });
 
 let resizeTimer = 0;

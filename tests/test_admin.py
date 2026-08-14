@@ -315,6 +315,11 @@ class AdminTests(unittest.TestCase):
                         "provider": "test",
                         "model": "model-a",
                         "api_key_required": False,
+                    },
+                    "alternate": {
+                        "provider": "test",
+                        "model": "model-b",
+                        "api_key_required": False,
                     }
                 }
             ),
@@ -322,6 +327,7 @@ class AdminTests(unittest.TestCase):
             environ={},
         )
         preferences = ModelPreferences()
+        preferences.models.clear()
         app = FastAPI()
         register_admin(
             app,
@@ -347,7 +353,7 @@ class AdminTests(unittest.TestCase):
                 group = await client.put(
                     "/bot-admin/api/group-models/930690526/default",
                     headers=headers,
-                    json={"profile": "main"},
+                    json={"profile": "alternate"},
                 )
                 member = await client.put(
                     "/bot-admin/api/group-models/930690526/users/2291939848",
@@ -378,7 +384,12 @@ class AdminTests(unittest.TestCase):
             for item in snapshot.json()["items"]
             if item["group_id"] == 930690526
         )
-        self.assertEqual(row["dynamic_group_profile"], "main")
+        self.assertEqual(row["dynamic_group_profile"], "alternate")
+        selected_admin = next(
+            item for item in row["admins"] if item["user_id"] == 3526452465
+        )
+        self.assertEqual(selected_admin["explicit_profile"], "main")
+        self.assertEqual(selected_admin["effective_profile"], "main")
         selected_member = next(
             item for item in row["members"] if item["user_id"] == 2291939848
         )
