@@ -193,7 +193,7 @@ from .matchers import (
 SEND_RETRY_DELAY_SECONDS = 2.0
 SEND_RETRY_MAX_CHARS = 800
 TURN_PROMPT_VERSION = "qqbot-turn-v5"
-BOT_VERSION = "0.5.6"
+BOT_VERSION = "0.5.7"
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 proactive_check_gate = ProactiveCheckGate()
 
@@ -252,11 +252,18 @@ BOT_STARTED_AT = app_context.started_at
 driver = get_driver()
 
 
+def _is_group_enabled(group_id: int) -> bool:
+    override = model_preferences.get_group_enabled_override(group_id)
+    if override is not None:
+        return override
+    return settings.is_group_enabled(group_id)
+
+
 @event_preprocessor
 async def ignore_disabled_group_event(event: MessageEvent) -> None:
     if (
         isinstance(event, GroupMessageEvent)
-        and not settings.is_group_enabled(event.group_id)
+        and not _is_group_enabled(event.group_id)
     ):
         raise IgnoredException("QQ group is disabled for this bot")
 
@@ -1178,7 +1185,7 @@ async def _ask_ai(
     final_stream_sink: Callable[[str], Awaitable[None]] | None = None,
     final_stream_state: FinalStreamState | None = None,
 ) -> Message | str:
-    if isinstance(event, GroupMessageEvent) and not settings.is_group_enabled(event.group_id):
+    if isinstance(event, GroupMessageEvent) and not _is_group_enabled(event.group_id):
         return "这个群暂时没有开启 AI。"
 
     if len(user_text) > settings.max_input_chars:
@@ -2647,7 +2654,7 @@ async def _run_tracked_ai(
     journal_scope_enabled = not isinstance(
         event,
         GroupMessageEvent,
-    ) or settings.is_group_enabled(event.group_id)
+    ) or _is_group_enabled(event.group_id)
     if (
         turn_journal is not None
         and message_ledger is not None
@@ -3154,7 +3161,7 @@ async def _direct_web_search(
     event: MessageEvent,
     query: str,
 ) -> str:
-    if isinstance(event, GroupMessageEvent) and not settings.is_group_enabled(event.group_id):
+    if isinstance(event, GroupMessageEvent) and not _is_group_enabled(event.group_id):
         return "这个群暂时没有开启搜索。"
     if not settings.search_enabled:
         return "联网搜索暂时没有开启。"
@@ -3364,7 +3371,7 @@ async def _deliver_reminder(bot: Bot, reminder: Reminder) -> None:
     text = f"提醒：{reminder.message}"
     if reminder.conversation_kind == "group":
         group_id = int(reminder.native_conversation_id)
-        if not settings.is_group_enabled(group_id):
+        if not _is_group_enabled(group_id):
             logger.info(
                 f"Dropping {reminder.handle}: target QQ group is disabled."
             )
@@ -3437,7 +3444,7 @@ async def _reminder_loop() -> None:
 
 
 async def _deliver_onebot_outbox(bot: Bot, delivery: Delivery) -> None:
-    if delivery.target_kind == "group" and not settings.is_group_enabled(
+    if delivery.target_kind == "group" and not _is_group_enabled(
         int(delivery.target_native_conversation_id)
     ):
         raise BridgePermanentError("target QQ group is disabled")
@@ -4618,7 +4625,7 @@ async def handle_mention_ai(bot: Bot, event: MessageEvent) -> None:
 async def handle_canonical_ingest(event: MessageEvent) -> None:
     if (
         isinstance(event, GroupMessageEvent)
-        and not settings.is_group_enabled(event.group_id)
+        and not _is_group_enabled(event.group_id)
     ):
         return
     physical_scope = scope_from_event(event)
@@ -4729,7 +4736,7 @@ async def handle_group_activity(event: MessageEvent) -> None:
         return
     if event.user_id == event.self_id:
         return
-    if not settings.is_group_enabled(event.group_id):
+    if not _is_group_enabled(event.group_id):
         return
 
     user_profiles.observe(
@@ -4757,7 +4764,7 @@ async def handle_proactive_chat(bot: Bot, event: MessageEvent) -> None:
         return
     if event.user_id == event.self_id:
         return
-    if not settings.is_group_enabled(event.group_id):
+    if not _is_group_enabled(event.group_id):
         return
 
     latest_text = _render_message_text(event.original_message)
@@ -4841,7 +4848,7 @@ async def handle_group_context_recorder(event: MessageEvent) -> None:
         return
     if event.user_id == event.self_id:
         return
-    if not settings.is_group_enabled(event.group_id):
+    if not _is_group_enabled(event.group_id):
         return
 
     learn_stickers_from_message(event.original_message)

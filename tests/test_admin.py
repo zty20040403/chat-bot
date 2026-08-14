@@ -68,6 +68,19 @@ class ModelPreferences:
     def clear_group_default(self, group_id):
         return self.clear(f"group:{group_id}:default")
 
+    def get_group_enabled_override(self, group_id):
+        stored = self.models.get(f"group:{group_id}:enabled")
+        if stored == "enabled":
+            return True
+        if stored == "disabled":
+            return False
+        return None
+
+    def set_group_enabled(self, group_id, enabled):
+        self.models[f"group:{group_id}:enabled"] = (
+            "enabled" if enabled else "disabled"
+        )
+
     def set(self, conversation_id, profile):
         self.models[conversation_id] = profile
 
@@ -360,6 +373,11 @@ class AdminTests(unittest.TestCase):
                     headers=headers,
                     json={"profile": "main"},
                 )
+                toggle = await client.put(
+                    "/bot-admin/api/group-models/930690526/enabled",
+                    headers=headers,
+                    json={"enabled": False},
+                )
                 snapshot = await client.get(
                     "/bot-admin/api/group-models",
                     headers=headers,
@@ -374,17 +392,21 @@ class AdminTests(unittest.TestCase):
                     headers=headers,
                     json={"profile": "missing"},
                 )
-                return group, member, snapshot, reset, invalid
+                return group, member, toggle, snapshot, reset, invalid
 
-        group, member, snapshot, reset, invalid = asyncio.run(run())
+        group, member, toggle, snapshot, reset, invalid = asyncio.run(run())
         self.assertEqual(group.status_code, 200)
         self.assertEqual(member.status_code, 200)
+        self.assertEqual(toggle.status_code, 200)
         row = next(
             item
             for item in snapshot.json()["items"]
             if item["group_id"] == 930690526
         )
         self.assertEqual(row["dynamic_group_profile"], "alternate")
+        self.assertFalse(row["enabled"])
+        self.assertFalse(row["enabled_override"])
+        self.assertEqual(row["enabled_source"], "dashboard")
         selected_admin = next(
             item for item in row["admins"] if item["user_id"] == 3526452465
         )

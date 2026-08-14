@@ -711,6 +711,42 @@ code {
 .other-model-control { display: grid; grid-template-columns: minmax(220px, 1fr) 36px; align-items: center; gap: 10px; }
 .other-model-summary { grid-column: 1 / -1; color: var(--muted-foreground); font-size: 12px; }
 .more-button { align-self: start; margin-top: 0; }
+.group-enabled-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: max-content;
+  padding: 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+.group-enabled-button:disabled { cursor: wait; opacity: .6; }
+.switch-track {
+  position: relative;
+  width: 34px;
+  height: 20px;
+  flex: 0 0 34px;
+  background: #d4d4d8;
+  border-radius: 10px;
+  transition: background .15s ease;
+}
+.switch-thumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 14px;
+  height: 14px;
+  background: var(--surface);
+  border-radius: 50%;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .18);
+  transition: transform .15s ease;
+}
+.group-enabled-button[aria-pressed="true"] { color: #166534; }
+.group-enabled-button[aria-pressed="true"] .switch-track { background: var(--green); }
+.group-enabled-button[aria-pressed="true"] .switch-thumb { transform: translateX(14px); }
 
 .drawer-backdrop {
   position: fixed;
@@ -1269,12 +1305,21 @@ function renderGroups() {
         ` title="配置其他群友模型" aria-label="配置群 ${esc(item.group_id)} 的其他群友模型"><span data-icon="more"></span></button>` +
         `<span class="other-model-summary">${number(members.length)} 位群友 · ${number(overrideCount)} 位单独配置</span></div>`;
       return `<tr><td><div class="stack"><code>${esc(item.group_id)}</code>` +
-        `${statusBadge(item.enabled ? 'enabled' : 'disabled', item.enabled ? '已启用' : '已禁用')}</div></td>` +
+        `${groupEnabledButtonHtml(item)}</div></td>` +
         `<td>${admins}</td><td>${otherControl}</td></tr>`;
     }).join('')
     : emptyRow(3, '还没有观察到 QQ 群');
   mountIcons(document.querySelector('#group-models'));
   renderMemberModelDrawer();
+}
+
+function groupEnabledButtonHtml(item) {
+  const enabled = Boolean(item.enabled);
+  const label = enabled ? '已开启' : '已关闭';
+  return `<button class="group-enabled-button" type="button" role="switch" aria-pressed="${enabled}"` +
+    ` data-group-enabled="${esc(item.group_id)}" data-enabled="${enabled}" title="${label}，点击切换">` +
+    `<span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>` +
+    `<span>${label}</span></button>`;
 }
 
 function profileOptions(selected, inheritLabel, allowInherit = true) {
@@ -1573,6 +1618,26 @@ async function updateModelSelection(select) {
   }
 }
 
+async function updateGroupEnabled(button) {
+  const groupId = button.dataset.groupEnabled;
+  const enabled = button.dataset.enabled !== 'true';
+  button.disabled = true;
+  clearError();
+  try {
+    await api(`/group-models/${encodeURIComponent(groupId)}/enabled`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled })
+    });
+    await load();
+  } catch (error) {
+    showError(error.message);
+    await load();
+  } finally {
+    button.disabled = false;
+  }
+}
+
 document.addEventListener('click', (event) => {
   const navItem = event.target.closest('.nav-item[data-view]');
   if (navItem) openView(navItem.dataset.view);
@@ -1582,6 +1647,11 @@ document.addEventListener('click', (event) => {
 
   const memberModelsButton = event.target.closest('[data-open-member-models]');
   if (memberModelsButton) openMemberModelDrawer(memberModelsButton.dataset.openMemberModels);
+
+  const groupEnabledButton = event.target.closest('[data-group-enabled]');
+  if (groupEnabledButton && !groupEnabledButton.disabled) {
+    updateGroupEnabled(groupEnabledButton);
+  }
 
   if (event.target.closest('#member-model-close, #member-model-backdrop')) {
     closeMemberModelDrawer();

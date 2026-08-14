@@ -17,6 +17,19 @@ from src.plugins.ai_chat.model_preferences import ModelPreferenceStore
 
 
 class ModelSelectionTests(unittest.TestCase):
+    def test_group_enabled_override_is_persistent(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "models.json"
+            preferences = ModelPreferenceStore(path)
+            self.assertIsNone(preferences.get_group_enabled_override(1))
+            preferences.set_group_enabled(1, False)
+            self.assertFalse(preferences.get_group_enabled_override(1))
+            self.assertFalse(
+                ModelPreferenceStore(path).get_group_enabled_override(1)
+            )
+            preferences.set_group_enabled(1, True)
+            self.assertTrue(preferences.get_group_enabled_override(1))
+
     def test_user_preference_overrides_group_default_and_remains_scoped(
         self,
     ) -> None:

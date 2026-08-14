@@ -39,6 +39,10 @@ class ModelSelectionRequest(BaseModel):
     profile: str | None = None
 
 
+class GroupEnabledRequest(BaseModel):
+    enabled: bool
+
+
 def register_admin(
     app: Any,
     services: AdminServices,
@@ -337,6 +341,27 @@ def register_admin(
             "profile": profile.name if profile is not None else None,
         }
 
+    @router.put("/api/group-models/{group_id}/enabled")
+    async def set_group_enabled(
+        group_id: int,
+        selection: GroupEnabledRequest,
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
+        authorize(authorization)
+        if group_id <= 0:
+            raise HTTPException(status_code=422, detail="群号必须是正整数")
+        if services.model_preferences is None:
+            raise HTTPException(status_code=503, detail="群状态存储不可用")
+        services.model_preferences.set_group_enabled(
+            group_id,
+            selection.enabled,
+        )
+        return {
+            "ok": True,
+            "group_id": group_id,
+            "enabled": selection.enabled,
+        }
+
     @router.put("/api/group-models/{group_id}/users/{user_id}")
     async def set_group_user_model(
         group_id: int,
@@ -560,10 +585,21 @@ def _group_model_overview(
             overrides_by_group.get(group_id, {}).values(),
             key=lambda item: int(item["user_id"]),
         )
-        enabled = (
+        deployed_enabled = (
             bool(settings.is_group_enabled(group_id))
             if settings is not None
             else True
+        )
+        enabled_override = None
+        if preferences is not None and hasattr(
+            preferences,
+            "get_group_enabled_override",
+        ):
+            enabled_override = preferences.get_group_enabled_override(group_id)
+        enabled = (
+            enabled_override
+            if enabled_override is not None
+            else deployed_enabled
         )
         deployed_group_default = (
             (getattr(settings, "group_model_profiles", {}) or {}).get(group_id)
@@ -630,6 +666,10 @@ def _group_model_overview(
             {
                 "group_id": group_id,
                 "enabled": enabled,
+                "enabled_override": enabled_override,
+                "enabled_source": (
+                    "dashboard" if enabled_override is not None else "deployment"
+                ),
                 "default_profile": group_default.name,
                 "default_provider": group_default.provider,
                 "default_model": group_default.model,
