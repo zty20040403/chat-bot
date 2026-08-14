@@ -11,7 +11,7 @@ from fastapi import FastAPI
 
 nonebot.init()
 
-from src.plugins.ai_chat.admin import AdminServices, register_admin
+from src.plugins.ai_chat.admin import AdminEventBroker, AdminServices, register_admin
 from src.plugins.ai_chat.delivery import DeliveryStore
 from src.plugins.ai_chat.model_catalog import ModelCatalog
 from src.plugins.ai_chat.quota import UsageStore
@@ -160,6 +160,17 @@ class Settings:
 
 
 class AdminTests(unittest.TestCase):
+    def test_admin_event_broker_coalesces_resource_names(self) -> None:
+        broker = AdminEventBroker()
+        queue = broker.subscribe()
+        broker.publish("groups", "overview", "groups")
+        event = queue.get_nowait()
+        broker.unsubscribe(queue)
+
+        self.assertEqual(event["type"], "resources.changed")
+        self.assertEqual(event["sequence"], 1)
+        self.assertEqual(event["resources"], ["groups", "overview"])
+
     def test_dashboard_api_requires_token_and_returns_runtime_state(self) -> None:
         deliveries = DeliveryStore(":memory:")
         usage = UsageStore(":memory:")

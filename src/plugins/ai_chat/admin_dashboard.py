@@ -929,6 +929,12 @@ const state = {
 let loading = false;
 let chartRows = [];
 let activeMemberGroupId = null;
+let pendingGroupRender = false;
+let eventStreamController = null;
+let eventReconnectTimer = 0;
+let eventReconnectDelay = 1000;
+const refreshingResources = new Set();
+const refreshedAt = {};
 
 tokenInput.value = localStorage.getItem('qqbot-admin-token') || '';
 document.querySelector('#token-wrap').hidden = !requiresToken;
@@ -1277,7 +1283,21 @@ function renderMedia() {
     : emptyRow(6, '当前没有等待或失败任务');
 }
 
-function renderGroups() {
+function groupModelInteractionActive() {
+  const active = document.activeElement;
+  return Boolean(
+    active && active.closest && active.closest('#group-models select, #member-model-drawer select')
+  );
+}
+
+function renderGroups({ force = false } = {}) {
+  if (!force && groupModelInteractionActive()) {
+    pendingGroupRender = true;
+    return;
+  }
+  pendingGroupRender = false;
+  const drawerBody = document.querySelector('#member-model-body');
+  const drawerScrollTop = drawerBody.scrollTop;
   const items = state.groups.items || [];
   document.querySelector('#group-count').textContent = `${number(items.length)} 个群`;
   document.querySelector('#group-model-body').innerHTML = items.length
@@ -1311,6 +1331,7 @@ function renderGroups() {
     : emptyRow(3, '还没有观察到 QQ 群');
   mountIcons(document.querySelector('#group-models'));
   renderMemberModelDrawer();
+  drawerBody.scrollTop = drawerScrollTop;
 }
 
 function groupEnabledButtonHtml(item) {
@@ -1528,6 +1549,78 @@ function renderAll() {
   drawChart();
 }
 
+function resourcePath(resource) {
+  const paths = {
+    overview: '/overview',
+    deliveries: '/deliveries',
+    usage: `/usage?days=${state.usageDays}`,
+    tasks: '/tasks',
+    sandboxes: '/sandboxes',
+    stickers: '/stickers',
+    media: '/media',
+    groups: '/group-models',
+    contextPlans: '/context-plans'
+  };
+  return paths[resource] || '';
+}
+
+function applyResource(resource, payload, { force = false } = {}) {
+  if (resource === 'overview') {
+    state.overview = payload;
+    renderOverview();
+    renderModels();
+  } else if (resource === 'deliveries') {
+    state.deliveries = payload.items || [];
+    renderDeliveries();
+    renderOverview();
+  } else if (resource === 'usage') {
+    state.usage = payload.items || [];
+    chartRows = state.usage;
+    renderUsage();
+    drawChart();
+  } else if (resource === 'tasks') {
+    state.tasks = payload.items || [];
+    renderTasks();
+    renderOverview();
+  } else if (resource === 'sandboxes') {
+    state.sandboxes = payload;
+    renderSandboxes();
+    renderOverview();
+  } else if (resource === 'stickers') {
+    state.stickers = payload;
+    renderStickers();
+    renderOverview();
+  } else if (resource === 'media') {
+    state.media = payload;
+    renderMedia();
+    renderOverview();
+  } else if (resource === 'groups') {
+    state.groups = payload;
+    renderGroups({ force });
+    renderOverview();
+  } else if (resource === 'contextPlans') {
+    state.contextPlans = payload;
+    renderContextPlans();
+  }
+  refreshedAt[resource] = Date.now();
+  document.querySelector('#last-updated').textContent = `更新于 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`;
+}
+
+async function refreshResource(resource, { force = false, quiet = true } = {}) {
+  const path = resourcePath(resource);
+  if (!path || refreshingResources.has(resource)) return;
+  refreshingResources.add(resource);
+  try {
+    const payload = await api(path);
+    applyResource(resource, payload, { force });
+    setHealth(true);
+  } catch (error) {
+    if (!quiet) showError(error.message);
+  } finally {
+    refreshingResources.delete(resource);
+  }
+}
+
 async function load() {
   if (loading) return;
   loading = true;
@@ -1555,6 +1648,10 @@ async function load() {
     state.groups = groups;
     state.contextPlans = contextPlans;
     chartRows = state.usage;
+    const loadedAt = Date.now();
+    ['overview', 'deliveries', 'usage', 'tasks', 'sandboxes', 'stickers', 'media', 'groups', 'contextPlans'].forEach((resource) => {
+      refreshedAt[resource] = loadedAt;
+    });
     renderAll();
     setHealth(true);
     document.querySelector('#last-updated').textContent = `更新于 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`;
@@ -1564,6 +1661,109 @@ async function load() {
   } finally {
     loading = false;
     setLoading(false);
+  }
+}
+
+const resourceIntervals = {
+  overview: 3000,
+  deliveries: 3000,
+  usage: 30000,
+  tasks: 3000,
+  sandboxes: 5000,
+  stickers: 10000,
+  media: 10000,
+  groups: 60000,
+  contextPlans: 5000
+};
+
+const viewResources = {
+  overview: ['deliveries', 'usage', 'sandboxes', 'stickers', 'media', 'groups'],
+  deliveries: ['deliveries'],
+  usage: ['usage'],
+  tasks: ['tasks'],
+  sandboxes: ['sandboxes'],
+  stickers: ['stickers'],
+  media: ['media'],
+  'group-models': ['groups'],
+  'context-plans': ['contextPlans'],
+  models: ['overview']
+};
+
+function activeViewId() {
+  return document.querySelector('.view:not([hidden])')?.id || 'overview';
+}
+
+function refreshIfDue(resource) {
+  const interval = resourceIntervals[resource] || 10000;
+  if (Date.now() - Number(refreshedAt[resource] || 0) >= interval) {
+    refreshResource(resource);
+  }
+}
+
+function refreshVisibleData() {
+  if (document.hidden || loading) return;
+  refreshIfDue('overview');
+  (viewResources[activeViewId()] || []).forEach(refreshIfDue);
+}
+
+function handleRealtimeEvent(payload) {
+  if (!payload || payload.type !== 'resources.changed') return;
+  (payload.resources || []).forEach((resource) => {
+    refreshResource(resource);
+  });
+}
+
+function processEventBlock(block) {
+  const encoded = block.split('\n')
+    .filter((line) => line.startsWith('data:'))
+    .map((line) => line.slice(5).trimStart())
+    .join('\n');
+  if (!encoded) return;
+  try {
+    handleRealtimeEvent(JSON.parse(encoded));
+  } catch (_error) {
+    return;
+  }
+}
+
+async function connectEventStream() {
+  if (eventStreamController) eventStreamController.abort();
+  window.clearTimeout(eventReconnectTimer);
+  const controller = new AbortController();
+  eventStreamController = controller;
+  try {
+    const response = await fetch(`${prefix}/api/events`, {
+      headers: requestHeaders(),
+      signal: controller.signal,
+      cache: 'no-store'
+    });
+    if (!response.ok || !response.body) {
+      throw new Error(`实时连接失败（HTTP ${response.status}）`);
+    }
+    eventReconnectDelay = 1000;
+    setHealth(true);
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      buffer += decoder.decode(chunk.value, { stream: true }).replaceAll('\r\n', '\n');
+      let boundary = buffer.indexOf('\n\n');
+      while (boundary >= 0) {
+        processEventBlock(buffer.slice(0, boundary));
+        buffer = buffer.slice(boundary + 2);
+        boundary = buffer.indexOf('\n\n');
+      }
+    }
+  } catch (error) {
+    if (controller.signal.aborted) return;
+    setHealth(false);
+  } finally {
+    if (!controller.signal.aborted && eventStreamController === controller) {
+      eventReconnectTimer = window.setTimeout(connectEventStream, eventReconnectDelay);
+      eventReconnectDelay = Math.min(eventReconnectDelay * 2, 30000);
+    }
   }
 }
 
@@ -1583,13 +1783,14 @@ function openView(viewId) {
   }
   document.body.classList.remove('nav-open');
   if (viewId === 'overview') requestAnimationFrame(drawChart);
+  (viewResources[viewId] || []).forEach(refreshIfDue);
 }
 
-async function runAction(action) {
+async function runAction(action, resources = ['overview']) {
   clearError();
   try {
     await action();
-    await load();
+    await Promise.all(resources.map((resource) => refreshResource(resource)));
   } catch (error) {
     showError(error.message);
   }
@@ -1609,10 +1810,12 @@ async function updateModelSelection(select) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ profile: select.value || null })
     });
-    await load();
+    select.blur();
+    await refreshResource('groups', { force: true, quiet: false });
   } catch (error) {
     showError(error.message);
-    await load();
+    select.blur();
+    await refreshResource('groups', { force: true });
   } finally {
     select.disabled = false;
   }
@@ -1629,10 +1832,10 @@ async function updateGroupEnabled(button) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enabled })
     });
-    await load();
+    await refreshResource('groups', { force: true, quiet: false });
   } catch (error) {
     showError(error.message);
-    await load();
+    await refreshResource('groups', { force: true });
   } finally {
     button.disabled = false;
   }
@@ -1664,7 +1867,8 @@ document.addEventListener('click', (event) => {
     document.querySelectorAll('[data-days]').forEach((button) => {
       button.classList.toggle('active', button === dayButton);
     });
-    load();
+    refreshedAt.usage = 0;
+    refreshResource('usage', { quiet: false });
   }
 
   const pageButton = event.target.closest('[data-page][data-direction]');
@@ -1679,13 +1883,22 @@ document.addEventListener('click', (event) => {
   }
 
   const retry = event.target.closest('[data-retry]');
-  if (retry) runAction(() => api(`/deliveries/${encodeURIComponent(retry.dataset.retry)}/retry`, { method: 'POST' }));
+  if (retry) runAction(
+    () => api(`/deliveries/${encodeURIComponent(retry.dataset.retry)}/retry`, { method: 'POST' }),
+    ['deliveries', 'overview']
+  );
 
   const cancelDelivery = event.target.closest('[data-cancel-delivery]');
-  if (cancelDelivery) runAction(() => api(`/deliveries/${encodeURIComponent(cancelDelivery.dataset.cancelDelivery)}/cancel`, { method: 'POST' }));
+  if (cancelDelivery) runAction(
+    () => api(`/deliveries/${encodeURIComponent(cancelDelivery.dataset.cancelDelivery)}/cancel`, { method: 'POST' }),
+    ['deliveries', 'overview']
+  );
 
   const kill = event.target.closest('[data-kill]');
-  if (kill) runAction(() => api(`/tasks/${encodeURIComponent(kill.dataset.kill)}/cancel`, { method: 'POST' }));
+  if (kill) runAction(
+    () => api(`/tasks/${encodeURIComponent(kill.dataset.kill)}/cancel`, { method: 'POST' }),
+    ['tasks', 'overview']
+  );
 });
 
 document.addEventListener('change', (event) => {
@@ -1707,8 +1920,19 @@ document.addEventListener('change', (event) => {
   }
 });
 
+document.addEventListener('focusout', () => {
+  window.setTimeout(() => {
+    if (pendingGroupRender && !groupModelInteractionActive()) {
+      renderGroups({ force: true });
+    }
+  }, 0);
+});
+
 refreshButtons.forEach((button) => button.addEventListener('click', load));
-tokenInput.addEventListener('change', load);
+tokenInput.addEventListener('change', () => {
+  load();
+  connectEventStream();
+});
 document.querySelector('#menu-button').addEventListener('click', () => document.body.classList.add('nav-open'));
 document.querySelector('#sidebar-overlay').addEventListener('click', () => document.body.classList.remove('nav-open'));
 document.addEventListener('keydown', (event) => {
@@ -1725,8 +1949,7 @@ window.addEventListener('resize', () => {
 });
 
 mountIcons();
-setInterval(() => {
-  if (!document.hidden) load();
-}, 5000);
+setInterval(refreshVisibleData, 1000);
 load();
+connectEventStream();
 """

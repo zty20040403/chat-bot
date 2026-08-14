@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import hmac
+import json
 import re
 import time
+from collections.abc import AsyncIterator
 from dataclasses import asdict, dataclass
 from typing import Any, Optional
 
-from fastapi import APIRouter, Header, HTTPException, Query
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, Header, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
 from .admin_dashboard import dashboard_html
@@ -43,6 +46,42 @@ class GroupEnabledRequest(BaseModel):
     enabled: bool
 
 
+class AdminEventBroker:
+    def __init__(self) -> None:
+        self._sequence = 0
+        self._subscribers: set[asyncio.Queue[dict[str, object]]] = set()
+
+    def subscribe(self) -> asyncio.Queue[dict[str, object]]:
+        queue: asyncio.Queue[dict[str, object]] = asyncio.Queue(maxsize=32)
+        self._subscribers.add(queue)
+        return queue
+
+    def unsubscribe(self, queue: asyncio.Queue[dict[str, object]]) -> None:
+        self._subscribers.discard(queue)
+
+    def publish(self, *resources: str) -> None:
+        normalized = sorted({str(item).strip() for item in resources if item})
+        if not normalized:
+            return
+        self._sequence += 1
+        payload: dict[str, object] = {
+            "sequence": self._sequence,
+            "type": "resources.changed",
+            "resources": normalized,
+            "timestamp": int(time.time()),
+        }
+        for queue in tuple(self._subscribers):
+            if queue.full():
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+            try:
+                queue.put_nowait(payload)
+            except asyncio.QueueFull:
+                continue
+
+
 def register_admin(
     app: Any,
     services: AdminServices,
@@ -53,6 +92,7 @@ def register_admin(
     prefix = "/" + path.strip("/")
     router = APIRouter(prefix=prefix)
     expected_token = token.strip()
+    event_broker = AdminEventBroker()
 
     def authorize(authorization: Optional[str] = Header(default=None)) -> None:
         if not expected_token:
@@ -108,6 +148,44 @@ def register_admin(
             ),
         }
 
+    @router.get("/api/events")
+    async def events(
+        request: Request,
+        authorization: Optional[str] = Header(default=None),
+    ) -> StreamingResponse:
+        authorize(authorization)
+
+        async def stream() -> AsyncIterator[str]:
+            queue = event_broker.subscribe()
+            ready = {
+                "sequence": 0,
+                "type": "ready",
+                "resources": [],
+                "timestamp": int(time.time()),
+            }
+            try:
+                yield "retry: 2000\n"
+                yield f"data: {json.dumps(ready, separators=(',', ':'))}\n\n"
+                while not await request.is_disconnected():
+                    try:
+                        payload = await asyncio.wait_for(queue.get(), timeout=15)
+                    except TimeoutError:
+                        yield ": heartbeat\n\n"
+                        continue
+                    encoded = json.dumps(payload, separators=(",", ":"))
+                    yield f"data: {encoded}\n\n"
+            finally:
+                event_broker.unsubscribe(queue)
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
     @router.get("/api/platforms")
     async def platforms(
         authorization: Optional[str] = Header(default=None),
@@ -157,6 +235,7 @@ def register_admin(
                 status_code=409,
                 detail="delivery cannot be retried from its current state",
             )
+        event_broker.publish("deliveries", "overview")
         return {"ok": True, "delivery_id": delivery_id}
 
     @router.post("/api/deliveries/{delivery_id}/cancel")
@@ -174,6 +253,7 @@ def register_admin(
                 status_code=409,
                 detail="delivery cannot be cancelled from its current state",
             )
+        event_broker.publish("deliveries", "overview")
         return {"ok": True, "delivery_id": delivery_id}
 
     @router.get("/api/usage")
@@ -223,6 +303,7 @@ def register_admin(
         )
         if not changed:
             raise HTTPException(status_code=404, detail="task not found")
+        event_broker.publish("tasks", "overview")
         return {"ok": True, "task_id": task_id}
 
     @router.get("/api/sandboxes")
@@ -334,6 +415,7 @@ def register_admin(
             services.model_preferences.clear_group_default(group_id)
         else:
             services.model_preferences.set_group_default(group_id, profile.name)
+        event_broker.publish("groups", "overview")
         return {
             "ok": True,
             "scope": "group",
@@ -356,6 +438,7 @@ def register_admin(
             group_id,
             selection.enabled,
         )
+        event_broker.publish("groups", "overview")
         return {
             "ok": True,
             "group_id": group_id,
@@ -380,6 +463,7 @@ def register_admin(
             services.model_preferences.clear(conversation_id)
         else:
             services.model_preferences.set(conversation_id, profile.name)
+        event_broker.publish("groups", "overview")
         return {
             "ok": True,
             "scope": "group_user",
