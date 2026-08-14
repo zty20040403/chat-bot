@@ -64,6 +64,47 @@ class ModelSelectionTests(unittest.TestCase):
         self.assertEqual(neighbor.name, "strong")
         self.assertEqual(other_group.name, "fast")
 
+    def test_dynamic_group_default_overrides_deployment_default(self) -> None:
+        catalog = ModelCatalog.from_json(
+            json.dumps(
+                {
+                    "default": "fast",
+                    "profiles": {
+                        "fast": {
+                            "provider": "deepseek",
+                            "model": "fast-model",
+                            "api_key_required": False,
+                        },
+                        "strong": {
+                            "provider": "openai",
+                            "model": "strong-model",
+                            "api_key_required": False,
+                        },
+                    },
+                }
+            ),
+            default_profile="fast",
+            environ={},
+        )
+        with TemporaryDirectory() as tmp:
+            preferences = ModelPreferenceStore(Path(tmp) / "models.json")
+            preferences.set_group_default(1, "strong")
+            with (
+                patch.object(ai_chat, "model_profiles", catalog),
+                patch.object(ai_chat, "model_preferences", preferences),
+                patch.object(
+                    ai_chat,
+                    "settings",
+                    SimpleNamespace(group_model_profiles={1: "fast"}),
+                ),
+            ):
+                selected = ai_chat._preferred_model_profile("group:1:user:10")
+                preferences.clear_group_default(1)
+                inherited = ai_chat._preferred_model_profile("group:1:user:10")
+
+        self.assertEqual(selected.name, "strong")
+        self.assertEqual(inherited.name, "fast")
+
     def test_removed_profile_preference_falls_back_without_exposing_secret(self) -> None:
         catalog = ModelCatalog.from_json(
             json.dumps(

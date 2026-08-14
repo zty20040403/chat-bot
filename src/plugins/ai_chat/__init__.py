@@ -595,7 +595,11 @@ def _group_default_model_preference(conversation_id: str) -> str | None:
     match = _GROUP_CONVERSATION_ID_PATTERN.fullmatch(conversation_id)
     if match is None:
         return None
-    return settings.group_model_profiles.get(int(match.group(1)))
+    group_id = int(match.group(1))
+    return (
+        model_preferences.get_group_default(group_id)
+        or settings.group_model_profiles.get(group_id)
+    )
 
 
 def _preferred_model_profile(conversation_id: str) -> ModelProfile:

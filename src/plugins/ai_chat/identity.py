@@ -77,6 +77,50 @@ class GroupUserProfileStore:
             lines.append(f"- {self.describe_user(group_id, user_id)}")
         return "\n".join(lines)
 
+    def group_ids(self) -> tuple[int, ...]:
+        result: list[int] = []
+        for raw_group_id in self._profiles:
+            try:
+                result.append(int(raw_group_id))
+            except ValueError:
+                continue
+        return tuple(sorted(result))
+
+    def members(
+        self,
+        group_id: int,
+        *,
+        max_users: int = 500,
+    ) -> list[dict[str, object]]:
+        group = self._profiles.get(str(group_id), {})
+        if not isinstance(group, dict):
+            return []
+
+        members: list[dict[str, object]] = []
+        for raw_user_id, raw_profile in group.items():
+            if not isinstance(raw_profile, dict):
+                continue
+            try:
+                user_id = int(raw_user_id)
+                last_seen = max(int(raw_profile.get("last_seen", 0)), 0)
+            except (TypeError, ValueError):
+                continue
+            nickname = str(raw_profile.get("nickname", "")).strip()
+            card = str(raw_profile.get("card", "")).strip()
+            members.append(
+                {
+                    "user_id": user_id,
+                    "nickname": nickname,
+                    "card": card,
+                    "display_name": card or nickname or f"QQ {user_id}",
+                    "last_seen": last_seen,
+                }
+            )
+        members.sort(
+            key=lambda item: (-int(item["last_seen"]), int(item["user_id"]))
+        )
+        return members[: min(max(int(max_users), 1), 1000)]
+
     def clear_group(self, group_id: int) -> int:
         removed = self._profiles.pop(str(group_id), {})
         self._save()

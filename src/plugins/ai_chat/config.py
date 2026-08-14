@@ -198,6 +198,7 @@ class Settings:
     admin_enabled: bool
     admin_token: str
     admin_path: str
+    admin_user_ids: set[int]
     mirror_routes_json: str
     bridge_path: str
     matrix_enabled: bool
@@ -580,6 +581,7 @@ class Settings:
                 os.getenv("AI_ADMIN_PATH", "/bot-admin").strip()
                 or "/bot-admin"
             ),
+            admin_user_ids=_get_group_ids("AI_ADMIN_USER_IDS"),
             mirror_routes_json=os.getenv("AI_MIRROR_ROUTES_JSON", "").strip(),
             bridge_path=(
                 os.getenv("AI_BRIDGE_PATH", "/bot-bridge").strip()

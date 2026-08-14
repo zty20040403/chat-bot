@@ -53,8 +53,51 @@ class SandboxManager:
 
 
 class ModelPreferences:
+    def __init__(self):
+        self.models = {"group:930690526:user:3526452465": "main"}
+
     def items(self):
-        return [("group:930690526:user:3526452465", "main")]
+        return sorted(self.models.items())
+
+    def get_group_default(self, group_id):
+        return self.models.get(f"group:{group_id}:default")
+
+    def set_group_default(self, group_id, profile):
+        self.models[f"group:{group_id}:default"] = profile
+
+    def clear_group_default(self, group_id):
+        return self.clear(f"group:{group_id}:default")
+
+    def set(self, conversation_id, profile):
+        self.models[conversation_id] = profile
+
+    def clear(self, conversation_id):
+        return self.models.pop(conversation_id, None) is not None
+
+
+class UserProfiles:
+    def group_ids(self):
+        return (930690526,)
+
+    def members(self, group_id):
+        if group_id != 930690526:
+            return []
+        return [
+            {
+                "user_id": 3526452465,
+                "display_name": "Kenneth",
+                "nickname": "Kenneth",
+                "card": "",
+                "last_seen": 200,
+            },
+            {
+                "user_id": 2291939848,
+                "display_name": "群友",
+                "nickname": "群友",
+                "card": "",
+                "last_seen": 100,
+            },
+        ]
 
 
 class MessageLedger:
@@ -96,6 +139,7 @@ class Settings:
     enabled_groups = {930690526}
     disabled_groups = {201644592}
     group_model_profiles = {930690526: "main"}
+    admin_user_ids = {3526452465}
 
     @staticmethod
     def is_group_enabled(group_id):
@@ -133,6 +177,7 @@ class AdminTests(unittest.TestCase):
                 background_tasks=BackgroundTasks(),
                 model_catalog=models,
                 model_preferences=ModelPreferences(),
+                user_profiles=UserProfiles(),
                 message_ledger=MessageLedger(),
                 settings=Settings(),
                 sandbox_manager=SandboxManager(),
@@ -258,7 +303,92 @@ class AdminTests(unittest.TestCase):
         self.assertFalse(group_rows[0]["enabled"])
         self.assertTrue(group_rows[1]["group_override"])
         self.assertEqual(group_rows[1]["overrides"][0]["profile"], "main")
+        self.assertEqual(group_rows[1]["admins"][0]["user_id"], 3526452465)
+        self.assertEqual(group_rows[1]["members"][0]["user_id"], 2291939848)
         self.assertNotIn("never-return-this-secret", group_models.text)
+
+    def test_admin_can_change_group_and_member_models(self) -> None:
+        models = ModelCatalog.from_json(
+            json.dumps(
+                {
+                    "main": {
+                        "provider": "test",
+                        "model": "model-a",
+                        "api_key_required": False,
+                    }
+                }
+            ),
+            default_profile="main",
+            environ={},
+        )
+        preferences = ModelPreferences()
+        app = FastAPI()
+        register_admin(
+            app,
+            AdminServices(
+                version="test",
+                started_at=1,
+                model_catalog=models,
+                model_preferences=preferences,
+                user_profiles=UserProfiles(),
+                message_ledger=MessageLedger(),
+                settings=Settings(),
+            ),
+            token="secret",
+        )
+
+        async def run():
+            transport = httpx.ASGITransport(app=app)
+            headers = {"Authorization": "Bearer secret"}
+            async with httpx.AsyncClient(
+                transport=transport,
+                base_url="http://test",
+            ) as client:
+                group = await client.put(
+                    "/bot-admin/api/group-models/930690526/default",
+                    headers=headers,
+                    json={"profile": "main"},
+                )
+                member = await client.put(
+                    "/bot-admin/api/group-models/930690526/users/2291939848",
+                    headers=headers,
+                    json={"profile": "main"},
+                )
+                snapshot = await client.get(
+                    "/bot-admin/api/group-models",
+                    headers=headers,
+                )
+                reset = await client.put(
+                    "/bot-admin/api/group-models/930690526/users/2291939848",
+                    headers=headers,
+                    json={"profile": None},
+                )
+                invalid = await client.put(
+                    "/bot-admin/api/group-models/930690526/default",
+                    headers=headers,
+                    json={"profile": "missing"},
+                )
+                return group, member, snapshot, reset, invalid
+
+        group, member, snapshot, reset, invalid = asyncio.run(run())
+        self.assertEqual(group.status_code, 200)
+        self.assertEqual(member.status_code, 200)
+        row = next(
+            item
+            for item in snapshot.json()["items"]
+            if item["group_id"] == 930690526
+        )
+        self.assertEqual(row["dynamic_group_profile"], "main")
+        selected_member = next(
+            item for item in row["members"] if item["user_id"] == 2291939848
+        )
+        self.assertEqual(selected_member["explicit_profile"], "main")
+        self.assertEqual(reset.status_code, 200)
+        self.assertNotIn(
+            "group:930690526:user:2291939848",
+            preferences.models,
+        )
+        self.assertEqual(invalid.status_code, 422)
 
 
 if __name__ == "__main__":

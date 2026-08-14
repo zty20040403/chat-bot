@@ -241,9 +241,9 @@ _DASHBOARD_TEMPLATE = r"""<!doctype html>
         </section>
 
         <section class="view" id="group-models" hidden>
-          <div class="section-heading"><div><h2>群模型</h2><p>群级默认配置与群友单独选择</p></div><span class="count-label" id="group-count">0 个群</span></div>
-          <div class="table-wrap"><table><thead><tr>
-            <th>群号</th><th>启用状态</th><th>默认配置</th><th>默认底层模型</th><th>群友单独选择</th>
+          <div class="section-heading"><div><h2>群模型</h2><p>群默认、我的账号与其他群友</p></div><span class="count-label" id="group-count">0 个群</span></div>
+          <div class="table-wrap"><table class="model-routing-table"><thead><tr>
+            <th>QQ群</th><th>群默认</th><th>我自己</th><th>其他群友</th>
           </tr></thead><tbody id="group-model-body"></tbody></table></div>
         </section>
 
@@ -640,6 +640,7 @@ main { width: 100%; max-width: 1500px; margin: 0 auto; padding: 24px; }
 
 table { width: 100%; min-width: 760px; border-collapse: collapse; }
 .wide-table { min-width: 1080px; }
+.model-routing-table { min-width: 1180px; }
 th, td { padding: 11px 13px; text-align: left; vertical-align: middle; border-bottom: 1px solid var(--border); }
 th { color: var(--muted-foreground); background: #f4f4f5; font-size: 12px; font-weight: 550; white-space: nowrap; }
 tbody tr:last-child td { border-bottom: 0; }
@@ -678,6 +679,22 @@ code {
 .muted { color: var(--muted-foreground); }
 .subtle { color: var(--muted-foreground); font-size: 12px; }
 .stack { display: grid; gap: 4px; min-width: 160px; }
+.model-control { display: grid; gap: 6px; min-width: 220px; }
+.model-control select {
+  width: 100%;
+  height: 36px;
+  padding: 0 32px 0 10px;
+  color: var(--foreground);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+}
+.model-control select:disabled { color: var(--muted-foreground); cursor: wait; background: var(--muted); }
+.member-model-list { display: grid; gap: 9px; min-width: 320px; max-height: 360px; overflow-y: auto; }
+.member-model-row { display: grid; grid-template-columns: minmax(120px, .8fr) minmax(210px, 1.2fr); align-items: center; gap: 10px; }
+.member-identity { display: grid; min-width: 0; }
+.member-identity strong { overflow: hidden; font-size: 12px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.member-identity code { color: var(--muted-foreground); }
 .command { max-width: 360px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .truncate-cell { display: block; max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .empty { padding: 34px 14px; color: var(--muted-foreground); text-align: center; }
@@ -1170,15 +1187,53 @@ function renderGroups() {
   document.querySelector('#group-count').textContent = `${number(items.length)} 个群`;
   document.querySelector('#group-model-body').innerHTML = items.length
     ? items.map((item) => {
-      const overrides = (item.overrides || []).map((override) => (
-        `<div><code>QQ ${esc(override.user_id)}</code> → <code>${esc(override.profile)}</code> / ${esc(override.model)}` +
-        `${override.recognized ? '' : ' <span class="status-badge danger">配置失效</span>'}</div>`
-      )).join('') || '<span class="muted">全部使用默认配置</span>';
-      return `<tr><td><code>${esc(item.group_id)}</code></td><td>${statusBadge(item.enabled ? 'enabled' : 'disabled', item.enabled ? '已启用' : '已禁用')}</td>` +
-        `<td><code>${esc(item.default_profile)}</code></td><td>${esc(item.default_provider)} / <code>${esc(item.default_model)}</code></td>` +
-        `<td><div class="stack">${overrides}</div></td></tr>`;
+      const deploymentDefault = item.deployed_group_profile
+        ? `部署默认：${item.deployed_group_profile}`
+        : `系统默认：${state.groups.default?.profile || '-'}`;
+      const groupControl = modelSelectHtml({
+        groupId: item.group_id,
+        selected: item.dynamic_group_profile,
+        inheritLabel: deploymentDefault,
+        effectiveProfile: item.default_profile
+      });
+      const admins = memberModelList(item.group_id, item.admins || [], '还没有配置管理员 QQ');
+      const members = memberModelList(item.group_id, item.members || [], '还没有观察到其他群友');
+      return `<tr><td><div class="stack"><code>${esc(item.group_id)}</code>` +
+        `${statusBadge(item.enabled ? 'enabled' : 'disabled', item.enabled ? '已启用' : '已禁用')}</div></td>` +
+        `<td>${groupControl}</td><td>${admins}</td><td>${members}</td></tr>`;
     }).join('')
-    : emptyRow(5, '还没有观察到 QQ 群');
+    : emptyRow(4, '还没有观察到 QQ 群');
+}
+
+function profileOptions(selected, inheritLabel) {
+  const profiles = state.groups.profiles || [];
+  const current = String(selected || '');
+  return `<option value=""${current ? '' : ' selected'}>${esc(inheritLabel)}</option>` + profiles.map((profile) => {
+    const label = `${profile.name} · ${profile.model}${profile.configured ? '' : '（未配置）'}`;
+    return `<option value="${esc(profile.name)}"${current === profile.name ? ' selected' : ''}${profile.configured ? '' : ' disabled'}>${esc(label)}</option>`;
+  }).join('');
+}
+
+function modelSelectHtml({ groupId, userId = null, selected = null, inheritLabel, effectiveProfile }) {
+  const scope = userId === null ? 'group' : 'user';
+  return `<div class="model-control"><select data-model-scope="${scope}" data-group-id="${esc(groupId)}"` +
+    `${userId === null ? '' : ` data-user-id="${esc(userId)}"`}>${profileOptions(selected, inheritLabel)}</select>` +
+    `<span class="subtle">当前生效：<code>${esc(effectiveProfile || '-')}</code></span></div>`;
+}
+
+function memberModelList(groupId, members, emptyText) {
+  if (!members.length) return `<span class="muted">${esc(emptyText)}</span>`;
+  return `<div class="member-model-list">${members.map((member) => (
+    `<div class="member-model-row"><div class="member-identity"><strong title="${esc(member.display_name)}">${esc(member.display_name)}</strong>` +
+    `<code>QQ ${esc(member.user_id)}</code></div>` +
+    modelSelectHtml({
+      groupId,
+      userId: member.user_id,
+      selected: member.explicit_profile,
+      inheritLabel: '继承群默认',
+      effectiveProfile: member.effective_profile
+    }) + `</div>`
+  )).join('')}</div>`;
 }
 
 function renderModels() {
@@ -1384,6 +1439,29 @@ async function runAction(action) {
   }
 }
 
+async function updateModelSelection(select) {
+  const groupId = select.dataset.groupId;
+  const userId = select.dataset.userId;
+  const endpoint = select.dataset.modelScope === 'group'
+    ? `/group-models/${encodeURIComponent(groupId)}/default`
+    : `/group-models/${encodeURIComponent(groupId)}/users/${encodeURIComponent(userId)}`;
+  select.disabled = true;
+  clearError();
+  try {
+    await api(endpoint, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile: select.value || null })
+    });
+    await load();
+  } catch (error) {
+    showError(error.message);
+    await load();
+  } finally {
+    select.disabled = false;
+  }
+}
+
 document.addEventListener('click', (event) => {
   const navItem = event.target.closest('.nav-item[data-view]');
   if (navItem) openView(navItem.dataset.view);
@@ -1423,6 +1501,11 @@ document.addEventListener('click', (event) => {
 });
 
 document.addEventListener('change', (event) => {
+  const modelSelect = event.target.closest('[data-model-scope]');
+  if (modelSelect) {
+    updateModelSelection(modelSelect);
+    return;
+  }
   const select = event.target.closest('[data-page-size]');
   if (select) {
     const key = select.dataset.pageSize;

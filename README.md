@@ -301,6 +301,9 @@ API Key 或验证码。所有记忆都可以手动审计：
 profile 名，不保存 API Key；它不影响同群其他用户，也不会提交到 Git 仓库。可用
 `AI_GROUP_MODEL_PROFILES_JSON={"201644592":"gpt-5.6-sol"}` 为群配置默认 profile；
 群友自己的 `/模型` 选择优先级更高，执行 `/模型 默认` 后会恢复该群默认值。
+管理页的“群模型”可以直接修改群默认和单个群友的 profile，结果立即写入持久化
+状态并生效，不需要修改环境变量或 rebuild。`AI_ADMIN_USER_IDS` 中的 QQ 账号会单独
+显示在“我自己”，其余机器人观察到的账号显示在“其他群友”。
 
 ## 项目沙箱和群文件工具
 
@@ -525,6 +528,7 @@ AI_SEMANTIC_ENABLED=false
 AI_HISTORIAN_ENABLED=false
 AI_DREAM_ENABLED=false
 AI_ADMIN_ENABLED=false
+AI_ADMIN_USER_IDS=
 AI_MIRROR_ROUTES_JSON=[]
 AI_SANDBOX_ENABLED=false
 AI_SANDBOX_ALLOWED_USERS=

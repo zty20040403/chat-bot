@@ -93,6 +93,16 @@ class SettingsGroupFilterTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "must be valid JSON"):
                 Settings.from_env()
 
+    def test_admin_user_ids_parse_qq_accounts(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"AI_ADMIN_USER_IDS": "3526452465, 2291939848,invalid"},
+            clear=True,
+        ):
+            settings = Settings.from_env()
+
+        self.assertEqual(settings.admin_user_ids, {3526452465, 2291939848})
+
 
 if __name__ == "__main__":
     unittest.main()
