@@ -4,6 +4,18 @@ import json
 from html import escape
 
 
+ADMIN_FAVICON_SVG = r"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="#18181b"/>
+  <path d="M32 18v-6" stroke="#fafafa" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="32" cy="10" r="4" fill="#22c55e"/>
+  <rect x="11" y="19" width="42" height="32" rx="10" fill="#fafafa"/>
+  <circle cx="25" cy="34" r="3.5" fill="#18181b"/>
+  <circle cx="39" cy="34" r="3.5" fill="#18181b"/>
+  <path d="M25 43h14" stroke="#18181b" stroke-width="3" stroke-linecap="round"/>
+</svg>
+"""
+
+
 def dashboard_html(prefix: str, version: str, requires_token: bool) -> str:
     encoded_prefix = (
         json.dumps(prefix)
@@ -14,6 +26,7 @@ def dashboard_html(prefix: str, version: str, requires_token: bool) -> str:
     return (
         _DASHBOARD_TEMPLATE.replace("__DASHBOARD_CSS__", _DASHBOARD_CSS)
         .replace("__DASHBOARD_SCRIPT__", _DASHBOARD_SCRIPT)
+        .replace("__FAVICON_URL__", escape(f"{prefix}/favicon.svg"))
         .replace("__ADMIN_PREFIX__", encoded_prefix)
         .replace("__BOT_VERSION__", escape(version))
         .replace("__TOKEN_REQUIRED__", "true" if requires_token else "false")
@@ -26,6 +39,8 @@ _DASHBOARD_TEMPLATE = r"""<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#18181b">
+  <link rel="icon" type="image/svg+xml" href="__FAVICON_URL__?v=__BOT_VERSION__">
   <title>QQ Bot Control</title>
   <style>__DASHBOARD_CSS__</style>
 </head>

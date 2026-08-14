@@ -193,7 +193,7 @@ from .matchers import (
 SEND_RETRY_DELAY_SECONDS = 2.0
 SEND_RETRY_MAX_CHARS = 800
 TURN_PROMPT_VERSION = "qqbot-turn-v5"
-BOT_VERSION = "0.5.8"
+BOT_VERSION = "0.5.9"
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 proactive_check_gate = ProactiveCheckGate()
 

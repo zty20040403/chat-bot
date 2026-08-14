@@ -239,6 +239,7 @@ class AdminTests(unittest.TestCase):
                 base_url="http://test",
             ) as client:
                 page = await client.get("/bot-admin")
+                favicon = await client.get("/bot-admin/favicon.svg")
                 denied = await client.get("/bot-admin/api/overview")
                 allowed = await client.get(
                     "/bot-admin/api/overview",
@@ -266,6 +267,7 @@ class AdminTests(unittest.TestCase):
                 )
                 return (
                     page,
+                    favicon,
                     denied,
                     allowed,
                     sandboxes,
@@ -277,6 +279,7 @@ class AdminTests(unittest.TestCase):
 
         (
             page,
+            favicon,
             denied,
             allowed,
             sandboxes,
@@ -286,6 +289,10 @@ class AdminTests(unittest.TestCase):
             context_plans,
         ) = asyncio.run(run())
         self.assertEqual(page.status_code, 200)
+        self.assertEqual(favicon.status_code, 200)
+        self.assertTrue(favicon.headers["content-type"].startswith("image/svg+xml"))
+        self.assertIn("<svg", favicon.text)
+        self.assertIn("#22c55e", favicon.text)
         self.assertIn("QQ Bot", page.text)
         self.assertEqual(denied.status_code, 401)
         self.assertEqual(allowed.status_code, 200)
@@ -305,6 +312,7 @@ class AdminTests(unittest.TestCase):
         self.assertIn("class=\"sidebar\"", page.text)
         self.assertIn("id=\"usage-chart\"", page.text)
         self.assertIn("QQ Bot Control", page.text)
+        self.assertIn('/bot-admin/favicon.svg?v=test', page.text)
         self.assertNotIn("__DASHBOARD_", page.text)
         self.assertNotIn("__ADMIN_PREFIX__", page.text)
         self.assertNotIn("__TOKEN_REQUIRED__", page.text)

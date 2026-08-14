@@ -10,10 +10,10 @@ from dataclasses import asdict, dataclass
 from typing import Any, Optional
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
-from .admin_dashboard import dashboard_html
+from .admin_dashboard import ADMIN_FAVICON_SVG, dashboard_html
 
 
 @dataclass(frozen=True)
@@ -106,6 +106,14 @@ def register_admin(
     @router.get("", response_class=HTMLResponse, include_in_schema=False)
     async def dashboard() -> str:
         return dashboard_html(prefix, services.version, bool(expected_token))
+
+    @router.get("/favicon.svg", include_in_schema=False)
+    async def favicon() -> Response:
+        return Response(
+            content=ADMIN_FAVICON_SVG,
+            media_type="image/svg+xml",
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
 
     @router.get("/api/overview", dependencies=[])
     async def overview(
