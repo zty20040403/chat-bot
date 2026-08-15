@@ -116,7 +116,7 @@ def register_admin(
         )
 
     @router.get("/api/overview", dependencies=[])
-    async def overview(
+    def overview(
         authorization: Optional[str] = Header(default=None),
     ) -> dict[str, object]:
         authorize(authorization)
@@ -213,7 +213,7 @@ def register_admin(
         }
 
     @router.get("/api/deliveries")
-    async def deliveries(
+    def deliveries(
         limit: int = Query(default=100, ge=1, le=500),
         authorization: Optional[str] = Header(default=None),
     ) -> dict[str, object]:
@@ -265,7 +265,7 @@ def register_admin(
         return {"ok": True, "delivery_id": delivery_id}
 
     @router.get("/api/usage")
-    async def usage(
+    def usage(
         days: int = Query(default=14, ge=1, le=365),
         authorization: Optional[str] = Header(default=None),
     ) -> dict[str, object]:
@@ -361,7 +361,7 @@ def register_admin(
         }
 
     @router.get("/api/stickers")
-    async def stickers(
+    def stickers(
         authorization: Optional[str] = Header(default=None),
     ) -> dict[str, object]:
         authorize(authorization)
@@ -389,7 +389,7 @@ def register_admin(
         }
 
     @router.get("/api/group-models")
-    async def group_models(
+    def group_models(
         authorization: Optional[str] = Header(default=None),
     ) -> dict[str, object]:
         authorize(authorization)
@@ -481,7 +481,7 @@ def register_admin(
         }
 
     @router.get("/api/media")
-    async def media(
+    def media(
         limit: int = Query(default=100, ge=1, le=500),
         authorization: Optional[str] = Header(default=None),
     ) -> dict[str, object]:
@@ -508,7 +508,7 @@ def register_admin(
         return {**snapshot, "configured": True, "available": True}
 
     @router.get("/api/context-plans")
-    async def context_plans(
+    def context_plans(
         limit: int = Query(default=100, ge=1, le=500),
         authorization: Optional[str] = Header(default=None),
     ) -> dict[str, object]:

@@ -135,7 +135,7 @@ class PostgresDatabase:
             timeout=max(float(timeout_seconds), 1.0),
             kwargs={"application_name": application_name},
             configure=self._configure_connection,
-            check=ConnectionPool.check_connection,
+            check=self._check_read_write_connection,
             open=True,
         )
         try:
@@ -143,6 +143,24 @@ class PostgresDatabase:
         except (psycopg.Error, PoolTimeout, TimeoutError) as exc:
             self._pool.close()
             raise DatabaseError("PostgreSQL is unavailable") from exc
+
+    @staticmethod
+    def _check_read_write_connection(
+        connection: psycopg.Connection[Any],
+    ) -> None:
+        ConnectionPool.check_connection(connection)
+        original_autocommit = connection.autocommit
+        if not original_autocommit:
+            connection.autocommit = True
+        try:
+            row = connection.execute("SHOW transaction_read_only").fetchone()
+            if row is None or str(row[0]).strip().lower() != "off":
+                raise psycopg.OperationalError(
+                    "pooled PostgreSQL connection is no longer read-write"
+                )
+        finally:
+            if not original_autocommit:
+                connection.autocommit = False
 
     def _configure_connection(self, connection: psycopg.Connection[Any]) -> None:
         try:

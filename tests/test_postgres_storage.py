@@ -1,12 +1,22 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import nonebot
+import psycopg
+
+os.environ.setdefault("AI_ALLOW_LEGACY_SQLITE", "true")
+nonebot.init()
 
 from src.bot_storage.database import (
+    PostgresDatabase,
     StoreRow,
     _convert_qmark_placeholders,
     _translate_sql,
@@ -16,6 +26,36 @@ from src.plugins.ai_chat.semantic_recall import SemanticDocument, _document_key
 
 
 class PostgresCompatibilityTests(unittest.TestCase):
+    def test_pool_rejects_a_connection_demoted_to_read_only(self) -> None:
+        class FakeConnection:
+            autocommit = False
+
+            def execute(self, query: str):
+                self.query = query
+                return SimpleNamespace(fetchone=lambda: ("on",))
+
+        connection = FakeConnection()
+        with patch(
+            "src.bot_storage.database.ConnectionPool.check_connection"
+        ), self.assertRaises(psycopg.OperationalError):
+            PostgresDatabase._check_read_write_connection(connection)  # type: ignore[arg-type]
+
+        self.assertEqual(connection.query, "SHOW transaction_read_only")
+        self.assertFalse(connection.autocommit)
+
+    def test_pool_accepts_the_current_writable_primary(self) -> None:
+        class FakeConnection:
+            autocommit = False
+
+            def execute(self, _query: str):
+                return SimpleNamespace(fetchone=lambda: ("off",))
+
+        connection = FakeConnection()
+        with patch("src.bot_storage.database.ConnectionPool.check_connection"):
+            PostgresDatabase._check_read_write_connection(connection)  # type: ignore[arg-type]
+
+        self.assertFalse(connection.autocommit)
+
     def test_rows_support_numeric_and_named_access(self) -> None:
         row = StoreRow(("message_id", "body"), (7, "hello"))
         self.assertEqual(row[0], 7)
