@@ -142,6 +142,13 @@ class Settings:
     media_lease_seconds: int
     media_batch_size: int
     media_worker_concurrency: int
+    archive_enabled: bool
+    archive_root: str
+    archive_media_retention_days: int
+    archive_delivery_retention_days: int
+    archive_delivery_min_bytes: int
+    archive_interval_seconds: int
+    archive_batch_size: int
     voice_enabled: bool
     voice_provider: str
     voice_name: str
@@ -175,6 +182,7 @@ class Settings:
     postgres_pool_min_size: int
     postgres_pool_max_size: int
     postgres_pool_timeout_seconds: int
+    postgres_health_check_interval_seconds: float
     semantic_enabled: bool
     postgres_dsn: str
     embedding_base_url: str
@@ -414,6 +422,25 @@ class Settings:
             media_worker_concurrency=min(
                 max(_get_int("AI_MEDIA_WORKER_CONCURRENCY", 2), 1), 8
             ),
+            archive_enabled=_get_bool("AI_ARCHIVE_ENABLED", False),
+            archive_root=os.getenv("AI_ARCHIVE_ROOT", "").strip(),
+            archive_media_retention_days=max(
+                _get_int("AI_ARCHIVE_MEDIA_RETENTION_DAYS", 30), 1
+            ),
+            archive_delivery_retention_days=max(
+                _get_int("AI_ARCHIVE_DELIVERY_RETENTION_DAYS", 7), 1
+            ),
+            archive_delivery_min_bytes=max(
+                _get_int("AI_ARCHIVE_DELIVERY_MIN_MB", 1), 1
+            )
+            * 1024
+            * 1024,
+            archive_interval_seconds=max(
+                _get_int("AI_ARCHIVE_INTERVAL_SECONDS", 60), 15
+            ),
+            archive_batch_size=min(
+                max(_get_int("AI_ARCHIVE_BATCH_SIZE", 20), 1), 200
+            ),
             voice_enabled=_get_bool("AI_VOICE_ENABLED", True),
             voice_provider=(
                 os.getenv("AI_VOICE_PROVIDER", "edge").strip().lower()
@@ -518,6 +545,10 @@ class Settings:
             postgres_pool_timeout_seconds=max(
                 _get_int("AI_POSTGRES_POOL_TIMEOUT_SECONDS", 10),
                 1,
+            ),
+            postgres_health_check_interval_seconds=max(
+                _get_float("AI_POSTGRES_HEALTH_CHECK_INTERVAL_SECONDS", 5.0),
+                0.5,
             ),
             semantic_enabled=_get_bool("AI_SEMANTIC_ENABLED", False),
             postgres_dsn=os.getenv("AI_POSTGRES_DSN", "").strip(),

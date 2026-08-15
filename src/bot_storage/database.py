@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import sqlite3
 import threading
+import time
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Protocol, Union, overload
@@ -119,6 +120,7 @@ class PostgresDatabase:
         min_size: int = 1,
         max_size: int = 10,
         timeout_seconds: float = 10.0,
+        health_check_interval_seconds: float = 5.0,
         application_name: str = "qq-deepseek-bot",
     ) -> None:
         self.dsn = dsn.strip()
@@ -128,6 +130,12 @@ class PostgresDatabase:
             raise DatabaseError("AI_POSTGRES_SCHEMA is not a valid identifier")
         self.schema = schema
         self._closed = False
+        self._health_check_interval_seconds = max(
+            float(health_check_interval_seconds),
+            0.5,
+        )
+        self._health_check_lock = threading.Lock()
+        self._health_checked_at: dict[int, float] = {}
         self._pool = ConnectionPool(
             conninfo=self.dsn,
             min_size=max(int(min_size), 1),
@@ -144,11 +152,25 @@ class PostgresDatabase:
             self._pool.close()
             raise DatabaseError("PostgreSQL is unavailable") from exc
 
-    @staticmethod
     def _check_read_write_connection(
+        self,
         connection: psycopg.Connection[Any],
     ) -> None:
-        ConnectionPool.check_connection(connection)
+        now = time.monotonic()
+        connection_id = id(connection)
+        with self._health_check_lock:
+            checked_at = self._health_checked_at.get(connection_id, 0.0)
+        if now - checked_at < self._health_check_interval_seconds:
+            return
+
+        self._probe_read_write_connection(connection)
+        with self._health_check_lock:
+            self._health_checked_at[connection_id] = now
+
+    @staticmethod
+    def _probe_read_write_connection(
+        connection: psycopg.Connection[Any],
+    ) -> None:
         original_autocommit = connection.autocommit
         if not original_autocommit:
             connection.autocommit = True
@@ -172,6 +194,9 @@ class PostgresDatabase:
                 )
                 cursor.execute("SET TIME ZONE 'UTC'")
             connection.commit()
+            self._probe_read_write_connection(connection)
+            with self._health_check_lock:
+                self._health_checked_at[id(connection)] = time.monotonic()
         except Exception:
             connection.rollback()
             raise

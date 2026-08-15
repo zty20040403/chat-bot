@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -35,10 +36,8 @@ class PostgresCompatibilityTests(unittest.TestCase):
                 return SimpleNamespace(fetchone=lambda: ("on",))
 
         connection = FakeConnection()
-        with patch(
-            "src.bot_storage.database.ConnectionPool.check_connection"
-        ), self.assertRaises(psycopg.OperationalError):
-            PostgresDatabase._check_read_write_connection(connection)  # type: ignore[arg-type]
+        with self.assertRaises(psycopg.OperationalError):
+            PostgresDatabase._probe_read_write_connection(connection)  # type: ignore[arg-type]
 
         self.assertEqual(connection.query, "SHOW transaction_read_only")
         self.assertFalse(connection.autocommit)
@@ -51,10 +50,29 @@ class PostgresCompatibilityTests(unittest.TestCase):
                 return SimpleNamespace(fetchone=lambda: ("off",))
 
         connection = FakeConnection()
-        with patch("src.bot_storage.database.ConnectionPool.check_connection"):
-            PostgresDatabase._check_read_write_connection(connection)  # type: ignore[arg-type]
+        PostgresDatabase._probe_read_write_connection(connection)  # type: ignore[arg-type]
 
         self.assertFalse(connection.autocommit)
+
+    def test_pool_health_check_is_cached_per_physical_connection(self) -> None:
+        database = object.__new__(PostgresDatabase)
+        database._health_check_interval_seconds = 5.0
+        database._health_check_lock = threading.Lock()
+        database._health_checked_at = {}
+        connection = SimpleNamespace()
+
+        with patch.object(
+            database,
+            "_probe_read_write_connection",
+        ) as probe, patch(
+            "src.bot_storage.database.time.monotonic",
+            side_effect=(100.0, 101.0, 106.0),
+        ):
+            database._check_read_write_connection(connection)
+            database._check_read_write_connection(connection)
+            database._check_read_write_connection(connection)
+
+        self.assertEqual(probe.call_count, 2)
 
     def test_rows_support_numeric_and_named_access(self) -> None:
         row = StoreRow(("message_id", "body"), (7, "hello"))

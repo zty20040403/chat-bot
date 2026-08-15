@@ -18,6 +18,7 @@ from .bridges import (
     MirrorStateStore,
 )
 from .browser_tools import BrowserManager, RichMessageRenderer
+from .cold_archive import ColdArchiveService
 from .config import Settings
 from .context_store import CaptureCandidate, ContextStore
 from .delivery import DeliveryStore
@@ -112,6 +113,7 @@ class AppContext:
     browser_manager: BrowserManager | None = None
     rich_renderer: RichMessageRenderer | None = None
     media_library: MediaLibrary | None = None
+    cold_archive: ColdArchiveService | None = None
     _closed: bool = field(default=False, init=False, repr=False)
 
     async def shutdown(self) -> None:
@@ -134,6 +136,7 @@ class AppContext:
             ("browser manager", self.browser_manager),
             ("rich renderer", self.rich_renderer),
             ("media library", self.media_library),
+            ("cold archive", self.cold_archive),
         ):
             if resource is None:
                 continue
@@ -195,6 +198,9 @@ def build_app_context(
                 settings.postgres_pool_min_size,
             ),
             timeout_seconds=settings.postgres_pool_timeout_seconds,
+            health_check_interval_seconds=(
+                settings.postgres_health_check_interval_seconds
+            ),
         )
         database.require_revision(HEAD_REVISION)
         logger.info(
@@ -523,6 +529,12 @@ def build_app_context(
         )
 
     media_library: MediaLibrary | None = None
+    cold_archive: ColdArchiveService | None = None
+    archive_root = (
+        Path(settings.archive_root).expanduser()
+        if settings.archive_enabled and settings.archive_root
+        else None
+    )
     if settings.media_enabled:
         if database is None:
             raise RuntimeError("The durable media library requires PostgreSQL.")
@@ -548,9 +560,29 @@ def build_app_context(
                 lease_seconds=settings.media_lease_seconds,
                 batch_size=settings.media_batch_size,
                 worker_concurrency=settings.media_worker_concurrency,
+                archive_root=archive_root,
             )
         except (OSError, RuntimeError, TypeError, ValueError, DatabaseError) as exc:
             raise RuntimeError(f"Durable media library could not start: {exc}") from exc
+
+    if settings.archive_enabled:
+        if database is None:
+            raise RuntimeError("The automatic cold archive requires PostgreSQL.")
+        if media_library is None:
+            raise RuntimeError("The automatic cold archive requires the media library.")
+        if archive_root is None:
+            raise RuntimeError("AI_ARCHIVE_ROOT is required when archiving is enabled.")
+        cold_archive = ColdArchiveService(
+            database,
+            media_root=media_library.root,
+            archive_root=archive_root,
+            media_retention_days=settings.archive_media_retention_days,
+            delivery_retention_days=settings.archive_delivery_retention_days,
+            delivery_min_bytes=settings.archive_delivery_min_bytes,
+            interval_seconds=settings.archive_interval_seconds,
+            batch_size=settings.archive_batch_size,
+            warning=logger.warning,
+        )
 
     return AppContext(
         settings=settings,
@@ -596,4 +628,5 @@ def build_app_context(
         browser_manager=browser_manager,
         rich_renderer=rich_renderer,
         media_library=media_library,
+        cold_archive=cold_archive,
     )

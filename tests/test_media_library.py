@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import unittest
 from pathlib import Path
@@ -64,6 +65,29 @@ class MediaLibraryParsingTests(unittest.TestCase):
                     library._resolve_storage_path(str(outside))
             finally:
                 outside.unlink(missing_ok=True)
+
+    def test_missing_hot_media_is_restored_from_verified_archive(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            hot_root = root / "hot"
+            archive_root = root / "archive"
+            content = b"archived image bytes"
+            archive_relative = "media/blobs/aa/example.png"
+            archive = archive_root / archive_relative
+            archive.parent.mkdir(parents=True)
+            archive.write_bytes(content)
+
+            library = object.__new__(MediaLibrary)
+            library.root = hot_root.resolve()
+            library.archive_root = archive_root.resolve()
+            restored = library._resolve_storage_path(
+                "blobs/aa/example.png",
+                archive_relative=archive_relative,
+                expected_sha256=hashlib.sha256(content).hexdigest(),
+                expected_size=len(content),
+            )
+
+            self.assertEqual(restored.read_bytes(), content)
 
     def test_mime_sniffing_accepts_known_images_only(self) -> None:
         self.assertEqual(MediaLibrary._sniff_mime(b"\xff\xd8\xffx"), "image/jpeg")

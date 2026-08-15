@@ -193,7 +193,7 @@ from .matchers import (
 SEND_RETRY_DELAY_SECONDS = 2.0
 SEND_RETRY_MAX_CHARS = 800
 TURN_PROMPT_VERSION = "qqbot-turn-v5"
-BOT_VERSION = "0.5.11"
+BOT_VERSION = "0.5.12"
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 proactive_check_gate = ProactiveCheckGate()
 
@@ -247,6 +247,7 @@ sandbox_manager = app_context.sandbox_manager
 browser_manager = app_context.browser_manager
 rich_renderer = app_context.rich_renderer
 media_library = app_context.media_library
+cold_archive = app_context.cold_archive
 background_tasks = app_context.background_tasks
 BOT_STARTED_AT = app_context.started_at
 driver = get_driver()
@@ -3884,6 +3885,13 @@ async def start_background_tasks() -> None:
         logger.info(
             "Durable media worker enabled with vision profile "
             f"{settings.vision_profile}."
+        )
+    if cold_archive is not None and background_tasks.start(
+        "cold-archive",
+        cold_archive.run_forever,
+    ):
+        logger.info(
+            "Automatic cold archive enabled; h610 remains the hot cache."
         )
     if reminder_store is not None and background_tasks.start(
         "reminders",

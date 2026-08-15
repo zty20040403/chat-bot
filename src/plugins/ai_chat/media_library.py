@@ -21,6 +21,7 @@ import httpx
 
 from src.bot_storage import DatabaseError, PostgresDatabase
 
+from .cold_archive import ColdArchiveError, copy_verified_file
 from .conversation_scope import ConversationScope
 from .llm_gateway import LLMGateway
 from .model_catalog import ModelCatalog, ModelProfile
@@ -136,6 +137,7 @@ class MediaLibrary:
         batch_size: int = 4,
         worker_concurrency: int = 2,
         ffmpeg_path: str = "ffmpeg",
+        archive_root: Path | None = None,
     ) -> None:
         self.database = database
         self.root = root.expanduser().resolve()
@@ -159,6 +161,11 @@ class MediaLibrary:
         self.batch_size = min(max(int(batch_size), 1), 20)
         self.worker_concurrency = min(max(int(worker_concurrency), 1), 8)
         self.ffmpeg_path = ffmpeg_path.strip() or "ffmpeg"
+        self.archive_root = (
+            archive_root.expanduser().resolve()
+            if archive_root is not None
+            else None
+        )
         self.worker_id = f"{socket.gethostname()}:{os.getpid()}"
         self._wake = asyncio.Event()
         self._closed = False
@@ -411,14 +418,20 @@ class MediaLibrary:
                 """
                 INSERT INTO media_blobs (
                     sha256, mime_type, byte_size, storage_path, status,
-                    first_seen_at, last_seen_at, times_seen
-                ) VALUES (?, ?, ?, ?, 'ready', ?, ?, 1)
+                    first_seen_at, last_seen_at, times_seen, last_accessed_at
+                ) VALUES (?, ?, ?, ?, 'ready', ?, ?, 1, ?)
                 ON CONFLICT(sha256) DO UPDATE SET
+                    mime_type = EXCLUDED.mime_type,
+                    byte_size = EXCLUDED.byte_size,
+                    storage_path = EXCLUDED.storage_path,
+                    status = 'ready',
                     last_seen_at = EXCLUDED.last_seen_at,
-                    times_seen = media_blobs.times_seen + 1
+                    times_seen = media_blobs.times_seen + 1,
+                    last_accessed_at = EXCLUDED.last_accessed_at,
+                    local_deleted_at = NULL
                 RETURNING media_id
                 """,
-                (sha256, mime_type, len(content), str(relative), now, now),
+                (sha256, mime_type, len(content), str(relative), now, now, now),
             )
             row = cursor.fetchone()
             if row is None:
@@ -668,6 +681,7 @@ class MediaLibrary:
                 """
                 SELECT DISTINCT ON (blob.media_id)
                     blob.media_id, blob.storage_path, blob.mime_type,
+                    blob.sha256, blob.byte_size, blob.archive_path,
                     analysis.summary, analysis.description,
                     analysis.extracted_text, analysis.emotions_json,
                     analysis.usage_json, analysis.is_sticker, analysis.safety
@@ -780,6 +794,7 @@ class MediaLibrary:
             rows = connection.execute(
                 f"""
                 SELECT blob.media_id, blob.storage_path, blob.mime_type,
+                       blob.sha256, blob.byte_size, blob.archive_path,
                        analysis.summary, analysis.description,
                        analysis.extracted_text, analysis.emotions_json,
                        analysis.usage_json, analysis.is_sticker, analysis.safety
@@ -799,7 +814,7 @@ class MediaLibrary:
             ).fetchall()
         finally:
             connection.close()
-        records = [self._record_from_row(row) for row in rows]
+        records = [self._record_from_row(row, touch=False) for row in rows]
         if not terms:
             return records[:bounded]
         ranked = [
@@ -872,6 +887,7 @@ class MediaLibrary:
             row = connection.execute(
                 """
                 SELECT blob.media_id, blob.storage_path, blob.mime_type,
+                       blob.sha256, blob.byte_size, blob.archive_path,
                        analysis.summary, analysis.description,
                        analysis.extracted_text, analysis.emotions_json,
                        analysis.usage_json, analysis.is_sticker, analysis.safety
@@ -912,6 +928,7 @@ class MediaLibrary:
             row = connection.execute(
                 f"""
                 SELECT blob.media_id, blob.storage_path, blob.mime_type,
+                       blob.sha256, blob.byte_size, blob.archive_path,
                        analysis.summary, analysis.description,
                        analysis.extracted_text, analysis.emotions_json,
                        analysis.usage_json, analysis.is_sticker, analysis.safety
@@ -946,6 +963,7 @@ class MediaLibrary:
             row = connection.execute(
                 f"""
                 SELECT blob.media_id, blob.storage_path, blob.mime_type,
+                       blob.sha256, blob.byte_size, blob.archive_path,
                        analysis.summary, analysis.description,
                        analysis.extracted_text, analysis.emotions_json,
                        analysis.usage_json, analysis.is_sticker, analysis.safety
@@ -1335,10 +1353,24 @@ class MediaLibrary:
             result.append((str(row["scope_key"]), content, bool(row["is_sticker"])))
         return result
 
-    def _record_from_row(self, row: Mapping[str, object]) -> MediaRecord:
+    def _record_from_row(
+        self,
+        row: Mapping[str, object],
+        *,
+        touch: bool = True,
+    ) -> MediaRecord:
+        media_id = int(row["media_id"])
+        storage_path = self._resolve_storage_path(
+            str(row["storage_path"]),
+            archive_relative=str(row.get("archive_path") or ""),
+            expected_sha256=str(row.get("sha256") or ""),
+            expected_size=int(row.get("byte_size") or 0),
+        )
+        if touch:
+            self._touch_media(media_id)
         return MediaRecord(
-            media_id=int(row["media_id"]),
-            handle=f"media#{int(row['media_id'])}",
+            media_id=media_id,
+            handle=f"media#{media_id}",
             summary=str(row["summary"] or ""),
             description=str(row["description"] or ""),
             extracted_text=str(row["extracted_text"] or ""),
@@ -1346,7 +1378,7 @@ class MediaLibrary:
             usage=tuple(self._string_list(row["usage_json"])),
             is_sticker=bool(row["is_sticker"]),
             safety=str(row["safety"] or "review"),
-            storage_path=self._resolve_storage_path(str(row["storage_path"])),
+            storage_path=storage_path,
             mime_type=str(row["mime_type"] or "application/octet-stream"),
         )
 
@@ -1435,13 +1467,56 @@ class MediaLibrary:
     def _vision_profile(self) -> ModelProfile:
         return self.model_catalog.resolve(self.vision_profile_name)
 
-    def _resolve_storage_path(self, relative: str) -> Path:
+    def _resolve_storage_path(
+        self,
+        relative: str,
+        *,
+        archive_relative: str = "",
+        expected_sha256: str = "",
+        expected_size: int = 0,
+    ) -> Path:
         candidate = (self.root / relative).resolve()
         if candidate != self.root and self.root not in candidate.parents:
             raise MediaLibraryError("media storage path escaped its root")
-        if not candidate.is_file():
+        if candidate.is_file():
+            return candidate
+        if (
+            self.archive_root is None
+            or not archive_relative
+            or not expected_sha256
+            or expected_size <= 0
+        ):
             raise MediaLibraryError("stored media file is missing")
+
+        archive = (self.archive_root / archive_relative).resolve()
+        if archive != self.archive_root and self.archive_root not in archive.parents:
+            raise MediaLibraryError("media archive path escaped its root")
+        try:
+            copy_verified_file(
+                archive,
+                candidate,
+                expected_sha256=expected_sha256,
+                expected_size=expected_size,
+            )
+        except (ColdArchiveError, OSError) as exc:
+            raise MediaLibraryError(
+                "stored media is unavailable in the hot cache and archive"
+            ) from exc
         return candidate
+
+    def _touch_media(self, media_id: int) -> None:
+        connection = self.database.store_connection()
+        try:
+            connection.execute(
+                """
+                UPDATE media_blobs
+                SET last_accessed_at = ?, local_deleted_at = NULL
+                WHERE media_id = ?
+                """,
+                (int(time.time()), int(media_id)),
+            )
+        finally:
+            connection.close()
 
     @staticmethod
     def _supported_source(source_url: str) -> bool:
