@@ -59,6 +59,34 @@ class Delivery:
         )
 
 
+@dataclass(frozen=True)
+class DeliverySummary:
+    """Delivery metadata for operator views, without the potentially large body."""
+
+    delivery_id: int
+    idempotency_key: str
+    source_scope_key: str
+    source_canonical_message_id: int | None
+    turn_id: int | None
+    target_platform: str
+    target_kind: str
+    target_native_conversation_id: str
+    reply_to_native_message_id: str
+    content_fingerprint: str
+    status: DeliveryStatus
+    attempts: int
+    next_attempt_at: int
+    lease_until: int | None
+    native_message_id: str
+    last_error: str
+    created_at: int
+    updated_at: int
+
+    @property
+    def handle(self) -> str:
+        return f"delivery#{self.delivery_id}"
+
+
 class DeliveryStore:
     """Durable, lease-based outbound delivery queue.
 
@@ -493,6 +521,26 @@ class DeliveryStore:
             ).fetchall()
         return [self._row(row) for row in rows]
 
+    def recent_summaries(self, *, limit: int = 100) -> list[DeliverySummary]:
+        bounded = min(max(int(limit), 1), 500)
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT
+                    delivery_id, idempotency_key, source_scope_key,
+                    source_canonical_message_id, turn_id, target_platform,
+                    target_kind, target_native_conversation_id,
+                    reply_to_native_message_id, content_fingerprint, status,
+                    attempts, next_attempt_at, lease_until, native_message_id,
+                    last_error, created_at, updated_at
+                FROM deliveries
+                ORDER BY delivery_id DESC
+                LIMIT ?
+                """,
+                (bounded,),
+            ).fetchall()
+        return [self._summary_row(row) for row in rows]
+
     def stats(self) -> dict[str, int]:
         with self._lock:
             rows = self._connection.execute(
@@ -690,6 +738,36 @@ class DeliveryStore:
             ),
             reply_to_native_message_id=str(row["reply_to_native_message_id"]),
             body=body_from_json(str(row["body_json"])),
+            content_fingerprint=str(row["content_fingerprint"]),
+            status=str(row["status"]),  # type: ignore[arg-type]
+            attempts=int(row["attempts"]),
+            next_attempt_at=int(row["next_attempt_at"]),
+            lease_until=int(lease) if lease is not None else None,
+            native_message_id=str(row["native_message_id"]),
+            last_error=str(row["last_error"]),
+            created_at=int(row["created_at"]),
+            updated_at=int(row["updated_at"]),
+        )
+
+    @staticmethod
+    def _summary_row(row: sqlite3.Row) -> DeliverySummary:
+        lease = row["lease_until"]
+        source_message_id = row["source_canonical_message_id"]
+        turn_id = row["turn_id"]
+        return DeliverySummary(
+            delivery_id=int(row["delivery_id"]),
+            idempotency_key=str(row["idempotency_key"]),
+            source_scope_key=str(row["source_scope_key"]),
+            source_canonical_message_id=(
+                int(source_message_id) if source_message_id is not None else None
+            ),
+            turn_id=int(turn_id) if turn_id is not None else None,
+            target_platform=str(row["target_platform"]),
+            target_kind=str(row["target_kind"]),
+            target_native_conversation_id=str(
+                row["target_native_conversation_id"]
+            ),
+            reply_to_native_message_id=str(row["reply_to_native_message_id"]),
             content_fingerprint=str(row["content_fingerprint"]),
             status=str(row["status"]),  # type: ignore[arg-type]
             attempts=int(row["attempts"]),

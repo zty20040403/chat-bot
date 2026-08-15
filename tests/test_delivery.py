@@ -95,6 +95,22 @@ class DeliveryStoreTests(unittest.TestCase):
         )
         self.assertEqual(self.store.claim_due(now=200), [])
 
+    def test_recent_summaries_do_not_select_or_decode_message_bodies(self) -> None:
+        delivery, _created = self.enqueue()
+        statements: list[str] = []
+        self.store._connection.set_trace_callback(statements.append)
+
+        summaries = self.store.recent_summaries()
+
+        self.assertEqual(summaries[0].delivery_id, delivery.delivery_id)
+        self.assertFalse(hasattr(summaries[0], "body"))
+        select = next(
+            statement
+            for statement in statements
+            if "FROM deliveries" in statement
+        )
+        self.assertNotIn("body_json", select)
+
 
 if __name__ == "__main__":
     unittest.main()

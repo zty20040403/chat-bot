@@ -221,9 +221,8 @@ def register_admin(
         if services.delivery_store is None:
             return {"items": [], "configured": False}
         items = []
-        for item in services.delivery_store.recent(limit=limit):
+        for item in services.delivery_store.recent_summaries(limit=limit):
             payload = asdict(item)
-            payload.pop("body", None)
             payload["handle"] = item.handle
             items.append(payload)
         return {"items": items, "configured": True}
