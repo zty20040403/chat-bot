@@ -201,6 +201,7 @@ def build_app_context(
             health_check_interval_seconds=(
                 settings.postgres_health_check_interval_seconds
             ),
+            node_names=settings.postgres_node_names,
         )
         database.require_revision(HEAD_REVISION)
         logger.info(

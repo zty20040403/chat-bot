@@ -103,6 +103,16 @@ class SettingsGroupFilterTests(unittest.TestCase):
 
         self.assertEqual(settings.admin_user_ids, {3526452465, 2291939848})
 
+    def test_postgres_node_names_parse_in_dsn_order(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"AI_POSTGRES_NODE_NAMES": "h610, tank"},
+            clear=True,
+        ):
+            settings = Settings.from_env()
+
+        self.assertEqual(settings.postgres_node_names, ("h610", "tank"))
+
 
 if __name__ == "__main__":
     unittest.main()

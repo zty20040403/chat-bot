@@ -5,11 +5,13 @@ import sqlite3
 import threading
 import time
 from collections.abc import Iterator, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Protocol, Union, overload
 
 import psycopg
 from psycopg import sql
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from psycopg_pool import ConnectionPool, PoolTimeout
 
 
@@ -122,6 +124,8 @@ class PostgresDatabase:
         timeout_seconds: float = 10.0,
         health_check_interval_seconds: float = 5.0,
         application_name: str = "qq-deepseek-bot",
+        node_names: Sequence[str] = (),
+        topology_cache_seconds: float = 10.0,
     ) -> None:
         self.dsn = dsn.strip()
         if not self.dsn:
@@ -130,6 +134,14 @@ class PostgresDatabase:
             raise DatabaseError("AI_POSTGRES_SCHEMA is not a valid identifier")
         self.schema = schema
         self._closed = False
+        self._application_name = application_name
+        self._node_names = tuple(str(item).strip() for item in node_names if item)
+        self._pool_min_size = max(int(min_size), 1)
+        self._pool_max_size = max(int(max_size), self._pool_min_size)
+        self._topology_cache_seconds = max(float(topology_cache_seconds), 1.0)
+        self._topology_lock = threading.Lock()
+        self._topology_cached_at = 0.0
+        self._topology_cache: dict[str, object] | None = None
         self._health_check_interval_seconds = max(
             float(health_check_interval_seconds),
             0.5,
@@ -138,8 +150,8 @@ class PostgresDatabase:
         self._health_checked_at: dict[int, float] = {}
         self._pool = ConnectionPool(
             conninfo=self.dsn,
-            min_size=max(int(min_size), 1),
-            max_size=max(int(max_size), max(int(min_size), 1)),
+            min_size=self._pool_min_size,
+            max_size=self._pool_max_size,
             timeout=max(float(timeout_seconds), 1.0),
             kwargs={"application_name": application_name},
             configure=self._configure_connection,
@@ -214,6 +226,176 @@ class PostgresDatabase:
                     cursor.fetchone()
         except (psycopg.Error, PoolTimeout) as exc:
             raise DatabaseError("PostgreSQL health check failed") from exc
+
+    def topology_snapshot(self) -> dict[str, object]:
+        """Return a cached, credential-free view of every configured node."""
+        now = time.monotonic()
+        with self._topology_lock:
+            if (
+                self._topology_cache is not None
+                and now - self._topology_cached_at < self._topology_cache_seconds
+            ):
+                return self._copy_topology_snapshot(self._topology_cache)
+
+            nodes = self._configured_nodes()
+            if nodes:
+                with ThreadPoolExecutor(max_workers=min(len(nodes), 4)) as executor:
+                    snapshots = list(executor.map(self._probe_node, nodes))
+            else:
+                snapshots = []
+
+            online_count = sum(
+                1 for item in snapshots if item.get("status") == "online"
+            )
+            writable = next(
+                (str(item["name"]) for item in snapshots if item.get("writable")),
+                None,
+            )
+            if snapshots and online_count == len(snapshots) and writable:
+                overall = "healthy"
+            elif online_count:
+                overall = "degraded"
+            else:
+                overall = "offline"
+
+            pool_stats = self._pool.get_stats()
+            snapshot: dict[str, object] = {
+                "available": True,
+                "overall": overall,
+                "checked_at": int(time.time()),
+                "writable_node": writable,
+                "nodes": snapshots,
+                "pool": {
+                    "size": int(pool_stats.get("pool_size", 0)),
+                    "available": int(pool_stats.get("pool_available", 0)),
+                    "waiting": int(pool_stats.get("requests_waiting", 0)),
+                    "min_size": self._pool_min_size,
+                    "max_size": self._pool_max_size,
+                },
+            }
+            self._topology_cache = snapshot
+            self._topology_cached_at = time.monotonic()
+            return self._copy_topology_snapshot(snapshot)
+
+    def _configured_nodes(self) -> list[dict[str, str]]:
+        try:
+            values = conninfo_to_dict(self.dsn)
+        except (psycopg.Error, ValueError):
+            return []
+        hosts = [item.strip() for item in values.get("host", "").split(",")]
+        hosts = [item for item in hosts if item]
+        raw_ports = [item.strip() for item in values.get("port", "").split(",")]
+        ports = [item for item in raw_ports if item]
+        if len(ports) == 1 and len(hosts) > 1:
+            ports *= len(hosts)
+
+        nodes: list[dict[str, str]] = []
+        for index, host in enumerate(hosts):
+            port = ports[index] if index < len(ports) else "5432"
+            name = (
+                self._node_names[index]
+                if index < len(self._node_names)
+                else f"数据库 {index + 1}"
+            )
+            nodes.append({"name": name, "host": host, "port": port})
+        return nodes
+
+    def _probe_node(self, node: dict[str, str]) -> dict[str, object]:
+        started_at = time.monotonic()
+        result: dict[str, object] = {
+            "name": node["name"],
+            "host": node["host"],
+            "port": int(node["port"]),
+            "status": "offline",
+            "role": "unknown",
+            "writable": False,
+            "latency_ms": None,
+            "database_size_bytes": None,
+            "replication_lag_seconds": None,
+            "replication_lag_bytes": None,
+            "server_version": None,
+            "error": "连接失败",
+        }
+        try:
+            node_dsn = make_conninfo(
+                self.dsn,
+                host=node["host"],
+                port=node["port"],
+                target_session_attrs="any",
+                connect_timeout="2",
+            )
+            with psycopg.connect(
+                node_dsn,
+                autocommit=True,
+                application_name=f"{self._application_name}-admin-probe",
+            ) as connection:
+                row = connection.execute(
+                    """
+                    SELECT
+                        pg_is_in_recovery(),
+                        current_setting('transaction_read_only'),
+                        pg_database_size(current_database()),
+                        current_setting('server_version'),
+                        CASE
+                            WHEN pg_is_in_recovery()
+                                 AND pg_last_wal_receive_lsn() IS DISTINCT FROM
+                                     pg_last_wal_replay_lsn()
+                            THEN EXTRACT(EPOCH FROM (
+                                clock_timestamp() - pg_last_xact_replay_timestamp()
+                            ))
+                            ELSE 0
+                        END,
+                        CASE
+                            WHEN pg_is_in_recovery()
+                            THEN COALESCE(pg_wal_lsn_diff(
+                                pg_last_wal_receive_lsn(),
+                                pg_last_wal_replay_lsn()
+                            ), 0)
+                            ELSE 0
+                        END
+                    """
+                ).fetchone()
+            if row is None:
+                return result
+            in_recovery = bool(row[0])
+            writable = not in_recovery and str(row[1]).lower() == "off"
+            result.update(
+                {
+                    "status": "online",
+                    "role": "secondary" if in_recovery else "primary",
+                    "writable": writable,
+                    "latency_ms": round(
+                        (time.monotonic() - started_at) * 1000,
+                        1,
+                    ),
+                    "database_size_bytes": int(row[2]),
+                    "server_version": str(row[3]),
+                    "replication_lag_seconds": (
+                        round(float(row[4]), 3) if row[4] is not None else None
+                    ),
+                    "replication_lag_bytes": (
+                        int(row[5]) if row[5] is not None else None
+                    ),
+                    "error": None,
+                }
+            )
+        except (psycopg.Error, OSError, ValueError):
+            pass
+        return result
+
+    @staticmethod
+    def _copy_topology_snapshot(snapshot: dict[str, object]) -> dict[str, object]:
+        raw_nodes = snapshot.get("nodes", [])
+        raw_pool = snapshot.get("pool", {})
+        return {
+            **snapshot,
+            "nodes": (
+                [dict(item) for item in raw_nodes]
+                if isinstance(raw_nodes, list)
+                else []
+            ),
+            "pool": dict(raw_pool) if isinstance(raw_pool, dict) else {},
+        }
 
     def require_revision(self, expected_revision: str) -> None:
         statement = sql.SQL(

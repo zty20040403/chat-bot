@@ -63,6 +63,7 @@ def register_http_surfaces(
                 sticker_inventory=sticker_inventory,
                 media_library=context.media_library,
                 turn_journal=context.turn_journal,
+                database=context.database,
             ),
             path=settings.admin_path,
             token=settings.admin_token,

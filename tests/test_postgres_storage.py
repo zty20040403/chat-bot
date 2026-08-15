@@ -74,6 +74,22 @@ class PostgresCompatibilityTests(unittest.TestCase):
 
         self.assertEqual(probe.call_count, 2)
 
+    def test_topology_nodes_follow_multi_host_dsn_order(self) -> None:
+        database = object.__new__(PostgresDatabase)
+        database.dsn = (
+            "postgresql://bot:secret@100.64.0.3:55432,"
+            "100.64.0.4:55432/qq_bot"
+        )
+        database._node_names = ("h610", "tank")
+
+        self.assertEqual(
+            database._configured_nodes(),
+            [
+                {"name": "h610", "host": "100.64.0.3", "port": "55432"},
+                {"name": "tank", "host": "100.64.0.4", "port": "55432"},
+            ],
+        )
+
     def test_rows_support_numeric_and_named_access(self) -> None:
         row = StoreRow(("message_id", "body"), (7, "hello"))
         self.assertEqual(row[0], 7)

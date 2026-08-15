@@ -49,6 +49,14 @@ def _get_group_ids(name: str) -> set[int]:
     return group_ids
 
 
+def _get_csv(name: str) -> tuple[str, ...]:
+    return tuple(
+        item.strip()
+        for item in os.getenv(name, "").split(",")
+        if item.strip()
+    )
+
+
 def _get_group_model_profiles(name: str) -> dict[int, str]:
     raw = os.getenv(name, "").strip()
     if not raw:
@@ -183,6 +191,7 @@ class Settings:
     postgres_pool_max_size: int
     postgres_pool_timeout_seconds: int
     postgres_health_check_interval_seconds: float
+    postgres_node_names: tuple[str, ...]
     semantic_enabled: bool
     postgres_dsn: str
     embedding_base_url: str
@@ -550,6 +559,7 @@ class Settings:
                 _get_float("AI_POSTGRES_HEALTH_CHECK_INTERVAL_SECONDS", 5.0),
                 0.5,
             ),
+            postgres_node_names=_get_csv("AI_POSTGRES_NODE_NAMES"),
             semantic_enabled=_get_bool("AI_SEMANTIC_ENABLED", False),
             postgres_dsn=os.getenv("AI_POSTGRES_DSN", "").strip(),
             embedding_base_url=os.getenv(

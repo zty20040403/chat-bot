@@ -159,6 +159,53 @@ class Settings:
         return group_id != 201644592
 
 
+class Database:
+    def topology_snapshot(self):
+        return {
+            "available": True,
+            "overall": "healthy",
+            "checked_at": 123,
+            "writable_node": "h610",
+            "nodes": [
+                {
+                    "name": "h610",
+                    "host": "100.64.0.3",
+                    "port": 55432,
+                    "status": "online",
+                    "role": "primary",
+                    "writable": True,
+                    "latency_ms": 4.2,
+                    "database_size_bytes": 1024,
+                    "replication_lag_seconds": 0,
+                    "replication_lag_bytes": 0,
+                    "server_version": "17.5",
+                    "error": None,
+                },
+                {
+                    "name": "tank",
+                    "host": "100.64.0.4",
+                    "port": 55432,
+                    "status": "online",
+                    "role": "secondary",
+                    "writable": False,
+                    "latency_ms": 8.1,
+                    "database_size_bytes": 1024,
+                    "replication_lag_seconds": 0,
+                    "replication_lag_bytes": 0,
+                    "server_version": "17.5",
+                    "error": None,
+                },
+            ],
+            "pool": {
+                "size": 2,
+                "available": 1,
+                "waiting": 0,
+                "min_size": 1,
+                "max_size": 10,
+            },
+        }
+
+
 class AdminTests(unittest.TestCase):
     def test_admin_event_broker_coalesces_resource_names(self) -> None:
         broker = AdminEventBroker()
@@ -228,6 +275,7 @@ class AdminTests(unittest.TestCase):
                     }
                 ),
                 turn_journal=TurnJournal(),
+                database=Database(),
             ),
             token="secret",
         )
@@ -265,6 +313,10 @@ class AdminTests(unittest.TestCase):
                     "/bot-admin/api/context-plans",
                     headers={"Authorization": "Bearer secret"},
                 )
+                databases = await client.get(
+                    "/bot-admin/api/databases",
+                    headers={"Authorization": "Bearer secret"},
+                )
                 return (
                     page,
                     favicon,
@@ -275,6 +327,7 @@ class AdminTests(unittest.TestCase):
                     group_models,
                     media,
                     context_plans,
+                    databases,
                 )
 
         (
@@ -287,6 +340,7 @@ class AdminTests(unittest.TestCase):
             group_models,
             media,
             context_plans,
+            databases,
         ) = asyncio.run(run())
         self.assertEqual(page.status_code, 200)
         self.assertEqual(favicon.status_code, 200)
@@ -309,6 +363,7 @@ class AdminTests(unittest.TestCase):
         self.assertNotIn("never-return-this-secret", allowed.text)
         self.assertIn("data-view=\"sandboxes\"", page.text)
         self.assertIn("data-view=\"context-plans\"", page.text)
+        self.assertIn("data-view=\"databases\"", page.text)
         self.assertIn("class=\"sidebar\"", page.text)
         self.assertIn("id=\"usage-chart\"", page.text)
         self.assertIn("QQ Bot Control", page.text)
@@ -326,6 +381,12 @@ class AdminTests(unittest.TestCase):
         self.assertEqual(media.json()["counts"]["total"], 1)
         self.assertEqual(media.json()["vision_profile"], "gpt-5.6-luna")
         self.assertEqual(context_plans.json()["items"][0]["focus_message_id"], 10)
+        self.assertEqual(databases.json()["writable_node"], "h610")
+        self.assertEqual(
+            [node["name"] for node in databases.json()["nodes"]],
+            ["h610", "tank"],
+        )
+        self.assertNotIn("password", databases.text.lower())
         self.assertNotIn("rendered_context", context_plans.text)
         group_rows = group_models.json()["items"]
         self.assertEqual(

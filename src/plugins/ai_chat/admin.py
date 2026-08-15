@@ -36,6 +36,7 @@ class AdminServices:
     sticker_inventory: Any = None
     media_library: Any = None
     turn_journal: Any = None
+    database: Any = None
 
 
 class ModelSelectionRequest(BaseModel):
@@ -193,6 +194,22 @@ def register_admin(
                 "X-Accel-Buffering": "no",
             },
         )
+
+    @router.get("/api/databases")
+    def databases(
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
+        authorize(authorization)
+        if services.database is None:
+            return {
+                "available": False,
+                "overall": "unconfigured",
+                "checked_at": int(time.time()),
+                "writable_node": None,
+                "nodes": [],
+                "pool": {},
+            }
+        return services.database.topology_snapshot()
 
     @router.get("/api/platforms")
     async def platforms(

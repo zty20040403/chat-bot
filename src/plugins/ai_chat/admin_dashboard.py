@@ -79,6 +79,10 @@ _DASHBOARD_TEMPLATE = r"""<!doctype html>
             data-title="上下文决策" data-subtitle="群聊焦点、候选评分与隔离范围">
             <span data-icon="focus"></span><span>上下文</span>
           </button>
+          <button class="nav-item" type="button" data-view="databases"
+            data-title="数据库" data-subtitle="h610 主库与 tank 备用库状态">
+            <span data-icon="database"></span><span>数据库</span><b id="nav-database-count">--</b>
+          </button>
         </div>
 
         <div class="nav-group">
@@ -226,6 +230,27 @@ _DASHBOARD_TEMPLATE = r"""<!doctype html>
             <th>回合</th><th>群 Scope</th><th>当前 / 焦点消息</th><th>置信度</th><th>判断依据</th><th>候选</th><th>时间</th>
           </tr></thead><tbody id="context-plan-body"></tbody></table></div>
           <div class="table-footer" data-pager-wrap="contextPlans"></div>
+        </section>
+
+        <section class="view" id="databases" hidden>
+          <div class="section-heading">
+            <div><h2>PostgreSQL 节点</h2><p>主备角色、连接延迟与复制状态</p></div>
+            <div class="database-heading-state" id="database-overall"></div>
+          </div>
+          <div class="database-grid" id="database-grid"></div>
+
+          <div class="section-heading compact-heading">
+            <div><h2>Bot 连接池</h2><p>正常聊天实际使用的可写连接池</p></div>
+            <span class="count-label" id="database-checked-at">尚未检查</span>
+          </div>
+          <div class="pool-panel">
+            <div class="pool-metrics">
+              <div><span>当前连接</span><strong id="pool-size">--</strong></div>
+              <div><span>空闲连接</span><strong id="pool-available">--</strong></div>
+              <div><span>等待请求</span><strong id="pool-waiting">--</strong></div>
+              <div><span>连接范围</span><strong id="pool-range">--</strong></div>
+            </div>
+          </div>
         </section>
 
         <section class="view" id="sandboxes" hidden>
@@ -639,6 +664,67 @@ main { width: 100%; max-width: 1500px; margin: 0 auto; padding: 24px; }
 .overview-table-heading { margin-top: 0; }
 .count-label { color: var(--muted-foreground); font-size: 12px; white-space: nowrap; }
 
+.database-heading-state { display: flex; align-items: center; gap: 8px; }
+.database-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-bottom: 22px;
+}
+.database-card {
+  min-width: 0;
+  padding: 18px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .03);
+}
+.database-card.offline { border-color: #fecaca; }
+.database-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 15px;
+  border-bottom: 1px solid var(--border);
+}
+.database-identity { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.database-icon {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 34px;
+  color: #3f3f46;
+  background: var(--muted);
+  border-radius: 6px;
+}
+.database-icon .icon { width: 18px; height: 18px; }
+.database-identity div { display: grid; min-width: 0; }
+.database-identity strong { font-size: 15px; font-weight: 650; }
+.database-identity code { color: var(--muted-foreground); overflow-wrap: anywhere; }
+.database-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 15px 18px;
+  padding-top: 16px;
+}
+.database-fact { display: grid; gap: 2px; min-width: 0; }
+.database-fact span { color: var(--muted-foreground); font-size: 11px; }
+.database-fact strong { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.database-error { margin: 14px 0 0; color: #991b1b; font-size: 12px; }
+.pool-panel {
+  padding: 18px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.pool-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.pool-metrics > div { display: grid; gap: 5px; padding: 2px 18px; border-left: 1px solid var(--border); }
+.pool-metrics > div:first-child { padding-left: 0; border-left: 0; }
+.pool-metrics span { color: var(--muted-foreground); font-size: 11px; }
+.pool-metrics strong { font-size: 20px; font-weight: 660; font-variant-numeric: tabular-nums; }
+
 .secondary-button, .table-action {
   display: inline-flex;
   align-items: center;
@@ -831,6 +917,8 @@ details summary { color: #3f3f46; cursor: pointer; white-space: nowrap; }
 @media (max-width: 1120px) {
   .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .metric-card { min-height: 150px; }
+  .pool-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 0; }
+  .pool-metrics > div:nth-child(3) { padding-left: 0; border-left: 0; }
 }
 
 @media (max-width: 820px) {
@@ -864,6 +952,7 @@ details summary { color: #3f3f46; cursor: pointer; white-space: nowrap; }
   .page-heading p { display: none; }
   .token-control { width: 150px; }
   .metrics { grid-template-columns: 1fr; gap: 10px; }
+  .database-grid { grid-template-columns: 1fr; }
   .metric-card { min-height: 134px; padding: 15px; }
   .metric-card > strong { font-size: 25px; }
   .panel-heading, .section-heading { align-items: flex-start; }
@@ -896,6 +985,7 @@ const ICONS = {
   box: '<path d="m21 8-9 5-9-5"/><path d="m3 8 9-5 9 5v8l-9 5-9-5Z"/><path d="M12 13v8"/>',
   smile: '<circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2M9 9h.01M15 9h.01"/>',
   image: '<rect width="18" height="18" x="3" y="3" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 21"/>',
+  database: '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.7 4 3 9 3s9-1.3 9-3V5"/><path d="M3 12c0 1.7 4 3 9 3s9-1.3 9-3"/>',
   users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>',
   cpu: '<rect width="16" height="16" x="4" y="4" rx="2"/><rect width="6" height="6" x="9" y="9" rx="1"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/>',
   menu: '<path d="M4 12h16M4 6h16M4 18h16"/>',
@@ -934,6 +1024,7 @@ const state = {
   sandboxes: { items: [] },
   stickers: { counts: {}, items: [] },
   media: { counts: {}, items: [], jobs: [] },
+  databases: { available: false, overall: 'unconfigured', nodes: [], pool: {} },
   groups: { items: [] },
   contextPlans: { items: [] },
   usageDays: 30,
@@ -1023,15 +1114,20 @@ const STATUS_LABELS = {
   failed: '失败',
   cancelled: '已取消',
   completed: '已完成',
-  running: '运行中'
+  running: '运行中',
+  online: '在线',
+  offline: '离线',
+  healthy: '双节点正常',
+  degraded: '部分异常',
+  unconfigured: '未配置'
 };
 
 function statusTone(value) {
   const status = String(value || '').toLowerCase();
-  if (['committed', 'completed', 'succeeded', 'running', 'up', 'enabled'].includes(status)) return 'success';
+  if (['committed', 'completed', 'succeeded', 'running', 'up', 'enabled', 'online', 'healthy'].includes(status)) return 'success';
   if (status.startsWith('up ')) return 'success';
-  if (['failed', 'cancelled', 'disabled', 'error'].includes(status)) return 'danger';
-  if (['ambiguous', 'pending'].includes(status)) return 'warning';
+  if (['failed', 'cancelled', 'disabled', 'error', 'offline'].includes(status)) return 'danger';
+  if (['ambiguous', 'pending', 'degraded'].includes(status)) return 'warning';
   if (status === 'sending') return 'info';
   return '';
 }
@@ -1190,6 +1286,68 @@ function renderOverview() {
   document.querySelector('#nav-sandbox-count').textContent = number(sandboxItems.length);
   document.querySelector('#nav-sticker-count').textContent = number(stickerCounts.total);
   document.querySelector('#nav-media-count').textContent = number((state.media.counts || {}).total);
+}
+
+function databaseRoleLabel(node) {
+  if (node.status !== 'online') return '角色未知';
+  if (node.role === 'primary') return node.writable ? '主库 · 可写' : '主库 · 只读';
+  if (node.role === 'secondary') return '备用库 · 只读';
+  return node.writable ? '可写节点' : '只读节点';
+}
+
+function databaseLag(node) {
+  if (node.status !== 'online' || node.role !== 'secondary') return '-';
+  const seconds = Number(node.replication_lag_seconds);
+  const bytes = Number(node.replication_lag_bytes);
+  if ((!Number.isFinite(seconds) || seconds <= 0.001) && (!Number.isFinite(bytes) || bytes <= 0)) {
+    return '已同步';
+  }
+  const timePart = Number.isFinite(seconds) ? `${seconds.toFixed(seconds >= 1 ? 1 : 3)} 秒` : '-';
+  const bytePart = Number.isFinite(bytes) && bytes > 0 ? ` · ${fmtBytes(bytes)}` : '';
+  return `${timePart}${bytePart}`;
+}
+
+function renderDatabases() {
+  const databaseState = state.databases || {};
+  const nodes = databaseState.nodes || [];
+  const online = nodes.filter((node) => node.status === 'online').length;
+  const pool = databaseState.pool || {};
+  document.querySelector('#nav-database-count').textContent = nodes.length
+    ? `${online}/${nodes.length}`
+    : '0';
+  document.querySelector('#database-overall').innerHTML = statusBadge(
+    databaseState.overall || 'unconfigured'
+  );
+  document.querySelector('#database-checked-at').textContent = databaseState.checked_at
+    ? `检查于 ${fmt(databaseState.checked_at)}`
+    : '尚未检查';
+
+  document.querySelector('#database-grid').innerHTML = nodes.length
+    ? nodes.map((node) => (
+      `<article class="database-card ${node.status === 'online' ? '' : 'offline'}">` +
+      `<div class="database-card-head"><div class="database-identity">` +
+      `<span class="database-icon">${icon('database')}</span><div><strong>${esc(node.name)}</strong>` +
+      `<code>${esc(node.host)}:${esc(node.port)}</code></div></div>` +
+      statusBadge(node.status) + `</div>` +
+      `<div class="database-facts">` +
+      `<div class="database-fact"><span>角色</span><strong>${esc(databaseRoleLabel(node))}</strong></div>` +
+      `<div class="database-fact"><span>连接延迟</span><strong>${node.latency_ms === null || node.latency_ms === undefined ? '-' : `${esc(node.latency_ms)} ms`}</strong></div>` +
+      `<div class="database-fact"><span>数据库大小</span><strong>${esc(fmtBytes(node.database_size_bytes))}</strong></div>` +
+      `<div class="database-fact"><span>复制延迟</span><strong>${esc(databaseLag(node))}</strong></div>` +
+      `<div class="database-fact"><span>PostgreSQL</span><strong>${esc(node.server_version || '-')}</strong></div>` +
+      `<div class="database-fact"><span>写入状态</span><strong>${node.writable ? '接受写入' : '不接受写入'}</strong></div>` +
+      `</div>${node.error ? `<p class="database-error">${esc(node.error)}</p>` : ''}</article>`
+    )).join('')
+    : `<article class="database-card offline"><div class="database-card-head"><div class="database-identity">` +
+      `<span class="database-icon">${icon('database')}</span><div><strong>没有数据库节点</strong>` +
+      `<span class="subtle">PostgreSQL 尚未配置</span></div></div>${statusBadge('unconfigured')}</div></article>`;
+
+  document.querySelector('#pool-size').textContent = pool.size === undefined ? '--' : number(pool.size);
+  document.querySelector('#pool-available').textContent = pool.available === undefined ? '--' : number(pool.available);
+  document.querySelector('#pool-waiting').textContent = pool.waiting === undefined ? '--' : number(pool.waiting);
+  document.querySelector('#pool-range').textContent = pool.min_size === undefined
+    ? '--'
+    : `${number(pool.min_size)} - ${number(pool.max_size)}`;
 }
 
 function renderTasks() {
@@ -1556,6 +1714,7 @@ function renderAll() {
   renderDeliveries();
   renderUsage();
   renderContextPlans();
+  renderDatabases();
   renderSandboxes();
   renderStickers();
   renderMedia();
@@ -1573,6 +1732,7 @@ function resourcePath(resource) {
     sandboxes: '/sandboxes',
     stickers: '/stickers',
     media: '/media',
+    databases: '/databases',
     groups: '/group-models',
     contextPlans: '/context-plans'
   };
@@ -1609,6 +1769,9 @@ function applyResource(resource, payload, { force = false } = {}) {
     state.media = payload;
     renderMedia();
     renderOverview();
+  } else if (resource === 'databases') {
+    state.databases = payload;
+    renderDatabases();
   } else if (resource === 'groups') {
     state.groups = payload;
     renderGroups({ force });
@@ -1642,7 +1805,7 @@ async function load() {
   setLoading(true);
   clearError();
   try {
-    const [overview, deliveries, usage, tasks, sandboxes, stickers, media, groups, contextPlans] = await Promise.all([
+    const [overview, deliveries, usage, tasks, sandboxes, stickers, media, databases, groups, contextPlans] = await Promise.all([
       api('/overview'),
       api('/deliveries'),
       api(`/usage?days=${state.usageDays}`),
@@ -1650,6 +1813,7 @@ async function load() {
       api('/sandboxes'),
       api('/stickers'),
       api('/media'),
+      api('/databases'),
       api('/group-models'),
       api('/context-plans')
     ]);
@@ -1660,11 +1824,12 @@ async function load() {
     state.sandboxes = sandboxes;
     state.stickers = stickers;
     state.media = media;
+    state.databases = databases;
     state.groups = groups;
     state.contextPlans = contextPlans;
     chartRows = state.usage;
     const loadedAt = Date.now();
-    ['overview', 'deliveries', 'usage', 'tasks', 'sandboxes', 'stickers', 'media', 'groups', 'contextPlans'].forEach((resource) => {
+    ['overview', 'deliveries', 'usage', 'tasks', 'sandboxes', 'stickers', 'media', 'databases', 'groups', 'contextPlans'].forEach((resource) => {
       refreshedAt[resource] = loadedAt;
     });
     renderAll();
@@ -1687,18 +1852,20 @@ const resourceIntervals = {
   sandboxes: 5000,
   stickers: 10000,
   media: 10000,
+  databases: 10000,
   groups: 60000,
   contextPlans: 5000
 };
 
 const viewResources = {
-  overview: ['deliveries', 'usage', 'sandboxes', 'stickers', 'media', 'groups'],
+  overview: ['deliveries', 'usage', 'sandboxes', 'stickers', 'media', 'databases', 'groups'],
   deliveries: ['deliveries'],
   usage: ['usage'],
   tasks: ['tasks'],
   sandboxes: ['sandboxes'],
   stickers: ['stickers'],
   media: ['media'],
+  databases: ['databases'],
   'group-models': ['groups'],
   'context-plans': ['contextPlans'],
   models: ['overview']
