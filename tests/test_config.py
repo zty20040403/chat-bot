@@ -37,6 +37,7 @@ class SettingsGroupFilterTests(unittest.TestCase):
 
         self.assertFalse(settings.media_enabled)
         self.assertEqual(settings.vision_profile, "gpt-5.6-luna")
+        self.assertFalse(settings.vision_auto_describe)
         self.assertEqual(settings.media_max_vision_bytes, 20 * 1024 * 1024)
 
     def test_disabled_groups_override_allowlist(self) -> None:

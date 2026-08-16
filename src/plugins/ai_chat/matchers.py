@@ -83,5 +83,6 @@ sticker_status = on_command(
 mention_ai = on_message(rule=to_me(), priority=20, block=True)
 canonical_ingest_tracker = on_message(priority=0, block=False)
 group_activity_tracker = on_message(priority=1, block=False)
+image_auto_description = on_message(priority=70, block=False)
 proactive_chat = on_message(priority=80, block=False)
 group_context_recorder = on_message(priority=90, block=False)

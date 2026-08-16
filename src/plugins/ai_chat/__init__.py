@@ -174,6 +174,7 @@ from .matchers import (
     clear_data,
     group_activity_tracker,
     group_context_recorder,
+    image_auto_description,
     image_ocr,
     max_style_command,
     memory_command,
@@ -299,7 +300,11 @@ def _image_cache_key(event: MessageEvent) -> str:
     return f"private:{event.user_id}"
 
 
-def _indexed_image_sources(raw_message: object) -> list[tuple[int, str]]:
+def _indexed_image_sources(
+    raw_message: object,
+    *,
+    ordinary_only: bool = False,
+) -> list[tuple[int, str]]:
     if isinstance(raw_message, Message):
         items: list[object] = list(raw_message)
     elif isinstance(raw_message, list):
@@ -318,6 +323,13 @@ def _indexed_image_sources(raw_message: object) -> list[tuple[int, str]]:
         else:
             continue
         if segment_type not in {"image", "mface"}:
+            continue
+        is_sticker = (
+            segment_type == "mface"
+            or str(data.get("subType") or data.get("sub_type") or "") == "1"
+            or "表情" in str(data.get("summary") or "")
+        )
+        if ordinary_only and is_sticker:
             continue
         source = str(data.get("url") or "").strip()
         if source:
@@ -4758,6 +4770,46 @@ async def handle_group_activity(event: MessageEvent) -> None:
         recent_images.record(_image_cache_key(event), sources)
     if contains_voice(event.original_message):
         recent_voices.record(_voice_cache_key(event), event.message_id)
+
+
+@image_auto_description.handle()
+async def handle_image_auto_description(event: MessageEvent) -> None:
+    if not settings.vision_auto_describe or vision_worker is None:
+        return
+    if event.user_id == event.self_id:
+        return
+    if isinstance(event, GroupMessageEvent) and not _is_group_enabled(event.group_id):
+        return
+    if event.original_message.extract_plain_text().strip():
+        return
+    source_items = _indexed_image_sources(
+        event.original_message,
+        ordinary_only=True,
+    )
+    if not source_items:
+        return
+    segment_index, source_url = source_items[0]
+    try:
+        result = await vision_worker.submit_and_wait(
+            scope_key=scope_from_event(event).key,
+            native_message_id=event.message_id,
+            segment_index=segment_index,
+            requester_native_user_id=event.user_id,
+            source_url=source_url,
+            mode="summary",
+            wait_seconds=min(settings.media_timeout_seconds, 45),
+        )
+    except (OSError, RuntimeError, ValueError, DatabaseError) as exc:
+        logger.warning(f"Automatic image introduction failed: {exc}")
+        return
+    if result is None:
+        return
+    await _finish_safely(
+        image_auto_description,
+        _reply_message(event, result.summary),
+        "automatic image introduction",
+        retry_on_timeout=True,
+    )
 
 
 @proactive_chat.handle()

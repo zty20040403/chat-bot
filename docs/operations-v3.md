@@ -80,6 +80,7 @@ profile 若声明不支持工具，机器人仍能普通回答，但不会给该
 AI_MEDIA_ENABLED=true
 AI_MEDIA_ROOT=/var/lib/qq-deepseek-bot/media
 AI_VISION_PROFILE=gpt-5.6-luna
+AI_VISION_AUTO_DESCRIBE=false
 AI_MEDIA_MAX_SOURCE_MB=100
 AI_VISION_MAX_IMAGE_MB=20
 AI_MEDIA_PREPARE_THRESHOLD_MB=1
@@ -96,6 +97,8 @@ AI_MEDIA_WORKER_CONCURRENCY=2
 `view_image(mode=detail)` 会根据当前、回复或最近图片的地址重新调用 Luna。GIF 和
 过大的图片只在临时目录提取、压缩首帧，识别结束后删除。普通图片没有 Blob、分析表或
 历史检索入口。
+`AI_VISION_AUTO_DESCRIBE=true` 时，单独发送的普通图片会自动得到十几字简介；带文字或
+@机器人的图片不会触发这条旁路，而是继续由 Agent Tool Call 处理。
 
 QQ 表情使用独立持久任务队列，模型可调用 `find_stickers` 和 `send_sticker`。安全表情
 在所有群之间共用同一库存与全局向量索引；指定标签没有匹配时返回“没有这个表情”。

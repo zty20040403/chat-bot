@@ -141,6 +141,7 @@ class Settings:
     media_enabled: bool
     media_root: str
     vision_profile: str
+    vision_auto_describe: bool
     media_max_source_bytes: int
     media_max_vision_bytes: int
     media_prepare_threshold_bytes: int
@@ -397,6 +398,10 @@ class Settings:
             vision_profile=(
                 os.getenv("AI_VISION_PROFILE", "gpt-5.6-luna").strip()
                 or "gpt-5.6-luna"
+            ),
+            vision_auto_describe=_get_bool(
+                "AI_VISION_AUTO_DESCRIBE",
+                False,
             ),
             media_max_source_bytes=max(
                 _get_int("AI_MEDIA_MAX_SOURCE_MB", 100), 1
