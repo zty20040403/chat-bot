@@ -198,7 +198,7 @@ from .matchers import (
 SEND_RETRY_DELAY_SECONDS = 2.0
 SEND_RETRY_MAX_CHARS = 800
 TURN_PROMPT_VERSION = "qqbot-turn-v7"
-BOT_VERSION = "0.5.16"
+BOT_VERSION = "0.5.17"
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 proactive_check_gate = ProactiveCheckGate()
 
@@ -342,6 +342,35 @@ def _indexed_image_sources(
         if source:
             sources.append((index, source))
     return sources
+
+
+async def _refresh_vision_source_url(
+    native_message_id: str,
+    segment_index: int,
+) -> str | None:
+    try:
+        message_id = int(native_message_id)
+    except (TypeError, ValueError):
+        return None
+    bot = next(
+        (candidate for candidate in get_bots().values() if isinstance(candidate, Bot)),
+        None,
+    )
+    if bot is None:
+        return None
+    raw = await bot.get_msg(message_id=message_id)
+    source_items = _indexed_image_sources(
+        raw.get("message") if isinstance(raw, dict) else None
+    )
+    selected = next(
+        (item for item in source_items if item[0] == int(segment_index)),
+        None,
+    )
+    return selected[1] if selected is not None else None
+
+
+if vision_worker is not None:
+    vision_worker.set_source_resolver(_refresh_vision_source_url)
 
 
 def _voice_cache_key(event: MessageEvent) -> str:
@@ -2133,6 +2162,8 @@ async def _ask_ai(
                             "media_handle": item.handle,
                             "summary": item.summary,
                             "description": item.description,
+                            "subjects": list(item.subjects),
+                            "actions": list(item.actions),
                             "emotion": list(item.emotions),
                             "usage": list(item.usage),
                             "is_sticker": item.is_sticker,

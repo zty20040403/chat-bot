@@ -1,13 +1,20 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 from src.plugins.ai_chat.delivery import DeliveryStore
-from src.plugins.ai_chat.vision_worker import VisionJobError, VisionWorker
+from src.plugins.ai_chat.vision_worker import (
+    VisionJob,
+    VisionJobError,
+    VisionResult,
+    VisionWorker,
+)
 
 
 class SQLiteDatabase:
@@ -124,6 +131,60 @@ class VisionWorkerParsingTests(unittest.TestCase):
             stored = deliveries.recent_summaries(limit=5)
             self.assertEqual(len(stored), 1)
             self.assertEqual(stored[0].reply_to_native_message_id, "99")
+
+
+class VisionWorkerCacheTests(unittest.IsolatedAsyncioTestCase):
+    async def test_duplicate_analysis_uses_one_model_call_then_cache(self) -> None:
+        worker = VisionWorker.__new__(VisionWorker)
+        worker.cache_seconds = 600
+        worker.cache_entries = 32
+        worker._analysis_cache = {}
+        worker._analysis_inflight = {}
+        worker._cache_lock = asyncio.Lock()
+        worker._cache_hits = 0
+        worker._cache_misses = 0
+        worker._deduplicated_requests = 0
+        result = VisionResult(
+            summary="终端报错截图",
+            description="终端显示连接超时。",
+            extracted_text="timeout",
+            observations=(),
+            safety="safe",
+            mode="summary",
+        )
+
+        async def analyze(*_args):
+            await asyncio.sleep(0.01)
+            return result
+
+        worker._request_analysis = AsyncMock(side_effect=analyze)
+        job = VisionJob(1, "99", 0, "https://gchat.qpic.cn/a", "summary", "", 1)
+        first, second = await asyncio.gather(
+            worker._analyze_cached("same", job, b"image", "image/png"),
+            worker._analyze_cached("same", job, b"image", "image/png"),
+        )
+        await asyncio.sleep(0)
+        third = await worker._analyze_cached("same", job, b"image", "image/png")
+
+        self.assertEqual((first, second, third), (result, result, result))
+        self.assertEqual(worker._request_analysis.await_count, 1)
+        self.assertEqual(worker._deduplicated_requests, 1)
+        self.assertEqual(worker._cache_hits, 1)
+
+    async def test_source_resolver_returns_fresh_qq_url(self) -> None:
+        worker = VisionWorker.__new__(VisionWorker)
+        worker._source_resolver = AsyncMock(
+            return_value="https://multimedia.nt.qq.com.cn/fresh.png"
+        )
+        job = VisionJob(1, "99", 2, "https://gchat.qpic.cn/old", "detail", "", 1)
+
+        refreshed = await worker._refresh_source(job)
+
+        self.assertEqual(
+            refreshed,
+            "https://multimedia.nt.qq.com.cn/fresh.png",
+        )
+        worker._source_resolver.assert_awaited_once_with("99", 2)
 
 
 if __name__ == "__main__":

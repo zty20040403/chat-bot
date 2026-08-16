@@ -25,6 +25,8 @@ class MediaLibraryParsingTests(unittest.TestCase):
                     "summary": "卷毛小狗悠闲躺窝",
                     "description": "棕色卷毛小狗四脚朝天地躺在宠物窝中。",
                     "text": "",
+                    "subjects": ["卷毛小狗", "宠物窝"],
+                    "actions": ["躺着"],
                     "emotion": ["放松", "可爱"],
                     "usage": ["卖萌", "表达惬意"],
                     "is_sticker": False,
@@ -38,6 +40,8 @@ class MediaLibraryParsingTests(unittest.TestCase):
 
         self.assertEqual(result["summary"], "卷毛小狗悠闲躺窝")
         self.assertEqual(result["emotion"], ["放松", "可爱"])
+        self.assertEqual(result["subjects"], ["卷毛小狗", "宠物窝"])
+        self.assertEqual(result["actions"], ["躺着"])
         self.assertEqual(result["safety"], "safe")
 
     def test_invalid_or_incomplete_response_is_rejected(self) -> None:
@@ -196,6 +200,42 @@ class MediaLibraryParsingTests(unittest.TestCase):
         )
 
         self.assertGreater(orange_cat, generic_cat)
+
+    def test_structured_subject_and_action_tags_have_highest_weight(self) -> None:
+        exact = MediaRecord(
+            media_id=1,
+            handle="media#1",
+            summary="聊天表情",
+            description="",
+            extracted_text="",
+            emotions=(),
+            usage=(),
+            is_sticker=True,
+            safety="safe",
+            storage_path=Path("unused"),
+            mime_type="image/png",
+            subjects=("橘猫",),
+            actions=("挥拳",),
+        )
+        broad = MediaRecord(
+            media_id=2,
+            handle="media#2",
+            summary="橘猫在画面里",
+            description="",
+            extracted_text="",
+            emotions=(),
+            usage=(),
+            is_sticker=True,
+            safety="safe",
+            storage_path=Path("unused"),
+            mime_type="image/png",
+        )
+        terms = MediaLibrary._sticker_query_terms("橘猫挥拳")
+
+        self.assertGreater(
+            MediaLibrary._sticker_relevance(exact, terms),
+            MediaLibrary._sticker_relevance(broad, terms),
+        )
 
 
 if __name__ == "__main__":

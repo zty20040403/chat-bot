@@ -16,6 +16,7 @@ from .legacy_migration import (
     snapshot_report,
     verify_legacy_snapshot,
 )
+from .media_cleanup import LegacyMediaCleanup
 from .schema import HEAD_REVISION
 
 
@@ -55,6 +56,14 @@ def main(argv: list[str] | None = None) -> int:
     verify_parser.add_argument("--state-dir", type=Path, required=True)
     verify_parser.add_argument("--report", type=Path)
 
+    cleanup_parser = subcommands.add_parser(
+        "cleanup-legacy-media",
+        help="preview or explicitly remove inert ordinary-image media",
+    )
+    cleanup_parser.add_argument("--apply", action="store_true")
+    cleanup_parser.add_argument("--confirm", default="")
+    cleanup_parser.add_argument("--report", type=Path)
+
     args = parser.parse_args(argv)
     try:
         if args.command == "upgrade":
@@ -71,6 +80,24 @@ def main(argv: list[str] | None = None) -> int:
             finally:
                 database.close()
             print(f"PostgreSQL ready: schema={_schema()} revision={HEAD_REVISION}")
+            return 0
+        if args.command == "cleanup-legacy-media":
+            database = PostgresDatabase(_dsn(), schema=_schema())
+            try:
+                database.require_revision(HEAD_REVISION)
+                cleanup = LegacyMediaCleanup(
+                    database,
+                    media_root=_required_path("AI_MEDIA_ROOT"),
+                    archive_root=_optional_path("AI_ARCHIVE_ROOT"),
+                )
+                report = (
+                    cleanup.apply(args.confirm)
+                    if args.apply
+                    else cleanup.preview()
+                )
+            finally:
+                database.close()
+            _emit_report(report, args.report)
             return 0
 
         snapshot = capture_legacy_snapshot(args.state_dir)
@@ -112,6 +139,18 @@ def _dsn() -> str:
 
 def _schema() -> str:
     return os.getenv("AI_POSTGRES_SCHEMA", "qq_bot").strip() or "qq_bot"
+
+
+def _required_path(name: str) -> Path:
+    value = os.getenv(name, "").strip()
+    if not value:
+        raise RuntimeError(f"{name} is required")
+    return Path(value)
+
+
+def _optional_path(name: str) -> Path | None:
+    value = os.getenv(name, "").strip()
+    return Path(value) if value else None
 
 
 def _emit_report(report: dict[str, object], path: Path | None) -> None:

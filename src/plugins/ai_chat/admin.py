@@ -38,6 +38,7 @@ class AdminServices:
     sandbox_manager: Any = None
     sticker_inventory: Any = None
     media_library: Any = None
+    media_cleanup: Any = None
     vision_worker: Any = None
     turn_journal: Any = None
     database: Any = None
@@ -49,6 +50,10 @@ class ModelSelectionRequest(BaseModel):
 
 class GroupEnabledRequest(BaseModel):
     enabled: bool
+
+
+class CleanupConfirmationRequest(BaseModel):
+    confirmation_token: str
 
 
 class AdminEventBroker:
@@ -553,6 +558,17 @@ def register_admin(
                 if services.vision_worker is not None
                 else {"counts": {}, "jobs": []}
             )
+            cleanup = (
+                services.media_cleanup.preview()
+                if services.media_cleanup is not None
+                else {
+                    "candidate_count": 0,
+                    "candidate_bytes": 0,
+                    "ordinary_links": 0,
+                    "confirmation_token": "",
+                    "recent_runs": [],
+                }
+            )
         except (OSError, RuntimeError, TypeError, ValueError) as exc:
             return {
                 "counts": {},
@@ -566,9 +582,27 @@ def register_admin(
         return {
             **snapshot,
             "vision": vision,
+            "cleanup": cleanup,
             "configured": True,
             "available": True,
         }
+
+    @router.delete("/api/media/legacy-images")
+    async def cleanup_legacy_images(
+        confirmation: CleanupConfirmationRequest,
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
+        authorize(authorization)
+        if services.media_cleanup is None:
+            raise HTTPException(status_code=503, detail="旧图片清理服务不可用")
+        try:
+            report = services.media_cleanup.apply(
+                confirmation.confirmation_token,
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)[:500]) from None
+        event_broker.publish("media", "overview")
+        return {"ok": True, **report}
 
     @router.get("/api/context-plans")
     def context_plans(

@@ -42,6 +42,8 @@ VISION_SYSTEM_PROMPT = """你是 QQ 机器人后台的图片理解服务。
 - summary：8 到 20 个中文字的简短标签；
 - description：一到两句准确的中文画面描述；
 - text：图片中可辨认的关键文字，没有则为空字符串；
+- subjects：主体标签字符串数组，例如猫、女孩、终端；
+- actions：动作标签字符串数组，例如挥手、哭、摊手；
 - emotion：中文情绪字符串数组；
 - usage：适合发送这张图的聊天场景字符串数组；
 - is_sticker：它是否适合当聊天表情包；
@@ -115,6 +117,8 @@ class MediaRecord:
     storage_path: Path
     mime_type: str
     score: float = 0.0
+    subjects: tuple[str, ...] = ()
+    actions: tuple[str, ...] = ()
 
 
 class MediaLibrary:
@@ -525,16 +529,19 @@ class MediaLibrary:
                 """
                 INSERT INTO media_analysis (
                     media_id, vision_profile, vision_model, summary,
-                    description, extracted_text, emotions_json, usage_json,
+                    description, extracted_text, subjects_json, actions_json,
+                    emotions_json, usage_json,
                     is_sticker, contains_person, contains_private_info,
                     safety, raw_response_json, content_hash, analyzed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(media_id) DO UPDATE SET
                     vision_profile = EXCLUDED.vision_profile,
                     vision_model = EXCLUDED.vision_model,
                     summary = EXCLUDED.summary,
                     description = EXCLUDED.description,
                     extracted_text = EXCLUDED.extracted_text,
+                    subjects_json = EXCLUDED.subjects_json,
+                    actions_json = EXCLUDED.actions_json,
                     emotions_json = EXCLUDED.emotions_json,
                     usage_json = EXCLUDED.usage_json,
                     is_sticker = EXCLUDED.is_sticker,
@@ -552,6 +559,8 @@ class MediaLibrary:
                     analysis["summary"],
                     analysis["description"],
                     analysis["text"],
+                    json.dumps(analysis["subjects"], ensure_ascii=False),
+                    json.dumps(analysis["actions"], ensure_ascii=False),
                     json.dumps(analysis["emotion"], ensure_ascii=False),
                     json.dumps(analysis["usage"], ensure_ascii=False),
                     int(bool(analysis["is_sticker"])),
@@ -676,7 +685,8 @@ class MediaLibrary:
                     blob.media_id, blob.storage_path, blob.mime_type,
                     blob.sha256, blob.byte_size, blob.archive_path,
                     analysis.summary, analysis.description,
-                    analysis.extracted_text, analysis.emotions_json,
+                    analysis.extracted_text, analysis.subjects_json,
+                    analysis.actions_json, analysis.emotions_json,
                     analysis.usage_json, analysis.is_sticker, analysis.safety
                 FROM message_media AS link
                 JOIN media_blobs AS blob ON blob.media_id = link.media_id
@@ -692,6 +702,8 @@ class MediaLibrary:
                       ? = '' OR analysis.summary ILIKE ?
                       OR analysis.description ILIKE ?
                       OR analysis.extracted_text ILIKE ?
+                      OR analysis.subjects_json ILIKE ?
+                      OR analysis.actions_json ILIKE ?
                       OR analysis.emotions_json ILIKE ?
                       OR analysis.usage_json ILIKE ?
                   )
@@ -702,6 +714,8 @@ class MediaLibrary:
                     scope.key,
                     int(stickers_only),
                     cleaned,
+                    wildcard,
+                    wildcard,
                     wildcard,
                     wildcard,
                     wildcard,
@@ -772,10 +786,11 @@ class MediaLibrary:
             term_groups.append(
                 "(analysis.summary ILIKE ? OR analysis.description ILIKE ? "
                 "OR analysis.extracted_text ILIKE ? "
+                "OR analysis.subjects_json ILIKE ? OR analysis.actions_json ILIKE ? "
                 "OR analysis.emotions_json ILIKE ? OR analysis.usage_json ILIKE ?)"
             )
             wildcard = f"%{term}%"
-            term_parameters.extend([wildcard] * 5)
+            term_parameters.extend([wildcard] * 7)
         term_filter = (
             "AND (" + " OR ".join(term_groups) + ")"
             if term_groups
@@ -789,7 +804,8 @@ class MediaLibrary:
                 SELECT blob.media_id, blob.storage_path, blob.mime_type,
                        blob.sha256, blob.byte_size, blob.archive_path,
                        analysis.summary, analysis.description,
-                       analysis.extracted_text, analysis.emotions_json,
+                       analysis.extracted_text, analysis.subjects_json,
+                       analysis.actions_json, analysis.emotions_json,
                        analysis.usage_json, analysis.is_sticker, analysis.safety
                 FROM media_blobs AS blob
                 JOIN media_analysis AS analysis ON analysis.media_id = blob.media_id
@@ -863,10 +879,19 @@ class MediaLibrary:
                 continue
             if not self._record_matches_sticker_groups(record, required_groups):
                 continue
+            lexical_score = self._sticker_relevance(
+                record,
+                self._sticker_query_terms(cleaned),
+            )
+            combined_score = (
+                0.7 * lexical_score + 0.3 * hit.score
+                if lexical_score > 0
+                else 0.72 * hit.score
+            )
             existing = by_id.get(media_id)
-            if existing is None or hit.score > existing.score:
+            if existing is None or combined_score > existing.score:
                 by_id[media_id] = MediaRecord(
-                    **{**record.__dict__, "score": hit.score}
+                    **{**record.__dict__, "score": min(combined_score, 1.0)}
                 )
         return sorted(
             by_id.values(),
@@ -882,7 +907,8 @@ class MediaLibrary:
                 SELECT blob.media_id, blob.storage_path, blob.mime_type,
                        blob.sha256, blob.byte_size, blob.archive_path,
                        analysis.summary, analysis.description,
-                       analysis.extracted_text, analysis.emotions_json,
+                       analysis.extracted_text, analysis.subjects_json,
+                       analysis.actions_json, analysis.emotions_json,
                        analysis.usage_json, analysis.is_sticker, analysis.safety
                 FROM media_blobs AS blob
                 JOIN media_analysis AS analysis ON analysis.media_id = blob.media_id
@@ -923,7 +949,8 @@ class MediaLibrary:
                 SELECT blob.media_id, blob.storage_path, blob.mime_type,
                        blob.sha256, blob.byte_size, blob.archive_path,
                        analysis.summary, analysis.description,
-                       analysis.extracted_text, analysis.emotions_json,
+                       analysis.extracted_text, analysis.subjects_json,
+                       analysis.actions_json, analysis.emotions_json,
                        analysis.usage_json, analysis.is_sticker, analysis.safety
                 FROM media_blobs AS blob
                 JOIN media_analysis AS analysis ON analysis.media_id = blob.media_id
@@ -958,7 +985,8 @@ class MediaLibrary:
                 SELECT blob.media_id, blob.storage_path, blob.mime_type,
                        blob.sha256, blob.byte_size, blob.archive_path,
                        analysis.summary, analysis.description,
-                       analysis.extracted_text, analysis.emotions_json,
+                       analysis.extracted_text, analysis.subjects_json,
+                       analysis.actions_json, analysis.emotions_json,
                        analysis.usage_json, analysis.is_sticker, analysis.safety
                 FROM message_media AS link
                 JOIN media_blobs AS blob ON blob.media_id = link.media_id
@@ -1066,6 +1094,8 @@ class MediaLibrary:
                 """
                 SELECT blob.media_id, blob.sha256, blob.mime_type, blob.byte_size,
                        blob.last_seen_at, analysis.summary, analysis.safety,
+                       analysis.subjects_json, analysis.actions_json,
+                       analysis.emotions_json, analysis.usage_json,
                        analysis.is_sticker, analysis.vision_model,
                        COALESCE(stickers.enabled, 0) AS enabled,
                        COALESCE(stickers.banned, 0) AS banned,
@@ -1325,6 +1355,7 @@ class MediaLibrary:
                 """
                 SELECT DISTINCT link.scope_key, analysis.summary,
                        analysis.description, analysis.extracted_text,
+                       analysis.subjects_json, analysis.actions_json,
                        analysis.emotions_json, analysis.usage_json,
                        analysis.is_sticker
                 FROM message_media AS link
@@ -1343,6 +1374,8 @@ class MediaLibrary:
                     str(row["summary"]),
                     str(row["description"]),
                     str(row["extracted_text"]),
+                    str(row["subjects_json"]),
+                    str(row["actions_json"]),
                     str(row["emotions_json"]),
                     str(row["usage_json"]),
                 )
@@ -1378,6 +1411,8 @@ class MediaLibrary:
             safety=str(row["safety"] or "review"),
             storage_path=storage_path,
             mime_type=str(row["mime_type"] or "application/octet-stream"),
+            subjects=tuple(self._string_list(row.get("subjects_json"))),
+            actions=tuple(self._string_list(row.get("actions_json"))),
         )
 
     @staticmethod
@@ -1388,6 +1423,8 @@ class MediaLibrary:
                 record.summary,
                 record.description,
                 record.extracted_text,
+                json.dumps(record.subjects, ensure_ascii=False),
+                json.dumps(record.actions, ensure_ascii=False),
                 json.dumps(record.emotions, ensure_ascii=False),
                 json.dumps(record.usage, ensure_ascii=False),
             )
@@ -1436,27 +1473,34 @@ class MediaLibrary:
         terms: Sequence[str],
     ) -> float:
         fields = (
-            (record.summary, 3.0),
-            (record.description, 2.0),
-            (record.extracted_text, 1.0),
-            (" ".join(record.emotions), 2.0),
-            (" ".join(record.usage), 2.0),
+            (" ".join(record.subjects), 5.0),
+            (" ".join(record.actions), 4.5),
+            (record.summary, 4.0),
+            (" ".join(record.emotions), 4.0),
+            (" ".join(record.usage), 3.5),
+            (record.description, 2.5),
+            (record.extracted_text, 1.5),
         )
-        score = 0.0
-        for value, weight in fields:
-            normalized = cls._normalize_sticker_text(value)
-            score += sum(weight for term in terms if term in normalized)
-        if terms:
-            primary = terms[0]
-            score += max(
+        if not terms:
+            return 0.0
+        normalized_fields = [
+            (cls._normalize_sticker_text(value), weight)
+            for value, weight in fields
+        ]
+        term_scores = [
+            max(
                 (
-                    weight * 2.0
-                    for value, weight in fields
-                    if primary in cls._normalize_sticker_text(value)
+                    weight / 5.0
+                    for value, weight in normalized_fields
+                    if term in value
                 ),
                 default=0.0,
             )
-        return min(score / 12.0, 1.0)
+            for term in terms
+        ]
+        primary_score = term_scores[0]
+        supporting_score = sum(sorted(term_scores[1:], reverse=True)[:3]) / 3.0
+        return min(primary_score * 0.7 + supporting_score * 0.3, 1.0)
 
     @staticmethod
     def _normalize_sticker_text(value: str) -> str:
@@ -1580,6 +1624,8 @@ class MediaLibrary:
             "summary": summary,
             "description": description,
             "text": str(raw.get("text") or "").strip()[:4000],
+            "subjects": cls._string_list(raw.get("subjects"))[:12],
+            "actions": cls._string_list(raw.get("actions"))[:12],
             "emotion": cls._string_list(raw.get("emotion"))[:12],
             "usage": cls._string_list(raw.get("usage"))[:12],
             "is_sticker": bool(raw.get("is_sticker", False)),

@@ -278,6 +278,10 @@ _DASHBOARD_TEMPLATE = r"""<!doctype html>
           <div class="table-wrap"><table><thead><tr>
             <th>任务</th><th>模式</th><th>状态</th><th>尝试</th><th>错误</th><th>更新时间</th>
           </tr></thead><tbody id="media-job-body"></tbody></table></div>
+          <div class="section-heading compact-heading"><div><h2>旧图片治理</h2><p>仅处理旧架构遗留的普通图片，永久表情不受影响</p></div><div class="heading-actions"><span class="count-label" id="media-cleanup-count">0 个</span><button class="secondary-button danger-action" id="media-cleanup-button" type="button" disabled>清理</button></div></div>
+          <div class="table-wrap"><table><thead><tr>
+            <th>批次</th><th>状态</th><th>候选</th><th>已删除</th><th>空间</th><th>时间</th>
+          </tr></thead><tbody id="media-cleanup-body"></tbody></table></div>
         </section>
 
         <section class="view" id="group-models" hidden>
@@ -740,6 +744,10 @@ main { width: 100%; max-width: 1500px; margin: 0 auto; padding: 24px; }
 }
 
 .secondary-button:hover, .table-action:hover { border-color: var(--border-strong); background: var(--muted); }
+.heading-actions { display: inline-flex; align-items: center; gap: 10px; }
+.danger-action { color: #b91c1c; border-color: #fecaca; }
+.danger-action:hover { color: #991b1b; background: var(--red-soft); border-color: #fca5a5; }
+.danger-action:disabled { color: var(--muted-foreground); cursor: not-allowed; opacity: .55; }
 
 .table-wrap {
   width: 100%;
@@ -1053,6 +1061,15 @@ const esc = (value) => String(value ?? '').replace(
 );
 
 const number = (value) => Number(value || 0).toLocaleString('zh-CN');
+
+function stringList(value) {
+  try {
+    const parsed = Array.isArray(value) ? value : JSON.parse(value || '[]');
+    return Array.isArray(parsed) ? parsed.map((item) => String(item)) : [];
+  } catch (_error) {
+    return [];
+  }
+}
 
 function fmt(timestamp) {
   const value = Number(timestamp);
@@ -1434,6 +1451,8 @@ function renderMedia() {
   const items = data.items || [];
   const stickerJobs = data.jobs || [];
   const vision = data.vision || {};
+  const cache = vision.cache || {};
+  const cleanup = data.cleanup || {};
   const jobs = vision.jobs || [];
   const counts = data.counts || {};
   const visionCounts = vision.counts || {};
@@ -1443,7 +1462,7 @@ function renderMedia() {
     : `${Math.round(Number(visionCounts.success_rate_24h) * 100)}%`;
   const averageLatency = Number(visionCounts.avg_latency_seconds || 0);
   document.querySelector('#media-job-count').textContent =
-    `${number(visionCounts.jobs_24h)} 次/24h · 成功 ${successRate} · 平均 ${averageLatency.toFixed(1)} 秒`;
+    `${number(visionCounts.jobs_24h)} 次/24h · 成功 ${successRate} · 平均 ${averageLatency.toFixed(1)} 秒 · 缓存 ${number(cache.hits)} 命中`;
   if (!data.available) {
     document.querySelector('#media-body').innerHTML = emptyRow(6, data.error || '媒体库未启用');
     document.querySelector('#media-job-body').innerHTML = emptyRow(6, '没有任务数据');
@@ -1452,7 +1471,8 @@ function renderMedia() {
   }
   renderPaged('media', items, 'media-body', 6, (item) => (
     `<tr><td><code>media#${esc(item.media_id)}</code><div class="subtle">${esc((item.sha256 || '').slice(0, 12))}</div></td>` +
-    `<td><span class="truncate-cell" title="${esc(item.summary || '')}">${esc(item.summary || '等待识图')}</span></td>` +
+    `<td><span class="truncate-cell" title="${esc(item.summary || '')}">${esc(item.summary || '等待识图')}</span>` +
+    `<div class="subtle">${esc([...stringList(item.subjects_json), ...stringList(item.actions_json)].slice(0, 4).join(' · ') || '-')}</div></td>` +
     `<td>${esc(item.mime_type)}<div class="subtle">${fmtBytes(item.byte_size)}</div></td>` +
     `<td>${statusBadge(item.safety === 'safe' ? 'enabled' : (item.safety === 'blocked' ? 'danger' : 'pending'), item.safety || '等待')}</td>` +
     `<td><code>${esc(item.vision_model || '-')}</code></td><td>${number(item.times_sent)}</td></tr>`
@@ -1462,6 +1482,35 @@ function renderMedia() {
       `<td>${statusBadge(job.status === 'running' ? 'running' : (job.status === 'failed' ? 'danger' : 'pending'), job.status)}</td>` +
       `<td>${number(job.attempts)}</td><td><span class="truncate-cell" title="${esc(job.last_error || '')}">${esc(job.last_error || '-')}</span></td><td>${fmt(job.updated_at)}</td></tr>`).join('')
     : emptyRow(6, stickerJobs.length ? '识图队列为空；表情后台任务仍在运行' : '当前没有识图任务');
+  const candidateCount = Number(cleanup.candidate_count || 0);
+  document.querySelector('#media-cleanup-count').textContent =
+    `${number(candidateCount)} 个 · ${fmtBytes(cleanup.candidate_bytes)}`;
+  const cleanupButton = document.querySelector('#media-cleanup-button');
+  cleanupButton.disabled = candidateCount <= 0;
+  cleanupButton.dataset.confirmationToken = cleanup.confirmation_token || '';
+  const cleanupRuns = cleanup.recent_runs || [];
+  document.querySelector('#media-cleanup-body').innerHTML = cleanupRuns.length
+    ? cleanupRuns.map((run) => `<tr><td><code>cleanup#${esc(run.cleanup_id)}</code></td>` +
+      `<td>${statusBadge(run.status === 'completed' ? 'success' : (run.status === 'failed' ? 'danger' : 'warning'), run.status)}</td>` +
+      `<td>${number(run.candidate_count)}</td><td>${number(run.deleted_count)}</td>` +
+      `<td>${fmtBytes(run.candidate_bytes)}</td><td>${fmt(run.finished_at || run.requested_at)}</td></tr>`).join('')
+    : emptyRow(6, '还没有执行过旧图片清理');
+}
+
+async function cleanupLegacyMedia(button) {
+  const token = button.dataset.confirmationToken || '';
+  if (!token) return;
+  const supplied = window.prompt(`输入确认码以清理旧普通图片：\n${token}`);
+  if (supplied !== token) return;
+  button.disabled = true;
+  await runAction(
+    () => api('/media/legacy-images', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirmation_token: token })
+    }),
+    ['media', 'overview']
+  );
 }
 
 function groupModelInteractionActive() {
@@ -2079,6 +2128,11 @@ document.addEventListener('click', (event) => {
   const groupVisionButton = event.target.closest('[data-group-vision]');
   if (groupVisionButton && !groupVisionButton.disabled) {
     updateGroupVision(groupVisionButton);
+  }
+
+  const mediaCleanupButton = event.target.closest('#media-cleanup-button');
+  if (mediaCleanupButton && !mediaCleanupButton.disabled) {
+    cleanupLegacyMedia(mediaCleanupButton);
   }
 
   if (event.target.closest('#member-model-close, #member-model-backdrop')) {

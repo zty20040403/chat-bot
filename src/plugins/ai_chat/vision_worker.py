@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import os
 import shutil
 import socket
 import subprocess
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -50,6 +52,8 @@ class VisionJobError(RuntimeError):
 @dataclass(frozen=True)
 class VisionJob:
     job_id: int
+    native_message_id: str
+    segment_index: int
     source_url: str
     mode: str
     question: str
@@ -101,6 +105,8 @@ class VisionWorker:
         lease_seconds: int = 240,
         batch_size: int = 4,
         worker_concurrency: int = 2,
+        cache_seconds: int = 600,
+        cache_entries: int = 256,
         ffmpeg_path: str = "ffmpeg",
     ) -> None:
         self.database = database
@@ -121,10 +127,19 @@ class VisionWorker:
         )
         self.batch_size = min(max(int(batch_size), 1), 20)
         self.worker_concurrency = min(max(int(worker_concurrency), 1), 8)
+        self.cache_seconds = max(int(cache_seconds), 0)
+        self.cache_entries = min(max(int(cache_entries), 1), 2048)
         self.ffmpeg_path = ffmpeg_path.strip() or "ffmpeg"
         self.worker_id = f"{socket.gethostname()}:{os.getpid()}"
         self._wake = asyncio.Event()
         self._closed = False
+        self._source_resolver: Callable[[str, int], Awaitable[str | None]] | None = None
+        self._analysis_cache: dict[str, tuple[float, VisionResult]] = {}
+        self._analysis_inflight: dict[str, asyncio.Task[VisionResult]] = {}
+        self._cache_lock = asyncio.Lock()
+        self._cache_hits = 0
+        self._cache_misses = 0
+        self._deduplicated_requests = 0
 
         profile = self._vision_profile()
         if not profile.capabilities.vision:
@@ -248,6 +263,7 @@ class VisionWorker:
             now = time.monotonic()
             if now - last_cleanup >= 60:
                 await asyncio.to_thread(self.cleanup)
+                await self._prune_analysis_cache()
                 last_cleanup = now
             await asyncio.to_thread(self.flush_completed_deliveries)
             jobs = await asyncio.to_thread(self.claim_jobs)
@@ -299,6 +315,7 @@ class VisionWorker:
                 FROM due
                 WHERE jobs.vision_job_id = due.vision_job_id
                 RETURNING jobs.vision_job_id, jobs.source_url, jobs.mode,
+                          jobs.native_message_id, jobs.segment_index,
                           jobs.question, jobs.attempts
                 """,
                 (
@@ -320,6 +337,8 @@ class VisionWorker:
         return [
             VisionJob(
                 job_id=int(row["vision_job_id"]),
+                native_message_id=str(row["native_message_id"]),
+                segment_index=int(row["segment_index"]),
                 source_url=str(row["source_url"]),
                 mode=str(row["mode"]),
                 question=str(row["question"]),
@@ -329,7 +348,14 @@ class VisionWorker:
         ]
 
     async def _analyze(self, job: VisionJob) -> VisionResult:
-        content, mime_type = await self._download(job.source_url)
+        try:
+            content, mime_type = await self._download(job.source_url)
+        except VisionJobError as original_error:
+            refreshed = await self._refresh_source(job)
+            if not refreshed or refreshed == job.source_url:
+                raise original_error
+            content, mime_type = await self._download(refreshed)
+            await asyncio.to_thread(self._update_source_url, job.job_id, refreshed)
         content, mime_type = await asyncio.to_thread(
             self._prepare_for_vision,
             content,
@@ -337,6 +363,17 @@ class VisionWorker:
         )
         if len(content) > self.max_vision_bytes:
             raise VisionJobError("prepared image exceeds the vision size limit")
+        if job.mode == "detail":
+            return await self._request_analysis(job, content, mime_type)
+        cache_key = self._analysis_cache_key(job, content)
+        return await self._analyze_cached(cache_key, job, content, mime_type)
+
+    async def _request_analysis(
+        self,
+        job: VisionJob,
+        content: bytes,
+        mime_type: str,
+    ) -> VisionResult:
         payload = base64.b64encode(content).decode("ascii")
         profile = self._vision_profile()
         instruction = (
@@ -370,6 +407,117 @@ class VisionWorker:
         )
         raw = str(response.choices[0].message.content or "").strip()
         return self.parse_result(raw, mode=job.mode)
+
+    async def _analyze_cached(
+        self,
+        cache_key: str,
+        job: VisionJob,
+        content: bytes,
+        mime_type: str,
+    ) -> VisionResult:
+        now = time.monotonic()
+        async with self._cache_lock:
+            cached = self._analysis_cache.get(cache_key)
+            if cached is not None and cached[0] > now:
+                self._cache_hits += 1
+                return cached[1]
+            if cached is not None:
+                self._analysis_cache.pop(cache_key, None)
+            task = self._analysis_inflight.get(cache_key)
+            if task is None:
+                self._cache_misses += 1
+                task = asyncio.create_task(
+                    self._request_analysis(job, content, mime_type),
+                    name=f"vision-analysis:{cache_key[:12]}",
+                )
+                self._analysis_inflight[cache_key] = task
+                task.add_done_callback(
+                    lambda completed, key=cache_key: asyncio.create_task(
+                        self._finalize_analysis_task(key, completed)
+                    )
+                )
+            else:
+                self._deduplicated_requests += 1
+        return await asyncio.shield(task)
+
+    async def _finalize_analysis_task(
+        self,
+        cache_key: str,
+        task: asyncio.Task[VisionResult],
+    ) -> None:
+        try:
+            result = task.result()
+        except (asyncio.CancelledError, Exception):
+            result = None
+        async with self._cache_lock:
+            if self._analysis_inflight.get(cache_key) is task:
+                self._analysis_inflight.pop(cache_key, None)
+            if result is not None and self.cache_seconds > 0:
+                self._analysis_cache[cache_key] = (
+                    time.monotonic() + self.cache_seconds,
+                    result,
+                )
+                self._trim_analysis_cache()
+
+    async def _prune_analysis_cache(self) -> None:
+        now = time.monotonic()
+        async with self._cache_lock:
+            self._analysis_cache = {
+                key: value
+                for key, value in self._analysis_cache.items()
+                if value[0] > now
+            }
+            self._trim_analysis_cache()
+
+    def _trim_analysis_cache(self) -> None:
+        overflow = len(self._analysis_cache) - self.cache_entries
+        if overflow <= 0:
+            return
+        oldest = sorted(
+            self._analysis_cache,
+            key=lambda key: self._analysis_cache[key][0],
+        )[:overflow]
+        for key in oldest:
+            self._analysis_cache.pop(key, None)
+
+    async def _refresh_source(self, job: VisionJob) -> str | None:
+        if self._source_resolver is None:
+            return None
+        try:
+            refreshed = await self._source_resolver(
+                job.native_message_id,
+                job.segment_index,
+            )
+        except (OSError, RuntimeError, TypeError, ValueError):
+            return None
+        candidate = str(refreshed or "").strip()
+        return candidate if self._supported_source(candidate) else None
+
+    def _update_source_url(self, job_id: int, source_url: str) -> None:
+        connection = self.database.store_connection()
+        try:
+            connection.execute(
+                """
+                UPDATE vision_jobs
+                SET source_url = ?, updated_at = ?
+                WHERE vision_job_id = ? AND status = 'running'
+                """,
+                (source_url, int(time.time()), int(job_id)),
+            )
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _analysis_cache_key(job: VisionJob, content: bytes) -> str:
+        digest = hashlib.sha256(content).hexdigest()
+        question = " ".join(job.question.split()).casefold()
+        return f"{digest}:{job.mode}:{question}"
+
+    def set_source_resolver(
+        self,
+        resolver: Callable[[str, int], Awaitable[str | None]],
+    ) -> None:
+        self._source_resolver = resolver
 
     async def _download(self, source_url: str) -> tuple[bytes, str]:
         if not self._supported_source(source_url):
@@ -727,12 +875,27 @@ class VisionWorker:
         return {
             "counts": count_payload,
             "profile": self.vision_profile_name,
+            "cache": {
+                "entries": len(self._analysis_cache),
+                "inflight": len(self._analysis_inflight),
+                "hits": self._cache_hits,
+                "misses": self._cache_misses,
+                "deduplicated": self._deduplicated_requests,
+                "ttl_seconds": self.cache_seconds,
+            },
             "jobs": [dict(row) for row in rows],
         }
 
     async def close(self) -> None:
         self._closed = True
         self._wake.set()
+        tasks = tuple(self._analysis_inflight.values())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._analysis_inflight.clear()
+        self._analysis_cache.clear()
 
     def _vision_profile(self) -> ModelProfile:
         return self.model_catalog.resolve(self.vision_profile_name)

@@ -36,6 +36,7 @@ from .long_term_memory import LongTermMemoryStore, MemoryEntry
 from .llm_gateway import LLMGateway
 from .memory import ConversationMemory, GroupContextMemory
 from .media_library import MediaLibrary
+from src.bot_storage.media_cleanup import LegacyMediaCleanup
 from .model_catalog import ModelCatalog
 from .model_preferences import ModelPreferenceStore
 from .ocr import RecentImageStore
@@ -114,6 +115,7 @@ class AppContext:
     browser_manager: BrowserManager | None = None
     rich_renderer: RichMessageRenderer | None = None
     media_library: MediaLibrary | None = None
+    media_cleanup: LegacyMediaCleanup | None = None
     vision_worker: VisionWorker | None = None
     cold_archive: ColdArchiveService | None = None
     _closed: bool = field(default=False, init=False, repr=False)
@@ -533,6 +535,7 @@ def build_app_context(
         )
 
     media_library: MediaLibrary | None = None
+    media_cleanup: LegacyMediaCleanup | None = None
     vision_worker: VisionWorker | None = None
     cold_archive: ColdArchiveService | None = None
     archive_root = (
@@ -582,6 +585,13 @@ def build_app_context(
                 lease_seconds=settings.media_lease_seconds,
                 batch_size=settings.media_batch_size,
                 worker_concurrency=settings.media_worker_concurrency,
+                cache_seconds=settings.vision_cache_seconds,
+                cache_entries=settings.vision_cache_entries,
+            )
+            media_cleanup = LegacyMediaCleanup(
+                database,
+                media_root=media_root,
+                archive_root=archive_root,
             )
         except (OSError, RuntimeError, TypeError, ValueError, DatabaseError) as exc:
             raise RuntimeError(f"Durable media library could not start: {exc}") from exc
@@ -649,6 +659,7 @@ def build_app_context(
         browser_manager=browser_manager,
         rich_renderer=rich_renderer,
         media_library=media_library,
+        media_cleanup=media_cleanup,
         vision_worker=vision_worker,
         cold_archive=cold_archive,
     )
