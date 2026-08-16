@@ -8,7 +8,6 @@ ToolChoice = Union[str, dict[str, Any]]
 WEB_SEARCH_TOOL_NAME = "web_search"
 READ_IMAGE_TEXT_TOOL_NAME = "read_image_text"
 VIEW_IMAGE_TOOL_NAME = "view_image"
-FIND_IMAGES_TOOL_NAME = "find_images"
 FIND_STICKERS_TOOL_NAME = "find_stickers"
 TRANSCRIBE_VOICE_TOOL_NAME = "transcribe_voice"
 REPLY_WITH_VOICE_TOOL_NAME = "reply_with_voice"
@@ -104,9 +103,10 @@ VIEW_IMAGE_TOOL: ToolDefinition = {
     "function": {
         "name": VIEW_IMAGE_TOOL_NAME,
         "description": (
-            "理解当前消息或当前群一条指定消息中的完整图片画面，不只读取文字。"
+            "通过一次性 Luna 识图任务理解当前消息或指定消息的完整图片画面。"
             "用户要求看图、分析截图、解释表情包或询问图片内容时调用。"
-            "未提供 message_handle 时查看当前触发消息；可提供 msg# 句柄查看当前群历史图片。"
+            "普通图片不会存入媒体库；每次 detail 都会根据图片地址重新识别。"
+            "未提供 message_handle 时查看当前、回复或该用户最近发送的图片。"
         ),
         "parameters": {
             "type": "object",
@@ -119,24 +119,17 @@ VIEW_IMAGE_TOOL: ToolDefinition = {
                     "type": "integer",
                     "minimum": 0,
                 },
+                "mode": {
+                    "type": "string",
+                    "enum": ["summary", "detail"],
+                    "description": "summary 生成简短介绍；detail 重新仔细识别细节。",
+                },
+                "question": {
+                    "type": "string",
+                    "maxLength": 2000,
+                    "description": "需要视觉模型重点检查的问题。",
+                },
             },
-            "additionalProperties": False,
-        },
-    },
-}
-
-FIND_IMAGES_TOOL: ToolDefinition = {
-    "type": "function",
-    "function": {
-        "name": FIND_IMAGES_TOOL_NAME,
-        "description": "按画面、文字、情绪或用途搜索当前群已经识别的历史图片。",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "minLength": 1, "maxLength": 500},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 10},
-            },
-            "required": ["query"],
             "additionalProperties": False,
         },
     },
@@ -1074,7 +1067,7 @@ def available_tools(
     if include_image_ocr:
         tools.append(READ_IMAGE_TEXT_TOOL)
     if include_media_tools:
-        tools.extend([VIEW_IMAGE_TOOL, FIND_IMAGES_TOOL, FIND_STICKERS_TOOL])
+        tools.extend([VIEW_IMAGE_TOOL, FIND_STICKERS_TOOL])
     if include_voice_transcription:
         tools.append(TRANSCRIBE_VOICE_TOOL)
     if include_voice_reply:

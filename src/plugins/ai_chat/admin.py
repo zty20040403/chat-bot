@@ -35,6 +35,7 @@ class AdminServices:
     sandbox_manager: Any = None
     sticker_inventory: Any = None
     media_library: Any = None
+    vision_worker: Any = None
     turn_journal: Any = None
     database: Any = None
 
@@ -507,21 +508,33 @@ def register_admin(
                 "counts": {},
                 "items": [],
                 "jobs": [],
+                "vision": {"counts": {}, "jobs": []},
                 "configured": False,
                 "available": False,
             }
         try:
             snapshot = services.media_library.admin_snapshot(limit=limit)
+            vision = (
+                services.vision_worker.admin_snapshot(limit=limit)
+                if services.vision_worker is not None
+                else {"counts": {}, "jobs": []}
+            )
         except (OSError, RuntimeError, TypeError, ValueError) as exc:
             return {
                 "counts": {},
                 "items": [],
                 "jobs": [],
+                "vision": {"counts": {}, "jobs": []},
                 "configured": True,
                 "available": False,
                 "error": str(exc)[:500],
             }
-        return {**snapshot, "configured": True, "available": True}
+        return {
+            **snapshot,
+            "vision": vision,
+            "configured": True,
+            "available": True,
+        }
 
     @router.get("/api/context-plans")
     def context_plans(

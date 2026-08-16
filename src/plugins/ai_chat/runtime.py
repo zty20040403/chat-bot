@@ -55,6 +55,7 @@ from .stickers import configure_learned_sticker_state
 from .tasks import RunningTaskRegistry
 from .turn_journal import TurnJournal
 from .voice import RecentVoiceStore
+from .vision_worker import VisionWorker
 
 
 class RuntimeLogger(Protocol):
@@ -113,6 +114,7 @@ class AppContext:
     browser_manager: BrowserManager | None = None
     rich_renderer: RichMessageRenderer | None = None
     media_library: MediaLibrary | None = None
+    vision_worker: VisionWorker | None = None
     cold_archive: ColdArchiveService | None = None
     _closed: bool = field(default=False, init=False, repr=False)
 
@@ -136,6 +138,7 @@ class AppContext:
             ("browser manager", self.browser_manager),
             ("rich renderer", self.rich_renderer),
             ("media library", self.media_library),
+            ("vision worker", self.vision_worker),
             ("cold archive", self.cold_archive),
         ):
             if resource is None:
@@ -530,6 +533,7 @@ def build_app_context(
         )
 
     media_library: MediaLibrary | None = None
+    vision_worker: VisionWorker | None = None
     cold_archive: ColdArchiveService | None = None
     archive_root = (
         Path(settings.archive_root).expanduser()
@@ -562,6 +566,21 @@ def build_app_context(
                 batch_size=settings.media_batch_size,
                 worker_concurrency=settings.media_worker_concurrency,
                 archive_root=archive_root,
+            )
+            vision_worker = VisionWorker(
+                database,
+                model_catalog=model_catalog,
+                llm_gateway=llm_gateway,
+                vision_profile=settings.vision_profile,
+                max_source_bytes=settings.media_max_source_bytes,
+                max_vision_bytes=settings.media_max_vision_bytes,
+                prepare_threshold_bytes=settings.media_prepare_threshold_bytes,
+                max_edge_pixels=settings.media_max_edge_pixels,
+                timeout_seconds=settings.media_timeout_seconds,
+                max_attempts=settings.media_max_attempts,
+                lease_seconds=settings.media_lease_seconds,
+                batch_size=settings.media_batch_size,
+                worker_concurrency=settings.media_worker_concurrency,
             )
         except (OSError, RuntimeError, TypeError, ValueError, DatabaseError) as exc:
             raise RuntimeError(f"Durable media library could not start: {exc}") from exc
@@ -629,5 +648,6 @@ def build_app_context(
         browser_manager=browser_manager,
         rich_renderer=rich_renderer,
         media_library=media_library,
+        vision_worker=vision_worker,
         cold_archive=cold_archive,
     )

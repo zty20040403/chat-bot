@@ -96,8 +96,8 @@ _DASHBOARD_TEMPLATE = r"""<!doctype html>
             <span data-icon="smile"></span><span>表情包</span><b id="nav-sticker-count">0</b>
           </button>
           <button class="nav-item" type="button" data-view="media"
-            data-title="媒体库" data-subtitle="图片识别、存储与后台任务">
-            <span data-icon="image"></span><span>媒体库</span><b id="nav-media-count">0</b>
+            data-title="视觉与表情" data-subtitle="永久表情库存与临时识图任务">
+            <span data-icon="image"></span><span>视觉与表情</span><b id="nav-media-count">0</b>
           </button>
           <button class="nav-item" type="button" data-view="group-models"
             data-title="群模型" data-subtitle="我自己与其他群友的模型分配">
@@ -269,14 +269,14 @@ _DASHBOARD_TEMPLATE = r"""<!doctype html>
         </section>
 
         <section class="view" id="media" hidden>
-          <div class="section-heading"><div><h2>媒体库</h2><p>h610 Blob、Luna 识图与任务队列</p></div><span class="count-label" id="media-count">0 张</span></div>
+          <div class="section-heading"><div><h2>永久表情库</h2><p>只有 QQ 表情会保存到 h610；普通图片不会进入库存</p></div><span class="count-label" id="media-count">0 个</span></div>
           <div class="table-wrap"><table class="wide-table"><thead><tr>
-            <th>Media</th><th>识图标签</th><th>类型 / 大小</th><th>安全状态</th><th>视觉模型</th><th>发送</th>
+            <th>Sticker</th><th>检索标签</th><th>类型 / 大小</th><th>安全状态</th><th>视觉模型</th><th>发送</th>
           </tr></thead><tbody id="media-body"></tbody></table></div>
           <div class="table-footer" data-pager-wrap="media"></div>
-          <div class="section-heading compact-heading"><div><h2>后台任务</h2><p>等待、运行和最终失败任务</p></div><span class="count-label" id="media-job-count">0 条</span></div>
+          <div class="section-heading compact-heading"><div><h2>临时识图任务</h2><p>Luna 按图片地址即时识别，结果交付后即清理</p></div><span class="count-label" id="media-job-count">0 条</span></div>
           <div class="table-wrap"><table><thead><tr>
-            <th>任务</th><th>类型</th><th>状态</th><th>尝试</th><th>错误</th><th>更新时间</th>
+            <th>任务</th><th>模式</th><th>状态</th><th>尝试</th><th>错误</th><th>更新时间</th>
           </tr></thead><tbody id="media-job-body"></tbody></table></div>
         </section>
 
@@ -1432,10 +1432,13 @@ function renderStickers() {
 function renderMedia() {
   const data = state.media;
   const items = data.items || [];
-  const jobs = data.jobs || [];
+  const stickerJobs = data.jobs || [];
+  const vision = data.vision || {};
+  const jobs = vision.jobs || [];
   const counts = data.counts || {};
-  document.querySelector('#media-count').textContent = `${number(counts.total)} 张 · ${fmtBytes(counts.bytes)}`;
-  document.querySelector('#media-job-count').textContent = `${number(jobs.length)} 条 · ${number(counts.queued)} 处理中 · ${number(counts.failed)} 失败`;
+  const visionCounts = vision.counts || {};
+  document.querySelector('#media-count').textContent = `${number(counts.total)} 个 · ${fmtBytes(counts.bytes)}`;
+  document.querySelector('#media-job-count').textContent = `${number(jobs.length)} 条 · ${number(visionCounts.queued)} 处理中 · ${number(visionCounts.failed)} 失败`;
   if (!data.available) {
     document.querySelector('#media-body').innerHTML = emptyRow(6, data.error || '媒体库未启用');
     document.querySelector('#media-job-body').innerHTML = emptyRow(6, '没有任务数据');
@@ -1448,12 +1451,12 @@ function renderMedia() {
     `<td>${esc(item.mime_type)}<div class="subtle">${fmtBytes(item.byte_size)}</div></td>` +
     `<td>${statusBadge(item.safety === 'safe' ? 'enabled' : (item.safety === 'blocked' ? 'danger' : 'pending'), item.safety || '等待')}</td>` +
     `<td><code>${esc(item.vision_model || '-')}</code></td><td>${number(item.times_sent)}</td></tr>`
-  ), '还没有保存图片');
+  ), '还没有收集到安全表情');
   document.querySelector('#media-job-body').innerHTML = jobs.length
-    ? jobs.map((job) => `<tr><td><code>#${esc(job.job_id)}</code></td><td>${esc(job.job_type)}</td>` +
+    ? jobs.map((job) => `<tr><td><code>vision#${esc(job.vision_job_id)}</code><div class="subtle">${esc(job.scope_key || '')}</div></td><td>${esc(job.mode)}</td>` +
       `<td>${statusBadge(job.status === 'running' ? 'running' : (job.status === 'failed' ? 'danger' : 'pending'), job.status)}</td>` +
       `<td>${number(job.attempts)}</td><td><span class="truncate-cell" title="${esc(job.last_error || '')}">${esc(job.last_error || '-')}</span></td><td>${fmt(job.updated_at)}</td></tr>`).join('')
-    : emptyRow(6, '当前没有等待或失败任务');
+    : emptyRow(6, stickerJobs.length ? '识图队列为空；表情后台任务仍在运行' : '当前没有识图任务');
 }
 
 function groupModelInteractionActive() {

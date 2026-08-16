@@ -167,11 +167,12 @@ OneBot 消息重复到达只会命中原记录，不会覆盖原文。较旧聊�
 重建投影，原始 Message IR 才是事实来源。投影失败时会退回有界原始消息，不会
 推进覆盖游标。群聊、私聊和用户长期记忆严格按 `ConversationScope` 隔离。
 
-启用持久媒体库后，QQ 图片会按 SHA-256 去重保存到 `AI_MEDIA_ROOT`，图片元数据、
-识别结果和可重试任务保存在 PostgreSQL。后台固定使用 `AI_VISION_PROFILE` 做完整
-画面理解，聊天模型通过 `view_image`、`find_images`、`find_stickers` 和
-`send_sticker` 使用结果。图片检索严格按当前群隔离；真人、聊天截图、二维码和含
-隐私内容的图片不会自动进入可发送表情库。详细部署参数见
+启用视觉与表情服务后，只有 QQ 明确标记的表情会按 SHA-256 去重保存到
+`AI_MEDIA_ROOT`；所有群共用同一套经过安全审核的表情标签和检索索引。普通图片只会
+建立一次性 `vision_jobs` 任务，后台固定使用 `AI_VISION_PROFILE` 识别，交付结果后
+清除图片 URL 和结果，不保存 Blob，也不提供历史图片检索。聊天模型通过
+`view_image` 的 `summary`/`detail` 模式按图片地址重新识别，通过 `find_stickers` 和
+`send_sticker` 使用永久表情库。详细部署参数见
 [`docs/operations-v3.md`](docs/operations-v3.md)。
 
 ## Max 风格交互

@@ -44,7 +44,6 @@ from .bridges import (
 from .ai_tools import (
     CONTEXT_EXPAND_TOOL_NAME,
     CONTEXT_SEARCH_TOOL_NAME,
-    FIND_IMAGES_TOOL_NAME,
     FIND_STICKERS_TOOL_NAME,
     GROUP_MEMBERS_TOOL_NAME,
     INSPECT_SOURCE_TOOL_NAME,
@@ -197,8 +196,8 @@ from .matchers import (
 
 SEND_RETRY_DELAY_SECONDS = 2.0
 SEND_RETRY_MAX_CHARS = 800
-TURN_PROMPT_VERSION = "qqbot-turn-v6"
-BOT_VERSION = "0.5.14"
+TURN_PROMPT_VERSION = "qqbot-turn-v7"
+BOT_VERSION = "0.5.15"
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 proactive_check_gate = ProactiveCheckGate()
 
@@ -252,6 +251,7 @@ sandbox_manager = app_context.sandbox_manager
 browser_manager = app_context.browser_manager
 rich_renderer = app_context.rich_renderer
 media_library = app_context.media_library
+vision_worker = app_context.vision_worker
 cold_archive = app_context.cold_archive
 background_tasks = app_context.background_tasks
 BOT_STARTED_AT = app_context.started_at
@@ -297,6 +297,32 @@ def _image_cache_key(event: MessageEvent) -> str:
     if isinstance(event, GroupMessageEvent):
         return f"group:{event.group_id}:user:{event.user_id}"
     return f"private:{event.user_id}"
+
+
+def _indexed_image_sources(raw_message: object) -> list[tuple[int, str]]:
+    if isinstance(raw_message, Message):
+        items: list[object] = list(raw_message)
+    elif isinstance(raw_message, list):
+        items = raw_message
+    else:
+        return []
+    sources: list[tuple[int, str]] = []
+    for index, item in enumerate(items):
+        if isinstance(item, MessageSegment):
+            segment_type = item.type
+            data = item.data
+        elif isinstance(item, dict):
+            segment_type = str(item.get("type") or "")
+            raw_data = item.get("data")
+            data = raw_data if isinstance(raw_data, dict) else {}
+        else:
+            continue
+        if segment_type not in {"image", "mface"}:
+            continue
+        source = str(data.get("url") or "").strip()
+        if source:
+            sources.append((index, source))
+    return sources
 
 
 def _voice_cache_key(event: MessageEvent) -> str:
@@ -1180,7 +1206,7 @@ async def _ask_ai(
 
     if force_search and not settings.search_enabled:
         return "联网搜索暂时没有开启。"
-    if force_ocr and not (settings.ocr_enabled or media_library is not None):
+    if force_ocr and not (settings.ocr_enabled or vision_worker is not None):
         return "图片理解暂时没有开启。"
     if (force_voice_reply or force_voice_transcription) and not settings.voice_enabled:
         return "语音功能暂时没有开启。"
@@ -1273,7 +1299,9 @@ async def _ask_ai(
         include_self_tools=True,
         include_group_tools=isinstance(event, GroupMessageEvent),
         include_reminder_tools=reminder_store is not None,
-        include_media_tools=media_library is not None,
+        include_media_tools=(
+            vision_worker is not None or media_library is not None
+        ),
     )
     current_tool_catalog_version = tool_catalog_fingerprint(tools)
     if turn_journal is not None and journal_turn_id is not None:
@@ -1948,123 +1976,82 @@ async def _ask_ai(
             )
 
         if name == VIEW_IMAGE_TOOL_NAME:
-            if media_library is None:
+            if vision_worker is None:
                 return json.dumps(
                     {"ok": False, "error": "图片理解服务暂时不可用。"},
                     ensure_ascii=False,
                 )
             scope = scope_from_event(event)
             native_message_id: str | int = event.message_id
-            inferred_segment_index: int | None = None
+            source_items: list[tuple[int, str]] = []
             requested_handle = str(arguments.get("message_handle") or "").strip()
-            if requested_handle:
-                canonical_id = _canonical_message_id(requested_handle)
-                target = (
-                    message_ledger.get_in_scope(scope, canonical_id)
-                    if message_ledger is not None and canonical_id is not None
-                    else None
-                )
-                if target is None or not target.native_message_id:
+            try:
+                if requested_handle:
+                    canonical_id = _canonical_message_id(requested_handle)
+                    target = (
+                        message_ledger.get_in_scope(scope, canonical_id)
+                        if message_ledger is not None and canonical_id is not None
+                        else None
+                    )
+                    if target is None or not target.native_message_id:
+                        return json.dumps(
+                            {"ok": False, "error": "当前群看不到这条图片消息。"},
+                            ensure_ascii=False,
+                        )
+                    native_message_id = target.native_message_id
+                    raw_target = await bot.get_msg(message_id=int(native_message_id))
+                    source_items = _indexed_image_sources(
+                        raw_target.get("message")
+                        if isinstance(raw_target, dict)
+                        else None
+                    )
+                else:
+                    source_items = _indexed_image_sources(event.original_message)
+                    if not source_items:
+                        replied_id = reply_message_id(event.original_message)
+                        if replied_id is not None:
+                            native_message_id = replied_id
+                            raw_target = await bot.get_msg(message_id=replied_id)
+                            source_items = _indexed_image_sources(
+                                raw_target.get("message")
+                                if isinstance(raw_target, dict)
+                                else None
+                            )
+                    if not source_items:
+                        recent_sources = recent_images.get(_image_cache_key(event))
+                        source_items = list(enumerate(recent_sources))
+                raw_segment_index = arguments.get("segment_index")
+                if raw_segment_index is not None:
+                    requested_index = int(raw_segment_index)
+                    selected = next(
+                        (item for item in source_items if item[0] == requested_index),
+                        None,
+                    )
+                else:
+                    selected = source_items[0] if source_items else None
+                if selected is None:
                     return json.dumps(
-                        {"ok": False, "error": "当前群看不到这条图片消息。"},
+                        {
+                            "ok": False,
+                            "error": (
+                                "没有找到可识别的图片，请发送图片、回复图片，"
+                                "或检查 segment_index。"
+                            ),
+                        },
                         ensure_ascii=False,
                     )
-                native_message_id = target.native_message_id
-            elif image_sources(event.original_message):
-                native_message_id = event.message_id
-            else:
-                replied_id = reply_message_id(event.original_message)
-                if replied_id is not None:
-                    native_message_id = replied_id
-                else:
-                    recent = media_library.latest_message_for_sender(
-                        scope,
-                        event.user_id,
-                        max_age_seconds=settings.ocr_recent_image_seconds,
-                    )
-                    if recent is None:
-                        return json.dumps(
-                            {
-                                "ok": False,
-                                "error": (
-                                    "当前消息没有图片，且没有找到你在当前会话"
-                                    "最近 5 分钟发送的图片。请先发图或回复图片。"
-                                ),
-                            },
-                            ensure_ascii=False,
-                        )
-                    native_message_id, inferred_segment_index = recent
-            raw_segment_index = arguments.get("segment_index")
-            segment_index = (
-                int(raw_segment_index)
-                if raw_segment_index is not None
-                else inferred_segment_index
-            )
-            try:
-                if media_library.latest_for_message(
-                    scope,
-                    native_message_id,
+                segment_index, source_url = selected
+                mode = str(arguments.get("mode") or "summary").strip().lower()
+                question = str(arguments.get("question") or "").strip()
+                result = await vision_worker.submit_and_wait(
+                    scope_key=scope.key,
+                    native_message_id=native_message_id,
                     segment_index=segment_index,
-                ) is None:
-                    if not media_library.has_message_media(
-                        scope,
-                        native_message_id,
-                        segment_index=segment_index,
-                    ):
-                        raw_target = await bot.get_msg(message_id=int(native_message_id))
-                        raw_segments = (
-                            raw_target.get("message")
-                            if isinstance(raw_target, dict)
-                            else []
-                        )
-                        if isinstance(raw_segments, Message):
-                            ingest_segments = [
-                                {"type": segment.type, "data": dict(segment.data)}
-                                for segment in raw_segments
-                            ]
-                        elif isinstance(raw_segments, list):
-                            ingest_segments = [
-                                item for item in raw_segments if isinstance(item, dict)
-                            ]
-                        else:
-                            ingest_segments = []
-                        media_library.ingest_message(
-                            scope,
-                            native_message_id=native_message_id,
-                            sender_native_user_id=(
-                                raw_target.get("user_id") or event.user_id
-                                if isinstance(raw_target, dict)
-                                else event.user_id
-                            ),
-                            segments=ingest_segments,
-                            canonical_message_id=(
-                                message_ledger.canonical_id_for_native(
-                                    scope,
-                                    native_message_id,
-                                )
-                                if message_ledger is not None
-                                else None
-                            ),
-                            occurred_at=(
-                                int(raw_target.get("time") or time.time())
-                                if isinstance(raw_target, dict)
-                                else int(time.time())
-                            ),
-                        )
-                    if not media_library.has_message_media(
-                        scope,
-                        native_message_id,
-                        segment_index=segment_index,
-                    ):
-                        return json.dumps(
-                            {"ok": False, "error": "目标消息中没有可识别的图片。"},
-                            ensure_ascii=False,
-                        )
-                record = await media_library.wait_for_message(
-                    scope,
-                    native_message_id,
-                    segment_index=segment_index,
-                    timeout_seconds=min(settings.media_timeout_seconds, 45),
+                    requester_native_user_id=event.user_id,
+                    source_url=source_url,
+                    mode=mode,
+                    question=question,
+                    wait_seconds=min(settings.media_timeout_seconds, 45),
                 )
             except (
                 ActionFailed,
@@ -2073,29 +2060,27 @@ async def _ask_ai(
                 ValueError,
                 DatabaseError,
             ) as exc:
-                logger.warning(f"Vision media tool failed: {exc}")
-                record = None
-            if record is None:
+                logger.warning(f"Transient vision tool failed: {exc}")
+                result = None
+            if result is None:
                 return json.dumps(
-                    {"ok": False, "error": "图片仍在处理或识别失败，请稍后再试。"},
+                    {
+                        "ok": False,
+                        "error": "这次识图没有及时完成，请重试；图片不会保存到媒体库。",
+                    },
                     ensure_ascii=False,
                 )
             return json.dumps(
                 {
                     "ok": True,
-                    "media_handle": record.handle,
-                    "summary": record.summary,
-                    "description": record.description,
-                    "text": record.extracted_text,
-                    "emotion": list(record.emotions),
-                    "usage": list(record.usage),
-                    "is_sticker": record.is_sticker,
-                    "safety": record.safety,
+                    **result.as_dict(),
+                    "stored": False,
+                    "message": "本次结果已消费，仔细查看时会重新调用视觉模型。",
                 },
                 ensure_ascii=False,
             )
 
-        if name in {FIND_IMAGES_TOOL_NAME, FIND_STICKERS_TOOL_NAME}:
+        if name == FIND_STICKERS_TOOL_NAME:
             if media_library is None:
                 return json.dumps(
                     {"ok": False, "error": "媒体检索暂时不可用。"},
@@ -2112,20 +2097,11 @@ async def _ask_ai(
                     ensure_ascii=False,
                 )
             try:
-                if name == FIND_STICKERS_TOOL_NAME:
-                    records = await media_library.search_stickers(
-                        query,
-                        limit=limit,
-                    )
-                    sticker_handles_this_turn.update(
-                        item.handle for item in records
-                    )
-                else:
-                    records = await media_library.search_media(
-                        scope_from_event(event),
-                        query,
-                        limit=limit,
-                    )
+                records = await media_library.search_stickers(
+                    query,
+                    limit=limit,
+                )
+                sticker_handles_this_turn.update(item.handle for item in records)
             except (OSError, RuntimeError, ValueError, DatabaseError) as exc:
                 logger.warning(f"Media search tool failed: {exc}")
                 records = []
@@ -2341,7 +2317,7 @@ async def _ask_ai(
     elif force_ocr:
         tool_choice = force_tool(
             VIEW_IMAGE_TOOL_NAME
-            if media_library is not None
+            if vision_worker is not None
             else READ_IMAGE_TEXT_TOOL_NAME
         )
     elif force_voice_transcription:
@@ -3897,6 +3873,14 @@ async def start_background_tasks() -> None:
     ):
         logger.info(
             "Durable media worker enabled with vision profile "
+            f"{settings.vision_profile}."
+        )
+    if vision_worker is not None and background_tasks.start(
+        "vision-worker",
+        vision_worker.run_forever,
+    ):
+        logger.info(
+            "Transient image understanding worker enabled with vision profile "
             f"{settings.vision_profile}."
         )
     if cold_archive is not None and background_tasks.start(

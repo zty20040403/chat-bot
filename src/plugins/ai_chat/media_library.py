@@ -203,11 +203,14 @@ class MediaLibrary:
                     continue
                 raw_data = segment.get("data")
                 data = raw_data if isinstance(raw_data, Mapping) else {}
+                # Ordinary pictures are handled by the transient vision queue.
+                # Only platform-classified stickers may enter durable storage.
+                if not self._is_sticker(segment_type, data):
+                    continue
                 source_url = str(data.get("url") or "").strip()
                 if not self._supported_source(source_url):
                     continue
                 summary = str(data.get("summary") or "").strip()[:500]
-                media_kind = "sticker" if self._is_sticker(segment_type, data) else "image"
                 cursor.execute(
                     """
                     INSERT INTO message_media (
@@ -233,7 +236,7 @@ class MediaLibrary:
                         str(native_message_id),
                         str(sender_native_user_id),
                         index,
-                        media_kind,
+                        "sticker",
                         segment_type,
                         source_url,
                         summary,
@@ -597,20 +600,11 @@ class MediaLibrary:
     async def _process_embedding(self, job: MediaJob) -> None:
         if job.media_id is None or self.semantic_recall is None:
             return
-        records = self._analysis_scopes(job.media_id)
-        documents = [
-            SemanticDocument(
-                scope_key=scope_key,
-                source_type="media",
-                source_handle=f"media#{job.media_id}",
-                content=content,
-                metadata={"media_id": job.media_id, "is_sticker": is_sticker},
-            )
-            for scope_key, content, is_sticker in records
-        ]
         sticker = self.get_sticker(job.media_id)
-        if sticker is not None:
-            documents.append(
+        if sticker is None:
+            return
+        await self.semantic_recall.index(
+            [
                 SemanticDocument(
                     scope_key=GLOBAL_STICKER_SCOPE_KEY,
                     source_type="media",
@@ -618,9 +612,8 @@ class MediaLibrary:
                     content=self._record_search_content(sticker),
                     metadata={"media_id": sticker.media_id, "is_sticker": True},
                 )
-            )
-        if documents:
-            await self.semantic_recall.index(documents)
+            ]
+        )
 
     def enqueue_sticker_embeddings(self) -> int:
         if self.semantic_recall is None:
@@ -1056,9 +1049,14 @@ class MediaLibrary:
             counts = connection.execute(
                 """
                 SELECT
-                    (SELECT COUNT(*) FROM media_blobs) AS total,
-                    (SELECT COALESCE(SUM(byte_size), 0) FROM media_blobs) AS bytes,
-                    (SELECT COUNT(*) FROM media_analysis) AS analyzed,
+                    (SELECT COUNT(*) FROM sticker_library
+                     WHERE enabled = 1 AND banned = 0) AS total,
+                    (SELECT COALESCE(SUM(blob.byte_size), 0)
+                     FROM media_blobs AS blob
+                     JOIN sticker_library AS sticker ON sticker.media_id = blob.media_id
+                     WHERE sticker.enabled = 1 AND sticker.banned = 0) AS bytes,
+                    (SELECT COUNT(*) FROM media_analysis AS analysis
+                     JOIN sticker_library AS sticker ON sticker.media_id = analysis.media_id) AS analyzed,
                     (SELECT COUNT(*) FROM sticker_library WHERE enabled = 1 AND banned = 0) AS stickers,
                     (SELECT COUNT(*) FROM media_jobs WHERE status IN ('pending', 'running')) AS queued,
                     (SELECT COUNT(*) FROM media_jobs WHERE status = 'failed') AS failed
@@ -1073,8 +1071,8 @@ class MediaLibrary:
                        COALESCE(stickers.banned, 0) AS banned,
                        COALESCE(stickers.times_sent, 0) AS times_sent
                 FROM media_blobs AS blob
-                LEFT JOIN media_analysis AS analysis ON analysis.media_id = blob.media_id
-                LEFT JOIN sticker_library AS stickers ON stickers.media_id = blob.media_id
+                JOIN media_analysis AS analysis ON analysis.media_id = blob.media_id
+                JOIN sticker_library AS stickers ON stickers.media_id = blob.media_id
                 ORDER BY blob.last_seen_at DESC, blob.media_id DESC
                 LIMIT ?
                 """,

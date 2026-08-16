@@ -169,7 +169,7 @@ class BrowserAndMediaTests(unittest.TestCase):
         self.assertIn(BROWSER_NAVIGATE_TOOL_NAME, names)
         self.assertIn(BROWSER_CLEAR_TOOL_NAME, names)
         self.assertIn("view_image", names)
-        self.assertIn("find_images", names)
+        self.assertNotIn("find_images", names)
         self.assertIn("find_stickers", names)
 
 
