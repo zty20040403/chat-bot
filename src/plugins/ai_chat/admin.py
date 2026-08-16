@@ -16,6 +16,9 @@ from pydantic import BaseModel
 from .admin_dashboard import ADMIN_FAVICON_SVG, dashboard_html
 
 
+ADMIN_EVENT_STREAM_LEASE_SECONDS = 10
+
+
 @dataclass(frozen=True)
 class AdminServices:
     version: str
@@ -167,6 +170,7 @@ def register_admin(
 
         async def stream() -> AsyncIterator[str]:
             queue = event_broker.subscribe()
+            deadline = time.monotonic() + ADMIN_EVENT_STREAM_LEASE_SECONDS
             ready = {
                 "sequence": 0,
                 "type": "ready",
@@ -176,9 +180,16 @@ def register_admin(
             try:
                 yield "retry: 2000\n"
                 yield f"data: {json.dumps(ready, separators=(',', ':'))}\n\n"
-                while not await request.is_disconnected():
+                while (
+                    time.monotonic() < deadline
+                    and not await request.is_disconnected()
+                ):
+                    remaining = max(deadline - time.monotonic(), 0.1)
                     try:
-                        payload = await asyncio.wait_for(queue.get(), timeout=15)
+                        payload = await asyncio.wait_for(
+                            queue.get(),
+                            timeout=min(2.0, remaining),
+                        )
                     except TimeoutError:
                         yield ": heartbeat\n\n"
                         continue
@@ -192,6 +203,7 @@ def register_admin(
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache, no-transform",
+                "Connection": "close",
                 "X-Accel-Buffering": "no",
             },
         )
@@ -470,6 +482,28 @@ def register_admin(
             "enabled": selection.enabled,
         }
 
+    @router.put("/api/group-models/{group_id}/vision-auto-describe")
+    async def set_group_vision_auto_describe(
+        group_id: int,
+        selection: GroupEnabledRequest,
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
+        authorize(authorization)
+        if group_id <= 0:
+            raise HTTPException(status_code=422, detail="群号必须是正整数")
+        if services.model_preferences is None:
+            raise HTTPException(status_code=503, detail="群状态存储不可用")
+        services.model_preferences.set_group_vision_auto_describe(
+            group_id,
+            selection.enabled,
+        )
+        event_broker.publish("groups", "media", "overview")
+        return {
+            "ok": True,
+            "group_id": group_id,
+            "vision_auto_describe": selection.enabled,
+        }
+
     @router.put("/api/group-models/{group_id}/users/{user_id}")
     async def set_group_user_model(
         group_id: int,
@@ -634,6 +668,9 @@ def _preserve_admin_model_selections(
 
 
 _GROUP_CONVERSATION_PATTERN = re.compile(r"^group:(\d+):user:(\d+)$")
+_GROUP_SETTING_PATTERN = re.compile(
+    r"^group:(\d+):(?:default|enabled|vision-auto-describe)$"
+)
 
 
 def _group_model_overview(
@@ -678,6 +715,9 @@ def _group_model_overview(
     for conversation_id, stored_preference in preference_items:
         match = _GROUP_CONVERSATION_PATTERN.fullmatch(str(conversation_id))
         if match is None:
+            setting_match = _GROUP_SETTING_PATTERN.fullmatch(str(conversation_id))
+            if setting_match is not None:
+                group_ids.add(int(setting_match.group(1)))
             continue
         group_id = int(match.group(1))
         user_id = int(match.group(2))
@@ -721,6 +761,22 @@ def _group_model_overview(
             enabled_override
             if enabled_override is not None
             else deployed_enabled
+        )
+        vision_override = None
+        if preferences is not None and hasattr(
+            preferences,
+            "get_group_vision_auto_describe_override",
+        ):
+            vision_override = preferences.get_group_vision_auto_describe_override(
+                group_id
+            )
+        vision_deployed = bool(
+            getattr(settings, "vision_auto_describe", False)
+            if settings is not None
+            else False
+        )
+        vision_auto_describe = (
+            vision_override if vision_override is not None else vision_deployed
         )
         deployed_group_default = (
             (getattr(settings, "group_model_profiles", {}) or {}).get(group_id)
@@ -790,6 +846,11 @@ def _group_model_overview(
                 "enabled_override": enabled_override,
                 "enabled_source": (
                     "dashboard" if enabled_override is not None else "deployment"
+                ),
+                "vision_auto_describe": vision_auto_describe,
+                "vision_auto_describe_override": vision_override,
+                "vision_auto_describe_source": (
+                    "dashboard" if vision_override is not None else "deployment"
                 ),
                 "default_profile": group_default.name,
                 "default_provider": group_default.provider,

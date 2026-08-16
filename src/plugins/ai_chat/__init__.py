@@ -198,7 +198,7 @@ from .matchers import (
 SEND_RETRY_DELAY_SECONDS = 2.0
 SEND_RETRY_MAX_CHARS = 800
 TURN_PROMPT_VERSION = "qqbot-turn-v7"
-BOT_VERSION = "0.5.15"
+BOT_VERSION = "0.5.16"
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 proactive_check_gate = ProactiveCheckGate()
 
@@ -264,6 +264,13 @@ def _is_group_enabled(group_id: int) -> bool:
     if override is not None:
         return override
     return settings.is_group_enabled(group_id)
+
+
+def _is_group_vision_auto_describe_enabled(group_id: int) -> bool:
+    override = model_preferences.get_group_vision_auto_describe_override(group_id)
+    if override is not None:
+        return override
+    return settings.vision_auto_describe
 
 
 @event_preprocessor
@@ -4774,11 +4781,17 @@ async def handle_group_activity(event: MessageEvent) -> None:
 
 @image_auto_description.handle()
 async def handle_image_auto_description(event: MessageEvent) -> None:
-    if not settings.vision_auto_describe or vision_worker is None:
+    if vision_worker is None:
         return
     if event.user_id == event.self_id:
         return
     if isinstance(event, GroupMessageEvent) and not _is_group_enabled(event.group_id):
+        return
+    if isinstance(event, GroupMessageEvent) and not _is_group_vision_auto_describe_enabled(
+        event.group_id
+    ):
+        return
+    if not isinstance(event, GroupMessageEvent) and not settings.vision_auto_describe:
         return
     if event.original_message.extract_plain_text().strip():
         return
@@ -4790,26 +4803,20 @@ async def handle_image_auto_description(event: MessageEvent) -> None:
         return
     segment_index, source_url = source_items[0]
     try:
-        result = await vision_worker.submit_and_wait(
+        await asyncio.to_thread(
+            vision_worker.submit,
             scope_key=scope_from_event(event).key,
             native_message_id=event.message_id,
             segment_index=segment_index,
             requester_native_user_id=event.user_id,
             source_url=source_url,
             mode="summary",
-            wait_seconds=min(settings.media_timeout_seconds, 45),
+            delivery_target=scope_from_event(event),
+            reply_to_native_message_id=event.message_id,
         )
     except (OSError, RuntimeError, ValueError, DatabaseError) as exc:
         logger.warning(f"Automatic image introduction failed: {exc}")
         return
-    if result is None:
-        return
-    await _finish_safely(
-        image_auto_description,
-        _reply_message(event, result.summary),
-        "automatic image introduction",
-        retry_on_timeout=True,
-    )
 
 
 @proactive_chat.handle()

@@ -1438,7 +1438,12 @@ function renderMedia() {
   const counts = data.counts || {};
   const visionCounts = vision.counts || {};
   document.querySelector('#media-count').textContent = `${number(counts.total)} 个 · ${fmtBytes(counts.bytes)}`;
-  document.querySelector('#media-job-count').textContent = `${number(jobs.length)} 条 · ${number(visionCounts.queued)} 处理中 · ${number(visionCounts.failed)} 失败`;
+  const successRate = visionCounts.success_rate_24h === null || visionCounts.success_rate_24h === undefined
+    ? '-'
+    : `${Math.round(Number(visionCounts.success_rate_24h) * 100)}%`;
+  const averageLatency = Number(visionCounts.avg_latency_seconds || 0);
+  document.querySelector('#media-job-count').textContent =
+    `${number(visionCounts.jobs_24h)} 次/24h · 成功 ${successRate} · 平均 ${averageLatency.toFixed(1)} 秒`;
   if (!data.available) {
     document.querySelector('#media-body').innerHTML = emptyRow(6, data.error || '媒体库未启用');
     document.querySelector('#media-job-body').innerHTML = emptyRow(6, '没有任务数据');
@@ -1501,7 +1506,7 @@ function renderGroups({ force = false } = {}) {
         ` title="配置其他群友模型" aria-label="配置群 ${esc(item.group_id)} 的其他群友模型"><span data-icon="more"></span></button>` +
         `<span class="other-model-summary">${number(members.length)} 位群友 · ${number(overrideCount)} 位单独配置</span></div>`;
       return `<tr><td><div class="stack"><code>${esc(item.group_id)}</code>` +
-        `${groupEnabledButtonHtml(item)}</div></td>` +
+        `${groupEnabledButtonHtml(item)}${groupVisionButtonHtml(item)}</div></td>` +
         `<td>${admins}</td><td>${otherControl}</td></tr>`;
     }).join('')
     : emptyRow(3, '还没有观察到 QQ 群');
@@ -1515,6 +1520,15 @@ function groupEnabledButtonHtml(item) {
   const label = enabled ? '已开启' : '已关闭';
   return `<button class="group-enabled-button" type="button" role="switch" aria-pressed="${enabled}"` +
     ` data-group-enabled="${esc(item.group_id)}" data-enabled="${enabled}" title="${label}，点击切换">` +
+    `<span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>` +
+    `<span>${label}</span></button>`;
+}
+
+function groupVisionButtonHtml(item) {
+  const enabled = Boolean(item.vision_auto_describe);
+  const label = enabled ? '识图已开启' : '识图已关闭';
+  return `<button class="group-enabled-button" type="button" role="switch" aria-pressed="${enabled}"` +
+    ` data-group-vision="${esc(item.group_id)}" data-vision-enabled="${enabled}" title="${label}，点击切换">` +
     `<span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>` +
     `<span>${label}</span></button>`;
 }
@@ -2026,6 +2040,27 @@ async function updateGroupEnabled(button) {
   }
 }
 
+async function updateGroupVision(button) {
+  const groupId = button.dataset.groupVision;
+  const enabled = button.dataset.visionEnabled !== 'true';
+  button.disabled = true;
+  clearError();
+  try {
+    await api(`/group-models/${encodeURIComponent(groupId)}/vision-auto-describe`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled })
+    });
+    await refreshResource('groups', { force: true, quiet: false });
+    await refreshResource('media', { quiet: true });
+  } catch (error) {
+    showError(error.message);
+    await refreshResource('groups', { force: true });
+  } finally {
+    button.disabled = false;
+  }
+}
+
 document.addEventListener('click', (event) => {
   const navItem = event.target.closest('.nav-item[data-view]');
   if (navItem) openView(navItem.dataset.view);
@@ -2039,6 +2074,11 @@ document.addEventListener('click', (event) => {
   const groupEnabledButton = event.target.closest('[data-group-enabled]');
   if (groupEnabledButton && !groupEnabledButton.disabled) {
     updateGroupEnabled(groupEnabledButton);
+  }
+
+  const groupVisionButton = event.target.closest('[data-group-vision]');
+  if (groupVisionButton && !groupVisionButton.disabled) {
+    updateGroupVision(groupVisionButton);
   }
 
   if (event.target.closest('#member-model-close, #member-model-backdrop')) {

@@ -17,7 +17,10 @@ import httpx
 
 from src.bot_storage import PostgresDatabase
 
+from .conversation_scope import ConversationScope
+from .delivery import DeliveryStore
 from .llm_gateway import LLMGateway
+from .message_ir import MessageBody, TextNode
 from .model_catalog import ModelCatalog, ModelProfile
 
 
@@ -88,6 +91,7 @@ class VisionWorker:
         model_catalog: ModelCatalog,
         llm_gateway: LLMGateway,
         vision_profile: str,
+        delivery_store: DeliveryStore | None = None,
         max_source_bytes: int = 100 * 1024 * 1024,
         max_vision_bytes: int = 20 * 1024 * 1024,
         prepare_threshold_bytes: int = 1024 * 1024,
@@ -103,6 +107,7 @@ class VisionWorker:
         self.model_catalog = model_catalog
         self.llm_gateway = llm_gateway
         self.vision_profile_name = vision_profile.strip()
+        self.delivery_store = delivery_store
         self.max_source_bytes = max(int(max_source_bytes), 1024)
         self.max_vision_bytes = max(int(max_vision_bytes), 1024)
         self.prepare_threshold_bytes = max(int(prepare_threshold_bytes), 0)
@@ -141,12 +146,16 @@ class VisionWorker:
         source_url: str,
         mode: str = "summary",
         question: str = "",
+        delivery_target: ConversationScope | None = None,
+        reply_to_native_message_id: str | int | None = None,
     ) -> int:
         selected_mode = str(mode).strip().lower()
         if selected_mode not in {"summary", "detail"}:
             raise VisionJobError("vision mode must be summary or detail")
         if not self._supported_source(source_url):
             raise VisionJobError("unsupported image source URL")
+        if delivery_target is not None and self.delivery_store is None:
+            raise VisionJobError("durable delivery outbox is unavailable")
         now = int(time.time())
         connection = self.database.store_connection()
         cursor = connection.cursor()
@@ -156,8 +165,11 @@ class VisionWorker:
                 INSERT INTO vision_jobs (
                     scope_key, native_message_id, segment_index,
                     requester_native_user_id, source_url, mode, question,
+                    auto_deliver, target_platform, target_kind,
+                    target_native_conversation_id, reply_to_native_message_id,
                     status, attempts, next_attempt_at, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                          'pending', 0, ?, ?, ?)
                 RETURNING vision_job_id
                 """,
                 (
@@ -168,6 +180,15 @@ class VisionWorker:
                     source_url,
                     selected_mode,
                     str(question).strip()[:2000],
+                    delivery_target is not None,
+                    delivery_target.platform if delivery_target is not None else "",
+                    delivery_target.kind if delivery_target is not None else "",
+                    (
+                        delivery_target.native_conversation_id
+                        if delivery_target is not None
+                        else ""
+                    ),
+                    str(reply_to_native_message_id or ""),
                     now,
                     now,
                     now,
@@ -228,6 +249,7 @@ class VisionWorker:
             if now - last_cleanup >= 60:
                 await asyncio.to_thread(self.cleanup)
                 last_cleanup = now
+            await asyncio.to_thread(self.flush_completed_deliveries)
             jobs = await asyncio.to_thread(self.claim_jobs)
             if not jobs:
                 self._wake.clear()
@@ -249,6 +271,7 @@ class VisionWorker:
                         await asyncio.to_thread(self.complete_job, job.job_id, result)
 
             await asyncio.gather(*(run(job) for job in jobs))
+            await asyncio.to_thread(self.flush_completed_deliveries)
 
     def claim_jobs(self) -> list[VisionJob]:
         now = int(time.time())
@@ -482,6 +505,71 @@ class VisionWorker:
         finally:
             connection.close()
 
+    def flush_completed_deliveries(self, *, limit: int = 20) -> int:
+        if self.delivery_store is None:
+            return 0
+        connection = self.database.store_connection()
+        try:
+            rows = connection.execute(
+                """
+                SELECT vision_job_id, scope_key, native_message_id,
+                       target_platform, target_kind,
+                       target_native_conversation_id,
+                       reply_to_native_message_id, result_json
+                FROM vision_jobs
+                WHERE auto_deliver = TRUE AND status = 'succeeded'
+                  AND delivery_enqueued_at IS NULL AND result_json <> ''
+                ORDER BY vision_job_id
+                LIMIT ?
+                """,
+                (min(max(int(limit), 1), 100),),
+            ).fetchall()
+        finally:
+            connection.close()
+
+        delivered = 0
+        for row in rows:
+            result = self.parse_result(str(row["result_json"]), mode="summary")
+            target = ConversationScope(
+                str(row["target_platform"]),
+                str(row["target_kind"]),  # type: ignore[arg-type]
+                str(row["target_native_conversation_id"]),
+            )
+            delivery, _created = self.delivery_store.enqueue(
+                idempotency_key=f"vision:{int(row['vision_job_id'])}:summary",
+                source_scope_key=str(row["scope_key"]),
+                target_scope=target,
+                body=MessageBody((TextNode(0, result.summary),)),
+                reply_to_native_message_id=str(
+                    row["reply_to_native_message_id"]
+                    or row["native_message_id"]
+                ),
+            )
+            now = int(time.time())
+            update_connection = self.database.store_connection()
+            try:
+                update_connection.execute(
+                    """
+                    UPDATE vision_jobs
+                    SET status = 'delivered', result_json = '', source_url = '',
+                        delivery_id = ?, delivery_enqueued_at = ?,
+                        updated_at = ?, expires_at = ?
+                    WHERE vision_job_id = ? AND status = 'succeeded'
+                      AND delivery_enqueued_at IS NULL
+                    """,
+                    (
+                        delivery.delivery_id,
+                        now,
+                        now,
+                        now + 86400,
+                        int(row["vision_job_id"]),
+                    ),
+                )
+            finally:
+                update_connection.close()
+            delivered += 1
+        return delivered
+
     def fail_job(self, job: VisionJob, error: Exception) -> None:
         now = int(time.time())
         final = job.attempts >= self.max_attempts
@@ -588,6 +676,7 @@ class VisionWorker:
             connection.close()
 
     def admin_snapshot(self, *, limit: int = 100) -> dict[str, object]:
+        now = int(time.time())
         connection = self.database.store_connection()
         try:
             counts = connection.execute(
@@ -595,9 +684,23 @@ class VisionWorker:
                 SELECT
                     COUNT(*) FILTER (WHERE status IN ('pending', 'running')) AS queued,
                     COUNT(*) FILTER (WHERE status = 'failed') AS failed,
-                    COUNT(*) FILTER (WHERE status = 'delivered') AS delivered
+                    COUNT(*) FILTER (WHERE status = 'delivered') AS delivered,
+                    COUNT(*) FILTER (WHERE created_at >= ?) AS jobs_24h,
+                    COUNT(*) FILTER (
+                        WHERE created_at >= ? AND status = 'delivered'
+                    ) AS delivered_24h,
+                    COUNT(*) FILTER (
+                        WHERE created_at >= ? AND status = 'failed'
+                    ) AS failed_24h,
+                    COALESCE(AVG(
+                        (finished_at - created_at)::double precision
+                    ) FILTER (
+                        WHERE created_at >= ? AND finished_at IS NOT NULL
+                          AND status IN ('succeeded', 'delivered')
+                    ), 0) AS avg_latency_seconds
                 FROM vision_jobs
-                """
+                """,
+                (now - 86400, now - 86400, now - 86400, now - 86400),
             ).fetchone()
             rows = connection.execute(
                 """
@@ -612,8 +715,17 @@ class VisionWorker:
             ).fetchall()
         finally:
             connection.close()
+        count_payload = dict(counts) if counts is not None else {}
+        completed_24h = int(count_payload.get("delivered_24h") or 0) + int(
+            count_payload.get("failed_24h") or 0
+        )
+        count_payload["success_rate_24h"] = (
+            round(int(count_payload.get("delivered_24h") or 0) / completed_24h, 4)
+            if completed_24h
+            else None
+        )
         return {
-            "counts": dict(counts) if counts is not None else {},
+            "counts": count_payload,
             "profile": self.vision_profile_name,
             "jobs": [dict(row) for row in rows],
         }

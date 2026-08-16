@@ -62,6 +62,20 @@ class ModelPreferenceStore:
     def clear_group_enabled_override(self, group_id: int) -> bool:
         return self.clear(self.group_enabled_key(group_id))
 
+    def get_group_vision_auto_describe_override(self, group_id: int) -> bool | None:
+        stored = self.get_explicit(self.group_vision_auto_describe_key(group_id))
+        if stored == "enabled":
+            return True
+        if stored == "disabled":
+            return False
+        return None
+
+    def set_group_vision_auto_describe(self, group_id: int, enabled: bool) -> None:
+        self.set(
+            self.group_vision_auto_describe_key(group_id),
+            "enabled" if enabled else "disabled",
+        )
+
     @staticmethod
     def group_default_key(group_id: int) -> str:
         normalized = int(group_id)
@@ -75,6 +89,13 @@ class ModelPreferenceStore:
         if normalized <= 0:
             raise ValueError("group_id must be positive")
         return f"group:{normalized}:enabled"
+
+    @staticmethod
+    def group_vision_auto_describe_key(group_id: int) -> str:
+        normalized = int(group_id)
+        if normalized <= 0:
+            raise ValueError("group_id must be positive")
+        return f"group:{normalized}:vision-auto-describe"
 
     def _load(self) -> dict[str, str]:
         data = self._state.load()

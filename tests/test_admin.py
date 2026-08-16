@@ -81,6 +81,19 @@ class ModelPreferences:
             "enabled" if enabled else "disabled"
         )
 
+    def get_group_vision_auto_describe_override(self, group_id):
+        stored = self.models.get(f"group:{group_id}:vision-auto-describe")
+        if stored == "enabled":
+            return True
+        if stored == "disabled":
+            return False
+        return None
+
+    def set_group_vision_auto_describe(self, group_id, enabled):
+        self.models[f"group:{group_id}:vision-auto-describe"] = (
+            "enabled" if enabled else "disabled"
+        )
+
     def set(self, conversation_id, profile):
         self.models[conversation_id] = profile
 
@@ -153,6 +166,7 @@ class Settings:
     disabled_groups = {201644592}
     group_model_profiles = {930690526: "main"}
     admin_user_ids = {3526452465}
+    vision_auto_describe = True
 
     @staticmethod
     def is_group_enabled(group_id):
@@ -458,6 +472,11 @@ class AdminTests(unittest.TestCase):
                     headers=headers,
                     json={"enabled": False},
                 )
+                vision_toggle = await client.put(
+                    "/bot-admin/api/group-models/930690526/vision-auto-describe",
+                    headers=headers,
+                    json={"enabled": False},
+                )
                 snapshot = await client.get(
                     "/bot-admin/api/group-models",
                     headers=headers,
@@ -472,12 +491,23 @@ class AdminTests(unittest.TestCase):
                     headers=headers,
                     json={"profile": "missing"},
                 )
-                return group, member, toggle, snapshot, reset, invalid
+                return (
+                    group,
+                    member,
+                    toggle,
+                    vision_toggle,
+                    snapshot,
+                    reset,
+                    invalid,
+                )
 
-        group, member, toggle, snapshot, reset, invalid = asyncio.run(run())
+        group, member, toggle, vision_toggle, snapshot, reset, invalid = asyncio.run(
+            run()
+        )
         self.assertEqual(group.status_code, 200)
         self.assertEqual(member.status_code, 200)
         self.assertEqual(toggle.status_code, 200)
+        self.assertEqual(vision_toggle.status_code, 200)
         row = next(
             item
             for item in snapshot.json()["items"]
@@ -487,6 +517,8 @@ class AdminTests(unittest.TestCase):
         self.assertFalse(row["enabled"])
         self.assertFalse(row["enabled_override"])
         self.assertEqual(row["enabled_source"], "dashboard")
+        self.assertFalse(row["vision_auto_describe"])
+        self.assertEqual(row["vision_auto_describe_source"], "dashboard")
         selected_admin = next(
             item for item in row["admins"] if item["user_id"] == 3526452465
         )
