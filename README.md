@@ -174,6 +174,8 @@ OneBot 消息重复到达只会命中原记录，不会覆盖原文。较旧聊�
 `view_image` 的 `summary`/`detail` 模式按图片地址重新识别，通过 `find_stickers` 和
 `send_sticker` 使用永久表情库。详细部署参数见
 [`docs/operations-v3.md`](docs/operations-v3.md)。
+升级前已经保存的普通图片会暂时作为不可见遗留数据保留，避免迁移自动误删；运行时不再
+读取或新增这些记录，后续应通过单独的审计清理命令处理。
 
 ## Max 风格交互
 

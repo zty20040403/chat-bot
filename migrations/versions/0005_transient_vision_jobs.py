@@ -77,27 +77,8 @@ def upgrade() -> None:
         schema=schema,
     )
 
-    # Keep every approved sticker, but remove durable copies that were only
-    # collected from ordinary images by the previous mixed pipeline.
-    op.execute(
-        sa.text(
-            f'DELETE FROM "{schema}".message_media '
-            "WHERE media_kind = 'image'"
-        )
-    )
-    op.execute(
-        sa.text(
-            f'DELETE FROM "{schema}".media_blobs AS blob '
-            f'WHERE NOT EXISTS (SELECT 1 FROM "{schema}".sticker_library AS sticker '
-            "WHERE sticker.media_id = blob.media_id)"
-        )
-    )
-    op.execute(
-        sa.text(
-            f'DELETE FROM "{schema}".semantic_documents '
-            "WHERE source_type = 'media' AND scope_key <> 'global:stickers'"
-        )
-    )
+    # Existing ordinary-image rows stay as inert legacy data. Destructive
+    # cleanup belongs in a separate, auditable maintenance operation.
 
 
 def downgrade() -> None:
