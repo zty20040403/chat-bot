@@ -127,6 +127,50 @@ class LongTermMemoryStoreTests(unittest.TestCase):
             self.assertEqual(audit[0].source_message_id, 43)
             self.assertEqual(audit[1].actor_principal_id, 7)
 
+    def test_relevant_render_is_sparse_and_keeps_scopes_isolated(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = LongTermMemoryStore(Path(directory) / "memory.json")
+            store.add(
+                "group:1",
+                "group",
+                "项目使用 Python 3.12",
+                creator_user_id=2,
+            )
+            store.add(
+                "group:2",
+                "group",
+                "另一个群使用 Rust",
+                creator_user_id=3,
+            )
+            store.add(
+                "group:1:user:2",
+                "user",
+                "喜欢绿色主题",
+                creator_user_id=2,
+            )
+
+            relevant = store.render_relevant(
+                "group:1",
+                "group:1:user:2",
+                "Python 项目怎么升级？",
+            )
+            unrelated = store.render_relevant(
+                "group:1",
+                "group:1:user:2",
+                "今天天气如何？",
+            )
+            recalled = store.render_relevant(
+                "group:1",
+                "group:1:user:2",
+                "你还记得我吗？",
+                fallback_user=True,
+            )
+
+            self.assertIn("Python 3.12", relevant)
+            self.assertNotIn("Rust", relevant)
+            self.assertEqual(unrelated, "")
+            self.assertIn("喜欢绿色主题", recalled)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -144,6 +144,7 @@ class ReferenceResolverTests(unittest.TestCase):
 
         self.assertIsNone(plan.focus_message_id)
         self.assertEqual(plan.reason_codes, ("standalone_message",))
+        self.assertEqual(plan.rendered_context, "")
 
     def test_question_with_its_own_subject_is_not_a_follow_up(self) -> None:
         self.record(self.group_a, 1, 7, "Alice", "今晚吃什么？")

@@ -99,9 +99,7 @@ class ReferenceResolver:
             rendered = self._render(
                 explicit_target,
                 self._messages_by_ids(recent, related),
-                confidence=1.0,
                 ambiguous=False,
-                reasons=("explicit_reply", "same_scope"),
             )
             return TurnContextPlan(
                 scope_key=scope.key,
@@ -132,10 +130,7 @@ class ReferenceResolver:
                 reason_codes=("standalone_message",),
                 related_message_ids=(),
                 candidates=(),
-                rendered_context=(
-                    "[上下文解析]\n当前消息被判断为独立问题；以当前群近期现场为参考，"
-                    "不要沿用当前用户与机器人的旧私有对话。"
-                ),
+                rendered_context="",
             )
 
         timestamp = int(now if now is not None else current.occurred_at if current else 0)
@@ -182,8 +177,7 @@ class ReferenceResolver:
                 related_message_ids=(),
                 candidates=candidates,
                 rendered_context=(
-                    "[上下文解析]\n当前消息像省略式追问，但没有找到足够可靠的指向。"
-                    "如果回答依赖‘这个/那个/你觉得呢’的对象，请先简短询问用户具体指什么。"
+                    "[追问指向不明确] 如果近期消息仍不足以确认对象，先简短问清楚。"
                 ),
             )
 
@@ -209,9 +203,7 @@ class ReferenceResolver:
         rendered = self._render(
             focus,
             self._messages_by_ids(recent, related),
-            confidence=confidence,
             ambiguous=ambiguous,
-            reasons=reasons,
         )
         return TurnContextPlan(
             scope_key=scope.key,
@@ -344,27 +336,21 @@ class ReferenceResolver:
         focus: CanonicalMessage,
         related: list[CanonicalMessage],
         *,
-        confidence: float,
         ambiguous: bool,
-        reasons: tuple[str, ...],
     ) -> str:
         lines = [
-            "[上下文解析：当前群共享现场，已在 scope_key 层隔离其他群和私聊]",
-            f"置信度: {confidence:.2f}; 原因: {', '.join(reasons)}",
-            "[本轮讨论焦点]",
+            "[当前群追问焦点]",
             cls._message_line(focus),
         ]
         if related:
-            lines.append("[焦点之后的相关讨论]")
+            lines.append("[相关消息]")
             lines.extend(cls._message_line(message) for message in related)
         if ambiguous:
             lines.append(
-                "[注意] 焦点候选分数接近；若现有内容不足以确定指代，先询问用户具体指哪件事。"
+                "候选接近；证据不足时先问清楚指代。"
             )
         else:
-            lines.append(
-                "回答当前省略式追问时优先围绕上述焦点和相关讨论，不要转去当前用户与机器人的旧对话。"
-            )
+            lines.append("围绕上述焦点回答，不要转去该用户的旧私聊。")
         return "\n".join(lines)
 
     @staticmethod
@@ -377,5 +363,5 @@ class ReferenceResolver:
         )
         return (
             f"[msg#{message.canonical_message_id} | {stamp} | {sender}] "
-            f"{message.prompt_text[:800]}"
+            f"{message.prompt_text[:500]}"
         )

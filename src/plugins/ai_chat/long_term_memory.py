@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import asdict, dataclass
 from typing import Any, Iterable, Literal
@@ -26,6 +27,34 @@ class MemoryEntry:
 
 
 MemoryMutationAction = Literal["create", "update", "remove", "clear", "evict"]
+
+_MEMORY_TERM_STOPWORDS = {
+    "一个",
+    "一下",
+    "为什么",
+    "什么",
+    "可以",
+    "怎么",
+    "怎样",
+    "是不是",
+    "这个",
+    "那个",
+    "觉得",
+}
+
+
+def _memory_terms(text: str) -> set[str]:
+    folded = str(text).casefold()
+    terms = {
+        match.group(0)
+        for match in re.finditer(r"[a-z0-9][a-z0-9_.+#/-]{1,}", folded)
+    }
+    for run in re.findall(r"[\u3400-\u9fff]+", folded):
+        if len(run) == 1:
+            terms.add(run)
+            continue
+        terms.update(run[index : index + 2] for index in range(len(run) - 1))
+    return {term for term in terms if term not in _MEMORY_TERM_STOPWORDS}
 
 
 @dataclass(frozen=True)
@@ -305,6 +334,96 @@ class LongTermMemoryStore:
                 )
             )
         return "\n\n".join(sections)
+
+    def render_relevant(
+        self,
+        group_scope: str | None,
+        user_scope: str,
+        query: str,
+        *,
+        include_group: bool = True,
+        include_user: bool = True,
+        fallback_group: bool = False,
+        fallback_user: bool = False,
+        max_entries_per_scope: int = 4,
+        max_chars: int = 1200,
+    ) -> str:
+        max_entries = min(max(int(max_entries_per_scope), 1), 12)
+        char_budget = min(max(int(max_chars), 200), 4000)
+        query_terms = _memory_terms(query)
+        sections: list[tuple[str, list[MemoryEntry]]] = []
+
+        if include_group and group_scope is not None:
+            entries = self._relevant_entries(
+                self.list_entries([group_scope]),
+                query_terms,
+                fallback=fallback_group,
+                limit=max_entries,
+            )
+            if entries:
+                sections.append(("[当前群相关长期记忆]", entries))
+
+        if include_user:
+            entries = self._relevant_entries(
+                self.list_entries([user_scope]),
+                query_terms,
+                fallback=fallback_user,
+                limit=max_entries,
+            )
+            if entries:
+                sections.append(("[当前用户相关长期记忆]", entries))
+
+        rendered: list[str] = []
+        used = 0
+        for title, entries in sections:
+            lines = [title]
+            for entry in entries:
+                line = f"- [#{entry.id}] {entry.content}"
+                if used + sum(len(item) + 1 for item in lines) + len(line) > char_budget:
+                    break
+                lines.append(line)
+            if len(lines) == 1:
+                continue
+            block = "\n".join(lines)
+            if rendered and used + len(block) + 2 > char_budget:
+                break
+            rendered.append(block)
+            used += len(block) + 2
+        return "\n\n".join(rendered)
+
+    @staticmethod
+    def _relevant_entries(
+        entries: list[MemoryEntry],
+        query_terms: set[str],
+        *,
+        fallback: bool,
+        limit: int,
+    ) -> list[MemoryEntry]:
+        scored = [
+            (len(query_terms.intersection(_memory_terms(entry.content))), entry)
+            for entry in entries
+        ]
+        relevant = [item for item in scored if item[0] > 0]
+        if relevant:
+            relevant.sort(
+                key=lambda item: (
+                    item[0],
+                    item[1].updated_at or item[1].created_at,
+                    item[1].id,
+                ),
+                reverse=True,
+            )
+            return [entry for _score, entry in relevant[:limit]]
+        if not fallback:
+            return []
+        return sorted(
+            entries,
+            key=lambda entry: (
+                entry.updated_at or entry.created_at,
+                entry.id,
+            ),
+            reverse=True,
+        )[:limit]
 
     def _trim_scope(
         self,
