@@ -118,6 +118,22 @@ class FakeSandboxManager:
         self.files: dict[tuple[str, str], bytes] = {
             ("s123abc", "result.txt"): b"done"
         }
+        self.created: list[str] = []
+        self.destroyed: list[str] = []
+
+    async def create(self, owner: str, runtime: str) -> dict[str, str]:
+        del owner
+        sandbox_id = f"s{len(self.created) + 1:06x}"
+        self.created.append(sandbox_id)
+        return {
+            "sandbox_id": sandbox_id,
+            "runtime": runtime,
+            "status": "running",
+        }
+
+    async def destroy(self, owner: str, sandbox_id: str) -> None:
+        del owner
+        self.destroyed.append(sandbox_id)
 
     async def write_file(
         self,
@@ -330,6 +346,30 @@ class AgentToolExecutorTests(unittest.IsolatedAsyncioTestCase):
             self.bot.uploads[0]["file"],
             "base64://" + base64.b64encode(b"done").decode("ascii"),
         )
+
+    async def test_task_sandboxes_are_destroyed_once_after_delivery(self) -> None:
+        first = json.loads(
+            await self.executor.execute("sandbox_create", {"runtime": "python"})
+            or "{}"
+        )
+        second = json.loads(
+            await self.executor.execute("sandbox_create", {"runtime": "node"})
+            or "{}"
+        )
+        first_id = first["sandbox"]["sandbox_id"]
+        second_id = second["sandbox"]["sandbox_id"]
+
+        await self.executor.execute(
+            "sandbox_destroy",
+            {"sandbox_id": first_id},
+        )
+        cleanup = await self.executor.cleanup_task_sandboxes()
+        repeated = await self.executor.cleanup_task_sandboxes()
+
+        self.assertEqual(cleanup["destroyed"], (second_id,))
+        self.assertEqual(cleanup["failed"], ())
+        self.assertEqual(repeated["destroyed"], ())
+        self.assertEqual(self.sandbox.destroyed, [first_id, second_id])
 
     async def test_forward_expansion_never_exposes_native_user_or_forward_ids(self) -> None:
         await self.executor.ensure_canonical_message(1)

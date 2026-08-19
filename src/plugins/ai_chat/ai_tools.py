@@ -303,7 +303,8 @@ SANDBOX_CREATE_TOOL: ToolDefinition = {
         "name": SANDBOX_CREATE_TOOL_NAME,
         "description": (
             "创建隔离的 Docker 开发沙盒。需要写代码、安装依赖、构建或测试项目时先调用。"
-            "工作目录固定为 /workspace。"
+            "工作目录固定为 /workspace。本次任务结束时宿主会自动销毁它，"
+            "销毁前必须用发送工具交付需要保留的文件。"
         ),
         "parameters": {
             "type": "object",

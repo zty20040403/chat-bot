@@ -198,7 +198,7 @@ from .matchers import (
 SEND_RETRY_DELAY_SECONDS = 2.0
 SEND_RETRY_MAX_CHARS = 800
 TURN_PROMPT_VERSION = "qqbot-turn-v7"
-BOT_VERSION = "0.5.17"
+BOT_VERSION = "0.5.18"
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 proactive_check_gate = ProactiveCheckGate()
 
@@ -2523,6 +2523,21 @@ async def _ask_ai(
     except Exception as exc:
         logger.exception(f"Unexpected AI chat error: {exc}")
         return "我这边处理消息时出错了。"
+    finally:
+        if agent_executor is not None:
+            cleanup = await agent_executor.cleanup_task_sandboxes()
+            destroyed = cleanup["destroyed"]
+            failed = cleanup["failed"]
+            if destroyed:
+                logger.info(
+                    f"Destroyed {len(destroyed)} task sandbox(es): "
+                    + ", ".join(destroyed)
+                )
+            if failed:
+                logger.warning(
+                    f"Could not destroy {len(failed)} task sandbox(es): "
+                    + ", ".join(failed)
+                )
 
     if not answer and not voice_reply_text and visual_reply_segment is None:
         return "模型没有返回内容。"

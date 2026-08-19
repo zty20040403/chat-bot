@@ -68,6 +68,8 @@ AGENT_TOOL_PROMPT = (
     "有新的实际进展时可以持续汇报，但不要重复发送没有信息量的内容。"
     "先创建合适运行环境的沙盒，再写入或导入文件、执行构建和测试；"
     "需要交付时，用 send_file_from_sandbox 或 send_image_from_sandbox 发到当前群。"
+    "本次任务创建的沙盒会在最终回复前由宿主统一销毁；"
+    "因此必须先发送需要保留的文件或图片，不要把沙盒当成跨任务存储。"
     "只有工具结果明确成功时才能说任务已完成。"
     "沙盒是临时开发环境，不等于公网部署；需要云平台账号或密钥时，"
     "先完成可运行项目和打包，再说明仍需用户提供外部部署条件。"
@@ -173,6 +175,7 @@ class AgentToolExecutor:
         self.turn_journal = turn_journal
         self.turn_id = turn_id
         self.browser_manager = browser_manager
+        self._task_sandbox_ids: set[str] = set()
         self.output_resolver = OneBotModelOutputResolver(
             bot,
             event,
@@ -504,6 +507,9 @@ class AgentToolExecutor:
     ) -> str:
         runtime = str(arguments.get("runtime", "python"))
         sandbox = await self.sandbox_manager.create(self.owner, runtime)
+        sandbox_id = str(sandbox.get("sandbox_id") or "").strip()
+        if sandbox_id:
+            self._task_sandbox_ids.add(sandbox_id)
         return _json_result(ok=True, sandbox=sandbox)
 
     async def _sandbox_list(
@@ -520,7 +526,28 @@ class AgentToolExecutor:
     ) -> str:
         sandbox_id = str(arguments.get("sandbox_id", ""))
         await self.sandbox_manager.destroy(self.owner, sandbox_id)
+        self._task_sandbox_ids.discard(sandbox_id)
         return _json_result(ok=True, sandbox_id=sandbox_id, status="destroyed")
+
+    async def cleanup_task_sandboxes(self) -> dict[str, tuple[str, ...]]:
+        """Destroy only sandboxes created by this executor's agent turn."""
+        destroyed: list[str] = []
+        failed: list[str] = []
+        for sandbox_id in sorted(self._task_sandbox_ids):
+            try:
+                await self.sandbox_manager.destroy(self.owner, sandbox_id)
+            except Exception as exc:
+                logger.warning(
+                    f"Automatic cleanup of sandbox {sandbox_id} failed: {exc}"
+                )
+                failed.append(sandbox_id)
+            else:
+                self._task_sandbox_ids.discard(sandbox_id)
+                destroyed.append(sandbox_id)
+        return {
+            "destroyed": tuple(destroyed),
+            "failed": tuple(failed),
+        }
 
     async def _sandbox_exec(
         self,
