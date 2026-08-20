@@ -95,6 +95,7 @@ from .historian import (
 )
 from .ledger import MessageLedger
 from .long_term_memory import LongTermMemoryError, MemoryEntry
+from .media_library import choose_sticker_candidate
 from .model_catalog import ModelCatalogError, ModelProfile
 from .message_ir import MessageBody, TextNode, render_fallback_text
 from .onebot_codec import (
@@ -197,8 +198,8 @@ from .matchers import (
 
 SEND_RETRY_DELAY_SECONDS = 2.0
 SEND_RETRY_MAX_CHARS = 800
-TURN_PROMPT_VERSION = "qqbot-turn-v8"
-BOT_VERSION = "0.5.20"
+TURN_PROMPT_VERSION = "qqbot-turn-v9"
+BOT_VERSION = "0.5.21"
 EMPTY_MENTION_FOLLOW_UP = "你觉得呢"
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 proactive_check_gate = ProactiveCheckGate()
@@ -2264,9 +2265,9 @@ async def _ask_ai(
                 try:
                     candidates = await media_library.search_stickers(
                         query,
-                        limit=5,
+                        limit=10,
                     )
-                    record = candidates[0] if candidates else None
+                    record = choose_sticker_candidate(candidates)
                 except (
                     OSError,
                     RuntimeError,
@@ -2293,9 +2294,9 @@ async def _ask_ai(
                 try:
                     candidates = await media_library.search_stickers(
                         query or user_text,
-                        limit=5,
+                        limit=10,
                     )
-                    record = candidates[0] if candidates else None
+                    record = choose_sticker_candidate(candidates)
                 except (
                     OSError,
                     RuntimeError,
@@ -2396,7 +2397,8 @@ async def _ask_ai(
             "要重发当前会话中的图片或表情包，可照抄 [image#消息.段] 或 "
             "[sticker#消息.段]；QQ 自带表情使用 [face#编号]。"
             "用户要求从已有表情包中发一张时，直接调用 send_sticker(query)，"
-            "它会在全局安全表情库检索并发送，不要先反复调用 find_stickers；"
+            "它会在全局安全表情库的匹配候选中兼顾相关度和多样性选择，"
+            "不要先反复调用 find_stickers；"
             "query 只保留用户明确说出的核心标签，不要添加泛化形容词；"
             "用户只说随便发一个时省略 query。"
             "正经问题不能用沉默敷衍，控制标记不要放在普通句子中。\n"

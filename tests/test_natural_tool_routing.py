@@ -235,7 +235,7 @@ class NaturalToolRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(answer[0].type, "image")
         fake_library.search_stickers.assert_awaited_once_with(
             "猫娘卖萌",
-            limit=5,
+            limit=10,
         )
         fake_library.get_sticker.assert_not_called()
         fake_library.mark_sent.assert_called_once_with(42)

@@ -6,6 +6,7 @@ import hashlib
 import json
 import mimetypes
 import os
+import random
 import re
 import shutil
 import socket
@@ -119,6 +120,36 @@ class MediaRecord:
     score: float = 0.0
     subjects: tuple[str, ...] = ()
     actions: tuple[str, ...] = ()
+    times_sent: int = 0
+    last_sent_at: int | None = None
+
+
+def choose_sticker_candidate(
+    candidates: Sequence[MediaRecord],
+    *,
+    now: int | None = None,
+) -> MediaRecord | None:
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+
+    current_time = int(time.time()) if now is None else int(now)
+    recent_cutoff = current_time - 300
+    not_recent = [
+        candidate
+        for candidate in candidates
+        if candidate.last_sent_at is None
+        or candidate.last_sent_at < recent_cutoff
+    ]
+    pool = not_recent or list(candidates)
+    minimum_sent = min(max(candidate.times_sent, 0) for candidate in pool)
+    weights = [
+        max(candidate.score, 0.25)
+        / (1.0 + max(candidate.times_sent - minimum_sent, 0)) ** 0.5
+        for candidate in pool
+    ]
+    return random.choices(pool, weights=weights, k=1)[0]
 
 
 class MediaLibrary:
@@ -806,7 +837,8 @@ class MediaLibrary:
                        analysis.summary, analysis.description,
                        analysis.extracted_text, analysis.subjects_json,
                        analysis.actions_json, analysis.emotions_json,
-                       analysis.usage_json, analysis.is_sticker, analysis.safety
+                       analysis.usage_json, analysis.is_sticker, analysis.safety,
+                       stickers.times_sent, stickers.last_sent_at
                 FROM media_blobs AS blob
                 JOIN media_analysis AS analysis ON analysis.media_id = blob.media_id
                 JOIN sticker_library AS stickers ON stickers.media_id = blob.media_id
@@ -909,7 +941,8 @@ class MediaLibrary:
                        analysis.summary, analysis.description,
                        analysis.extracted_text, analysis.subjects_json,
                        analysis.actions_json, analysis.emotions_json,
-                       analysis.usage_json, analysis.is_sticker, analysis.safety
+                       analysis.usage_json, analysis.is_sticker, analysis.safety,
+                       stickers.times_sent, stickers.last_sent_at
                 FROM media_blobs AS blob
                 JOIN media_analysis AS analysis ON analysis.media_id = blob.media_id
                 JOIN sticker_library AS stickers ON stickers.media_id = blob.media_id
@@ -1413,6 +1446,12 @@ class MediaLibrary:
             mime_type=str(row["mime_type"] or "application/octet-stream"),
             subjects=tuple(self._string_list(row.get("subjects_json"))),
             actions=tuple(self._string_list(row.get("actions_json"))),
+            times_sent=int(row.get("times_sent") or 0),
+            last_sent_at=(
+                int(row["last_sent_at"])
+                if row.get("last_sent_at") is not None
+                else None
+            ),
         )
 
     @staticmethod

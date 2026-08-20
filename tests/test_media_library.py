@@ -5,6 +5,7 @@ import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import nonebot
 
@@ -14,6 +15,7 @@ from src.plugins.ai_chat.media_library import (
     MediaLibrary,
     MediaLibraryError,
     MediaRecord,
+    choose_sticker_candidate,
 )
 
 
@@ -172,6 +174,71 @@ class MediaLibraryParsingTests(unittest.TestCase):
             MediaLibrary._sticker_query_terms("给我发个表情包"),
             (),
         )
+
+    def test_matching_candidates_are_not_forced_to_the_highest_score(self) -> None:
+        top = MediaRecord(
+            media_id=1,
+            handle="media#1",
+            summary="最相关",
+            description="",
+            extracted_text="",
+            emotions=(),
+            usage=(),
+            is_sticker=True,
+            safety="safe",
+            storage_path=Path("unused"),
+            mime_type="image/png",
+            score=1.0,
+        )
+        alternative = MediaRecord(
+            **{
+                **top.__dict__,
+                "media_id": 2,
+                "handle": "media#2",
+                "summary": "同样匹配的候选",
+                "score": 0.72,
+            }
+        )
+
+        with patch(
+            "src.plugins.ai_chat.media_library.random.choices",
+            return_value=[alternative],
+        ) as choices:
+            selected = choose_sticker_candidate([top, alternative], now=1000)
+
+        self.assertIs(selected, alternative)
+        self.assertEqual(choices.call_args.args[0], [top, alternative])
+
+    def test_recent_sticker_is_avoided_when_an_alternative_matches(self) -> None:
+        recent = MediaRecord(
+            media_id=1,
+            handle="media#1",
+            summary="刚发过",
+            description="",
+            extracted_text="",
+            emotions=(),
+            usage=(),
+            is_sticker=True,
+            safety="safe",
+            storage_path=Path("unused"),
+            mime_type="image/png",
+            score=1.0,
+            last_sent_at=900,
+        )
+        alternative = MediaRecord(
+            **{
+                **recent.__dict__,
+                "media_id": 2,
+                "handle": "media#2",
+                "summary": "没有刚发过",
+                "score": 0.7,
+                "last_sent_at": None,
+            }
+        )
+
+        selected = choose_sticker_candidate([recent, alternative], now=1000)
+
+        self.assertIs(selected, alternative)
 
     def test_exact_sticker_label_ranks_above_broader_alias(self) -> None:
         def record(media_id: int, summary: str) -> MediaRecord:
