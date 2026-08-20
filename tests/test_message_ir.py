@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 
 import nonebot
@@ -79,6 +80,39 @@ class MessageIRTests(unittest.TestCase):
 
         self.assertIn("[mention#7: Alice]", prompt)
         self.assertIn("[image#12.1: 截图]", prompt)
+
+    def test_qq_miniapp_card_prefers_embedded_public_share_url(self) -> None:
+        payload = {
+            "prompt": "[QQ小程序]测试视频",
+            "meta": {
+                "detail_1": {
+                    "title": "哔哩哔哩",
+                    "url": "m.q.qq.com/a/s/example",
+                    "qqdocurl": "https://b23.tv/4VaXPFH",
+                }
+            },
+        }
+        decoded = decode_onebot_message(
+            [{"type": "json", "data": {"data": json.dumps(payload)}}]
+        )
+
+        card = decoded.body.nodes[0]
+        self.assertEqual(card.title, "[QQ小程序]测试视频")
+        self.assertEqual(card.url, "https://b23.tv/4VaXPFH")
+
+    def test_qq_card_url_without_scheme_is_normalized(self) -> None:
+        payload = {
+            "prompt": "[QQ小程序]测试内容",
+            "meta": {"detail_1": {"url": "m.q.qq.com/a/s/example"}},
+        }
+        decoded = decode_onebot_message(
+            [{"type": "json", "data": {"data": json.dumps(payload)}}]
+        )
+
+        self.assertEqual(
+            decoded.body.nodes[0].url,
+            "https://m.q.qq.com/a/s/example",
+        )
 
     def test_versioned_json_round_trip_handles_raw_bytes(self) -> None:
         body = decode_onebot_message(

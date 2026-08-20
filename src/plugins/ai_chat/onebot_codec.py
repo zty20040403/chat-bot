@@ -462,8 +462,30 @@ def _card_summary(data: dict[str, Any]) -> tuple[str, str]:
     if not isinstance(payload, dict):
         return "", ""
     title = _find_string(payload, ("title", "prompt", "desc"))
-    url = _find_string(payload, ("jumpUrl", "jump_url", "url"))
-    return title, url
+    url = _find_string(
+        payload,
+        (
+            "qqdocurl",
+            "qqDocUrl",
+            "jumpUrl",
+            "jump_url",
+            "targetUrl",
+            "target_url",
+            "shareUrl",
+            "share_url",
+            "url",
+        ),
+    )
+    return title, _normalize_card_url(url)
+
+
+def _normalize_card_url(value: str) -> str:
+    url = str(value).strip()
+    if url.startswith("//"):
+        return f"https:{url}"
+    if re.match(r"^[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?:[/:?#]|$)", url):
+        return f"https://{url}"
+    return url
 
 
 def _find_string(value: Any, keys: tuple[str, ...]) -> str:
