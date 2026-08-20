@@ -217,19 +217,19 @@ in {
       };
 
       maxDownloadMB = lib.mkOption {
-        type = lib.types.positive;
+        type = lib.types.ints.positive;
         default = 500;
         description = "Maximum combined temporary video and audio download size.";
       };
 
       maxDurationMinutes = lib.mkOption {
-        type = lib.types.positive;
+        type = lib.types.ints.positive;
         default = 30;
         description = "Maximum video duration accepted by deep analysis.";
       };
 
       timeoutSeconds = lib.mkOption {
-        type = lib.types.positive;
+        type = lib.types.ints.positive;
         default = 600;
         description = "Timeout for media preparation and local transcription.";
       };
