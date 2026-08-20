@@ -168,6 +168,7 @@ from .voice import (
     synthesize_silk_voice,
     transcribe_voice,
 )
+from .video_analysis import DeepVideoAnalysisError, DeepVideoAnalyzer
 from .matchers import (
     ai,
     ai_reset,
@@ -199,7 +200,7 @@ from .matchers import (
 SEND_RETRY_DELAY_SECONDS = 2.0
 SEND_RETRY_MAX_CHARS = 800
 TURN_PROMPT_VERSION = "qqbot-turn-v10"
-BOT_VERSION = "0.5.24"
+BOT_VERSION = "0.5.25"
 EMPTY_MENTION_FOLLOW_UP = "你觉得呢"
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 proactive_check_gate = ProactiveCheckGate()
@@ -256,6 +257,26 @@ rich_renderer = app_context.rich_renderer
 media_library = app_context.media_library
 source_store = app_context.source_store
 vision_worker = app_context.vision_worker
+video_analyzer: DeepVideoAnalyzer | None = None
+if (
+    settings.video_deep_enabled
+    and source_store is not None
+    and vision_worker is not None
+):
+    try:
+        video_analyzer = DeepVideoAnalyzer(
+            source_store,
+            vision_worker,
+            whisper_model_path=settings.video_whisper_model_path,
+            frame_count=settings.video_frame_count,
+            max_download_bytes=settings.video_max_download_bytes,
+            max_duration_seconds=settings.video_max_duration_seconds,
+            timeout_seconds=settings.video_timeout_seconds,
+            whisper_threads=settings.video_whisper_threads,
+            cache_seconds=settings.video_cache_seconds,
+        )
+    except DeepVideoAnalysisError as exc:
+        logger.warning(f"Deep video analysis is unavailable: {exc}")
 cold_archive = app_context.cold_archive
 background_tasks = app_context.background_tasks
 BOT_STARTED_AT = app_context.started_at
@@ -1300,6 +1321,7 @@ async def _ask_ai(
             turn_id=journal_turn_id,
             browser_manager=browser_manager,
             source_store=source_store,
+            video_analyzer=video_analyzer,
         )
         if agent_executor_enabled and isinstance(event, GroupMessageEvent)
         else None

@@ -14,6 +14,10 @@
     cp ${pkgs.sarasa-gothic}/share/fonts/truetype/Sarasa-Regular.ttc \
       "$out/share/fonts/Sarasa-Regular.ttc"
   '';
+  defaultWhisperModel = pkgs.fetchurl {
+    url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin";
+    hash = "sha256-YO1bw90U7qhWST0zQ0m0BXgt3K8AKNS130CINF+6Lv4=";
+  };
   codesnapConfig = pkgs.writeText "qq-bot-codesnap.json" (builtins.toJSON {
     print_eggs = false;
     snapshot_config = {
@@ -190,6 +194,47 @@ in {
       };
     };
 
+    videoDeep = {
+      enable = lib.mkEnableOption "temporary deep analysis of shared Bilibili videos";
+
+      whisperPackage = lib.mkOption {
+        type = lib.types.package;
+        default = pkgs.whisper-cpp;
+        defaultText = lib.literalExpression "pkgs.whisper-cpp";
+        description = "whisper.cpp package used for local audio transcription.";
+      };
+
+      whisperModel = lib.mkOption {
+        type = lib.types.package;
+        default = defaultWhisperModel;
+        description = "Fixed-output multilingual Whisper model file.";
+      };
+
+      frameCount = lib.mkOption {
+        type = lib.types.ints.between 4 12;
+        default = 8;
+        description = "Number of evenly sampled video frames sent to the vision model.";
+      };
+
+      maxDownloadMB = lib.mkOption {
+        type = lib.types.positive;
+        default = 500;
+        description = "Maximum combined temporary video and audio download size.";
+      };
+
+      maxDurationMinutes = lib.mkOption {
+        type = lib.types.positive;
+        default = 30;
+        description = "Maximum video duration accepted by deep analysis.";
+      };
+
+      timeoutSeconds = lib.mkOption {
+        type = lib.types.positive;
+        default = 600;
+        description = "Timeout for media preparation and local transcription.";
+      };
+    };
+
     napcat = {
       enable = lib.mkEnableOption "a dedicated NapCat container for this bot";
 
@@ -281,7 +326,11 @@ in {
         cfg.runtimePackages
         ++ lib.optionals cfg.sandbox.enable [pkgs.docker]
         ++ lib.optionals cfg.browser.enable [cfg.browser.package]
-        ++ lib.optionals cfg.codesnap.enable [cfg.codesnap.package];
+        ++ lib.optionals cfg.codesnap.enable [cfg.codesnap.package]
+        ++ lib.optionals cfg.videoDeep.enable [
+          pkgs.ffmpeg-headless
+          cfg.videoDeep.whisperPackage
+        ];
       environment =
         {
           HOME = statePath;
@@ -305,6 +354,17 @@ in {
         }
         // lib.optionalAttrs (!cfg.codesnap.enable) {
           AI_CODESNAP_ENABLED = "false";
+        }
+        // lib.optionalAttrs cfg.videoDeep.enable {
+          AI_VIDEO_DEEP_ENABLED = "true";
+          AI_VIDEO_WHISPER_MODEL_PATH = toString cfg.videoDeep.whisperModel;
+          AI_VIDEO_FRAME_COUNT = toString cfg.videoDeep.frameCount;
+          AI_VIDEO_MAX_DOWNLOAD_MB = toString cfg.videoDeep.maxDownloadMB;
+          AI_VIDEO_MAX_DURATION_MINUTES = toString cfg.videoDeep.maxDurationMinutes;
+          AI_VIDEO_TIMEOUT_SECONDS = toString cfg.videoDeep.timeoutSeconds;
+        }
+        // lib.optionalAttrs (!cfg.videoDeep.enable) {
+          AI_VIDEO_DEEP_ENABLED = "false";
         }
         // cfg.environment;
 

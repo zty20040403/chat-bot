@@ -60,6 +60,7 @@ from .onebot_codec import (
 from .onebot_model_output import OneBotModelOutputResolver
 from .sandbox import DockerSandboxManager, SandboxError
 from .turn_journal import TurnJournal
+from .video_analysis import DeepVideoAnalysisError, DeepVideoAnalyzer
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 MESSAGE_HANDLE_PATTERN = re.compile(r"^msg#([1-9][0-9]*)$")
@@ -81,7 +82,8 @@ AGENT_TOOL_PROMPT = (
     "不要猜测 OneBot 原始消息 ID、群号或 QQ 号。"
     "用户询问 QQ 分享卡片、帖子、视频或网页内容时，优先调用 "
     "inspect_shared_content，并完整照抄上下文里的 source#、msg# 或链接；"
-    "不要先用普通浏览器重复打开同一个分享。"
+    "不要先用普通浏览器重复打开同一个分享。用户明确说仔细看视频、分析画面、"
+    "听音轨或逐段总结时，把 mode 设为 deep；普通询问使用 quick。"
 )
 
 
@@ -171,6 +173,7 @@ class AgentToolExecutor:
         turn_id: int | None = None,
         browser_manager: BrowserManager | None = None,
         source_store: ContentSourceStore | None = None,
+        video_analyzer: DeepVideoAnalyzer | None = None,
     ) -> None:
         self.bot = bot
         self.event = event
@@ -183,6 +186,7 @@ class AgentToolExecutor:
         self.turn_id = turn_id
         self.browser_manager = browser_manager
         self.source_store = source_store
+        self.video_analyzer = video_analyzer
         self._task_sandbox_ids: set[str] = set()
         self.output_resolver = OneBotModelOutputResolver(
             bot,
@@ -273,6 +277,7 @@ class AgentToolExecutor:
             BrowserPolicyError,
             BilibiliError,
             ContentSourceError,
+            DeepVideoAnalysisError,
         ) as exc:
             return _json_result(ok=False, error=str(exc))
         except ActionFailed as exc:
@@ -461,6 +466,9 @@ class AgentToolExecutor:
     ) -> str:
         if self.source_store is None or self.scope is None:
             return _json_result(ok=False, error="分享来源索引没有开启。")
+        mode = str(arguments.get("mode") or "quick").strip().casefold()
+        if mode not in {"quick", "deep"}:
+            mode = "quick"
         source, cached = await self.source_store.inspect(
             self.scope,
             str(arguments.get("target") or ""),
@@ -475,9 +483,32 @@ class AgentToolExecutor:
                 20,
             ),
         )
+        payload = source.as_tool_payload(cached=cached)
+        if mode == "deep":
+            if self.video_analyzer is None:
+                return _json_result(ok=False, error="深度视频分析服务暂时没有开启。")
+
+            async def report(text: str) -> None:
+                await self._say({"text": text})
+
+            analysis, analysis_cached = await self.video_analyzer.analyze(
+                source,
+                question=str(arguments.get("question") or "").strip(),
+                force_refresh=bool(arguments.get("force_refresh", False)),
+                progress=report,
+            )
+            tool_analysis = dict(analysis)
+            tool_analysis["transcript"] = str(
+                tool_analysis.get("transcript") or ""
+            )[:5000]
+            payload["body_text"] = str(payload.get("body_text") or "")[:1000]
+            payload["comments"] = list(payload.get("comments") or [])[:5]
+            payload["deep_analysis"] = tool_analysis
+            payload["deep_cached"] = analysis_cached
         return _json_result(
             ok=True,
-            source=source.as_tool_payload(cached=cached),
+            mode=mode,
+            source=payload,
         )
 
     async def _get_shared_content(

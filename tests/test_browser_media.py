@@ -154,6 +154,73 @@ class BrowserAndMediaTests(unittest.TestCase):
         self.assertEqual(result["top_comments"][0]["text"], "nice")  # type: ignore[index]
         self.assertEqual(find_bilibili_ref("https://b23.tv/AbCd").short_url, "https://b23.tv/AbCd")  # type: ignore[union-attr]
 
+    def test_bilibili_media_streams_choose_bounded_avc_video(self) -> None:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/x/web-interface/view"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "code": 0,
+                        "data": {
+                            "bvid": "BV1xx411c7mD",
+                            "cid": 99,
+                            "duration": 123,
+                        },
+                    },
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "dash": {
+                            "video": [
+                                {
+                                    "height": 480,
+                                    "bandwidth": 100,
+                                    "codecs": "hev1",
+                                    "baseUrl": "https://cdn.example/hevc.m4s",
+                                },
+                                {
+                                    "height": 480,
+                                    "bandwidth": 90,
+                                    "codecs": "avc1",
+                                    "baseUrl": "https://cdn.example/avc.m4s",
+                                },
+                                {
+                                    "height": 1080,
+                                    "bandwidth": 200,
+                                    "codecs": "avc1",
+                                    "baseUrl": "https://cdn.example/1080.m4s",
+                                },
+                            ],
+                            "audio": [
+                                {
+                                    "bandwidth": 64,
+                                    "baseUrl": "https://cdn.example/low.m4s",
+                                },
+                                {
+                                    "bandwidth": 128,
+                                    "baseUrl": "https://cdn.example/high.m4s",
+                                },
+                            ],
+                        }
+                    },
+                },
+            )
+
+        async def run():
+            http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+            client = BilibiliClient(client=http)
+            result = await client.media_streams("BV1xx411c7mD")
+            await http.aclose()
+            return result
+
+        result = asyncio.run(run())
+        self.assertEqual(result["video_url"], "https://cdn.example/avc.m4s")
+        self.assertEqual(result["audio_url"], "https://cdn.example/high.m4s")
+        self.assertEqual(result["duration_seconds"], 123)
+
     def test_tool_catalog_exposes_conversation_and_browser_tools_separately(self) -> None:
         tools = available_tools(
             include_web_search=False,

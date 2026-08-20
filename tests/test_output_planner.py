@@ -47,6 +47,17 @@ class OutputPlannerTests(unittest.TestCase):
             [(42, "第一条"), (51, "第二条")],
         )
 
+    def test_accepts_accidental_msg_prefix_in_reply_handle(self) -> None:
+        plan = plan_reply("[reply#msg7674] 内容")
+
+        self.assertEqual(plan.chunks[0].reply_message_id, 7674)
+        self.assertEqual(plan.chunks[0].text, "内容")
+
+    def test_strips_bold_markers_but_preserves_inline_code(self) -> None:
+        plan = plan_reply("这是 **重点**，保留 `**literal**`")
+
+        self.assertEqual(plan.chunks[0].text, "这是 重点，保留 `**literal**`")
+
     def test_extracts_reply_token_anywhere_but_not_from_code(self) -> None:
         plan = plan_reply(
             "先看 [reply#42: 原消息] 这一条\n\n"

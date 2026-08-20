@@ -78,12 +78,15 @@ CURATED_FACE_IDS = {
     "闭嘴": DEFAULT_SILENCE_FACE_ID,
 }
 
-_QUOTE_HANDLE = re.compile(r"^\s*\[(?:reply|↩)#(-?[0-9]+)\]\s*")
+_QUOTE_HANDLE = re.compile(r"^\s*\[(?:reply|↩)#(?:msg)?(-?[0-9]+)\]\s*")
 _REPLY_TOKEN = re.compile(
-    r"\[(?:reply|↩)#(?P<message_id>-?[0-9]+)"
+    r"\[(?:reply|↩)#(?:msg)?(?P<message_id>-?[0-9]+)"
     r"(?::[^\]\r\n]*)?\](?:\([^\)\r\n]*\))?[ \t]?"
 )
 _PROTECTED = re.compile(r"```[\s\S]*?(?:```|\Z)|`[^`\r\n]*(?:`|\Z)")
+_STRONG_EMPHASIS = re.compile(
+    r"(?P<mark>\*\*|__)(?P<body>[^\r\n]+?)(?P=mark)"
+)
 _SILENCE = re.compile(r"^\[(?:silence|沉默)(?:[:：]([^\]]+))?\]$")
 
 
@@ -154,7 +157,10 @@ def face_prompt_table() -> str:
 
 def _planned_chunk(text: str) -> PlannedChunk:
     ids, body = _extract_reply_handles(text.strip())
-    return PlannedChunk(text=body, reply_message_id=_first_positive(ids))
+    return PlannedChunk(
+        text=_strip_markdown_emphasis(body),
+        reply_message_id=_first_positive(ids),
+    )
 
 
 def _extract_reply_handles(text: str) -> tuple[tuple[int, ...], str]:
@@ -179,6 +185,27 @@ def _extract_reply_handles(text: str) -> tuple[tuple[int, ...], str]:
 
 def _first_positive(values: tuple[int, ...]) -> int | None:
     return next((value for value in values if value > 0), None)
+
+
+def _strip_markdown_emphasis(text: str) -> str:
+    parts: list[str] = []
+    position = 0
+    for protected in _PROTECTED.finditer(text):
+        parts.append(
+            _STRONG_EMPHASIS.sub(
+                lambda match: match.group("body"),
+                text[position : protected.start()],
+            )
+        )
+        parts.append(protected.group(0))
+        position = protected.end()
+    parts.append(
+        _STRONG_EMPHASIS.sub(
+            lambda match: match.group("body"),
+            text[position:],
+        )
+    )
+    return "".join(parts)
 
 
 def _split_chunks(text: str) -> list[str]:

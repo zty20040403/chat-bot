@@ -153,6 +153,14 @@ class Settings:
     media_lease_seconds: int
     media_batch_size: int
     media_worker_concurrency: int
+    video_deep_enabled: bool
+    video_whisper_model_path: str
+    video_frame_count: int
+    video_max_download_bytes: int
+    video_max_duration_seconds: int
+    video_timeout_seconds: int
+    video_whisper_threads: int
+    video_cache_seconds: int
     archive_enabled: bool
     archive_root: str
     archive_media_retention_days: int
@@ -445,6 +453,31 @@ class Settings:
             ),
             media_worker_concurrency=min(
                 max(_get_int("AI_MEDIA_WORKER_CONCURRENCY", 2), 1), 8
+            ),
+            video_deep_enabled=_get_bool("AI_VIDEO_DEEP_ENABLED", False),
+            video_whisper_model_path=os.getenv(
+                "AI_VIDEO_WHISPER_MODEL_PATH", ""
+            ).strip(),
+            video_frame_count=min(
+                max(_get_int("AI_VIDEO_FRAME_COUNT", 8), 4), 12
+            ),
+            video_max_download_bytes=max(
+                _get_int("AI_VIDEO_MAX_DOWNLOAD_MB", 500), 10
+            )
+            * 1024
+            * 1024,
+            video_max_duration_seconds=max(
+                _get_int("AI_VIDEO_MAX_DURATION_MINUTES", 30), 1
+            )
+            * 60,
+            video_timeout_seconds=min(
+                max(_get_int("AI_VIDEO_TIMEOUT_SECONDS", 600), 60), 1800
+            ),
+            video_whisper_threads=min(
+                max(_get_int("AI_VIDEO_WHISPER_THREADS", 8), 1), 32
+            ),
+            video_cache_seconds=max(
+                _get_int("AI_VIDEO_CACHE_SECONDS", 86400), 60
             ),
             archive_enabled=_get_bool("AI_ARCHIVE_ENABLED", False),
             archive_root=os.getenv("AI_ARCHIVE_ROOT", "").strip(),

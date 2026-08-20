@@ -836,10 +836,10 @@ INSPECT_SHARED_CONTENT_TOOL: ToolDefinition = {
     "function": {
         "name": INSPECT_SHARED_CONTENT_TOOL_NAME,
         "description": (
-            "快速读取群里分享的帖子、视频或网页。B站会读取标题、UP主、简介、"
-            "互动数据和热评；小红书及其他平台会读取无需登录即可看到的页面内容。"
-            "用户问分享里讲了什么、怎么看、评论如何时调用。接受上下文中的 "
-            "source#、msg# 或完整 HTTP(S) 链接。这是快速读取，不会下载完整视频。"
+            "读取群里分享的帖子、视频或网页。quick 会读取标题、简介、互动数据和"
+            "评论；用户明确要求仔细看 B站视频、分析画面、听音轨或逐段总结时必须用"
+            "deep，它会临时下载低清视频、均匀抽帧并用本地 Whisper 转写音轨。"
+            "接受上下文中的 source#、msg# 或完整 HTTP(S) 链接。"
         ),
         "parameters": {
             "type": "object",
@@ -848,6 +848,17 @@ INSPECT_SHARED_CONTENT_TOOL: ToolDefinition = {
                     "type": "string",
                     "maxLength": 4000,
                     "description": "完整照抄上下文中的 source#、msg# 或链接。",
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["quick", "deep"],
+                    "default": "quick",
+                    "description": "普通读取用 quick；明确要求仔细看视频时用 deep。",
+                },
+                "question": {
+                    "type": "string",
+                    "maxLength": 2000,
+                    "description": "深度分析需要重点回答的问题。",
                 },
                 "force_refresh": {
                     "type": "boolean",

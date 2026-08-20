@@ -231,6 +231,66 @@ class ContentSourceStore:
             raise ContentSourceError("当前群没有见过这个来源。")
         return source
 
+    def refresh_source(self, source_id: int) -> ContentSource:
+        return self._get_by_id(int(source_id))
+
+    def cached_deep_analysis(
+        self,
+        source: ContentSource,
+        *,
+        max_age_seconds: int = 24 * 60 * 60,
+    ) -> dict[str, object] | None:
+        cached = source.metadata.get("deep_video_analysis_v1")
+        if not isinstance(cached, dict):
+            return None
+        created_at = _safe_int(cached.get("created_at"))
+        result = cached.get("result")
+        if (
+            created_at <= 0
+            or created_at + max(int(max_age_seconds), 60) <= int(time.time())
+            or not isinstance(result, dict)
+        ):
+            return None
+        return dict(result)
+
+    def save_deep_analysis(
+        self,
+        source_id: int,
+        result: dict[str, object],
+    ) -> ContentSource:
+        now = int(time.time())
+        connection = self.database.store_connection()
+        cursor = connection.cursor()
+        try:
+            row = cursor.execute(
+                "SELECT metadata_json FROM content_sources WHERE source_id = ? FOR UPDATE",
+                (int(source_id),),
+            ).fetchone()
+            if row is None:
+                raise ContentSourceError("分享来源不存在。")
+            metadata = _json_load(row["metadata_json"], {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+            metadata["deep_video_analysis_v1"] = {
+                "created_at": now,
+                "result": result,
+            }
+            cursor.execute(
+                """
+                UPDATE content_sources
+                SET metadata_json = ?, updated_at = ?
+                WHERE source_id = ?
+                """,
+                (_json_dump(metadata, {}), now, int(source_id)),
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        return self._get_by_id(source_id)
+
     def resolve_target(
         self,
         scope: ConversationScope,
@@ -566,6 +626,21 @@ class ContentSourceStore:
     ) -> ContentSource:
         connection = self.database.store_connection()
         try:
+            row = connection.execute(
+                "SELECT metadata_json FROM content_sources WHERE source_id = ? FOR UPDATE",
+                (int(source_id),),
+            ).fetchone()
+            existing_metadata = (
+                _json_load(row["metadata_json"], {}) if row is not None else {}
+            )
+            incoming_metadata = payload.get("metadata")
+            merged_metadata = (
+                dict(incoming_metadata) if isinstance(incoming_metadata, dict) else {}
+            )
+            if isinstance(existing_metadata, dict):
+                deep_analysis = existing_metadata.get("deep_video_analysis_v1")
+                if isinstance(deep_analysis, dict):
+                    merged_metadata["deep_video_analysis_v1"] = deep_analysis
             connection.execute(
                 """
                 UPDATE content_sources
@@ -582,7 +657,7 @@ class ContentSourceStore:
                     str(payload.get("summary") or "")[:2000],
                     str(payload.get("body_text") or "")[:12000],
                     _json_dump(payload.get("comments"), []),
-                    _json_dump(payload.get("metadata"), {}),
+                    _json_dump(merged_metadata, {}),
                     now,
                     now + self.cache_seconds,
                     now,
@@ -701,6 +776,13 @@ def classify_source(url: str) -> tuple[str, str]:
 def _parse_handle(pattern: re.Pattern[str], value: str) -> int | None:
     matched = pattern.fullmatch(str(value).strip())
     return int(matched.group(1)) if matched is not None else None
+
+
+def _safe_int(value: object, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
 
 
 def _row_to_source(row: Any) -> ContentSource:

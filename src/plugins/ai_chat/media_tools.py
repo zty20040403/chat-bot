@@ -119,6 +119,55 @@ class BilibiliClient:
             "url": f"https://www.bilibili.com/video/{data.get('bvid') or ''}",
         }
 
+    async def media_streams(
+        self,
+        value: str,
+        *,
+        max_height: int = 480,
+    ) -> dict[str, object]:
+        ref = find_bilibili_ref(value)
+        if ref is None:
+            raise BilibiliError("没有找到 BV 号、av 号或 b23.tv 视频短链")
+        if ref.short_url:
+            ref = await self._resolve_short(ref.short_url)
+        params = {"bvid": ref.bvid} if ref.bvid else {"aid": ref.aid}
+        view_payload = await self._get_json(
+            "https://api.bilibili.com/x/web-interface/view",
+            params=params,
+        )
+        view = _api_data(view_payload)
+        bvid = str(view.get("bvid") or ref.bvid or "")
+        cid = _safe_int(view.get("cid"))
+        if not bvid or cid <= 0:
+            raise BilibiliError("B站没有返回可播放的视频分P")
+        play_payload = await self._get_json(
+            "https://api.bilibili.com/x/player/playurl",
+            params={
+                "bvid": bvid,
+                "cid": cid,
+                "qn": 32,
+                "fnval": 16,
+                "fourk": 0,
+            },
+        )
+        play = _api_data(play_payload)
+        dash = play.get("dash") if isinstance(play.get("dash"), dict) else {}
+        videos = dash.get("video") if isinstance(dash.get("video"), list) else []
+        audios = dash.get("audio") if isinstance(dash.get("audio"), list) else []
+        video = _select_video_stream(videos, max_height=max_height)
+        audio = _select_audio_stream(audios)
+        if video is None or audio is None:
+            raise BilibiliError("B站没有返回可用的视频或音频流")
+        return {
+            "bvid": bvid,
+            "cid": cid,
+            "duration_seconds": _safe_int(view.get("duration")),
+            "video_url": _stream_url(video),
+            "audio_url": _stream_url(audio),
+            "video_height": _safe_int(video.get("height")),
+            "video_codec": str(video.get("codecs") or ""),
+        }
+
     async def _resolve_short(self, url: str) -> BilibiliRef:
         response = await self.client.get(url)
         if response.status_code >= 400:
@@ -164,6 +213,40 @@ def find_bilibili_ref(value: str) -> BilibiliRef | None:
     if short is not None:
         return BilibiliRef(short_url=short.group(0))
     return None
+
+
+def _select_video_stream(
+    streams: list[object],
+    *,
+    max_height: int,
+) -> dict[str, Any] | None:
+    candidates = [item for item in streams if isinstance(item, dict)]
+    bounded = [
+        item for item in candidates if 0 < _safe_int(item.get("height")) <= max_height
+    ]
+    pool = bounded or candidates
+    if not pool:
+        return None
+    return max(
+        pool,
+        key=lambda item: (
+            _safe_int(item.get("height")),
+            str(item.get("codecs") or "").casefold().startswith("avc"),
+            _safe_int(item.get("bandwidth")),
+        ),
+    )
+
+
+def _select_audio_stream(streams: list[object]) -> dict[str, Any] | None:
+    candidates = [item for item in streams if isinstance(item, dict)]
+    return max(candidates, key=lambda item: _safe_int(item.get("bandwidth"))) if candidates else None
+
+
+def _stream_url(stream: dict[str, Any]) -> str:
+    value = str(stream.get("baseUrl") or stream.get("base_url") or "").strip()
+    if not value.startswith(("http://", "https://")):
+        raise BilibiliError("B站返回了无效的媒体流地址")
+    return value
 
 
 def _api_data(payload: dict[str, Any]) -> dict[str, Any]:
