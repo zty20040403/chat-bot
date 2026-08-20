@@ -15,6 +15,8 @@ nonebot.init()
 from src.plugins.ai_chat.ai_tools import (
     BROWSER_CLEAR_TOOL_NAME,
     BROWSER_NAVIGATE_TOOL_NAME,
+    GET_SHARED_CONTENT_TOOL_NAME,
+    INSPECT_SHARED_CONTENT_TOOL_NAME,
     VIEW_BILIBILI_TOOL_NAME,
     VIEW_FORWARD_TOOL_NAME,
     available_tools,
@@ -171,6 +173,17 @@ class BrowserAndMediaTests(unittest.TestCase):
         self.assertIn("view_image", names)
         self.assertNotIn("find_images", names)
         self.assertIn("find_stickers", names)
+
+        source_tools = available_tools(
+            include_web_search=False,
+            include_image_ocr=False,
+            include_conversation_tools=True,
+            include_source_tools=True,
+        )
+        source_names = {item["function"]["name"] for item in source_tools}
+        self.assertIn(INSPECT_SHARED_CONTENT_TOOL_NAME, source_names)
+        self.assertIn(GET_SHARED_CONTENT_TOOL_NAME, source_names)
+        self.assertNotIn(VIEW_BILIBILI_TOOL_NAME, source_names)
 
 
 if __name__ == "__main__":

@@ -41,6 +41,8 @@ REMINDER_LIST_TOOL_NAME = "reminder_list"
 REMINDER_CANCEL_TOOL_NAME = "reminder_cancel"
 VIEW_FORWARD_TOOL_NAME = "view_forward"
 VIEW_BILIBILI_TOOL_NAME = "view_bilibili"
+INSPECT_SHARED_CONTENT_TOOL_NAME = "inspect_shared_content"
+GET_SHARED_CONTENT_TOOL_NAME = "get_shared_content"
 BROWSER_NAVIGATE_TOOL_NAME = "browser_navigate"
 BROWSER_SNAPSHOT_TOOL_NAME = "browser_snapshot"
 BROWSER_CLICK_TOOL_NAME = "browser_click"
@@ -829,6 +831,65 @@ VIEW_BILIBILI_TOOL: ToolDefinition = {
     },
 }
 
+INSPECT_SHARED_CONTENT_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": INSPECT_SHARED_CONTENT_TOOL_NAME,
+        "description": (
+            "快速读取群里分享的帖子、视频或网页。B站会读取标题、UP主、简介、"
+            "互动数据和热评；小红书及其他平台会读取无需登录即可看到的页面内容。"
+            "用户问分享里讲了什么、怎么看、评论如何时调用。接受上下文中的 "
+            "source#、msg# 或完整 HTTP(S) 链接。这是快速读取，不会下载完整视频。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "target": {
+                    "type": "string",
+                    "maxLength": 4000,
+                    "description": "完整照抄上下文中的 source#、msg# 或链接。",
+                },
+                "force_refresh": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "仅在用户明确要求刷新时设为 true。",
+                },
+                "comment_count": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 20,
+                    "default": 10,
+                    "description": "B站热评数量；其他平台可能无法提供评论。",
+                },
+            },
+            "required": ["target"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+GET_SHARED_CONTENT_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": GET_SHARED_CONTENT_TOOL_NAME,
+        "description": (
+            "读取当前群已缓存的分享内容，不访问互联网。只接受当前群上下文中真实存在的 "
+            "source# 句柄；需要首次读取或刷新时改用 inspect_shared_content。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "source_handle": {
+                    "type": "string",
+                    "pattern": "^source#[1-9][0-9]*$",
+                }
+            },
+            "required": ["source_handle"],
+            "additionalProperties": False,
+        },
+    },
+}
+
 BROWSER_NAVIGATE_TOOL: ToolDefinition = {
     "type": "function",
     "function": {
@@ -1028,8 +1089,12 @@ CONVERSATION_TOOLS = [
     GET_MESSAGE_BY_ID_TOOL,
     SEARCH_MESSAGES_TOOL,
     VIEW_FORWARD_TOOL,
-    VIEW_BILIBILI_TOOL,
     SAY_TOOL,
+]
+
+SOURCE_TOOLS = [
+    INSPECT_SHARED_CONTENT_TOOL,
+    GET_SHARED_CONTENT_TOOL,
 ]
 
 BROWSER_TOOLS = [
@@ -1062,6 +1127,7 @@ def available_tools(
     include_group_tools: bool = False,
     include_reminder_tools: bool = False,
     include_media_tools: bool = False,
+    include_source_tools: bool = False,
 ) -> list[ToolDefinition]:
     tools: list[ToolDefinition] = []
     if include_web_search:
@@ -1082,6 +1148,10 @@ def available_tools(
         tools.extend(SANDBOX_TOOLS)
     if include_conversation_tools:
         tools.extend(CONVERSATION_TOOLS)
+        if not include_source_tools:
+            tools.append(VIEW_BILIBILI_TOOL)
+    if include_source_tools:
+        tools.extend(SOURCE_TOOLS)
     if include_browser_tools:
         tools.extend(BROWSER_TOOLS)
     if include_turn_tools:

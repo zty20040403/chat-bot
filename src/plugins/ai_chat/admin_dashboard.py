@@ -99,6 +99,10 @@ _DASHBOARD_TEMPLATE = r"""<!doctype html>
             data-title="视觉与表情" data-subtitle="永久表情库存与临时识图任务">
             <span data-icon="image"></span><span>视觉与表情</span><b id="nav-media-count">0</b>
           </button>
+          <button class="nav-item" type="button" data-view="sources"
+            data-title="分享来源" data-subtitle="帖子、视频与网页的按需读取状态">
+            <span data-icon="link"></span><span>分享来源</span><b id="nav-source-count">0</b>
+          </button>
           <button class="nav-item" type="button" data-view="group-models"
             data-title="群模型" data-subtitle="我自己与其他群友的模型分配">
             <span data-icon="users"></span><span>群模型</span>
@@ -282,6 +286,14 @@ _DASHBOARD_TEMPLATE = r"""<!doctype html>
           <div class="table-wrap"><table><thead><tr>
             <th>批次</th><th>状态</th><th>候选</th><th>已删除</th><th>空间</th><th>时间</th>
           </tr></thead><tbody id="media-cleanup-body"></tbody></table></div>
+        </section>
+
+        <section class="view" id="sources" hidden>
+          <div class="section-heading"><div><h2>分享来源</h2><p>全局去重内容，按群隔离 source# 可见性；仅在被询问时读取网页</p></div><span class="count-label" id="source-count">0 个</span></div>
+          <div class="table-wrap"><table class="wide-table"><thead><tr>
+            <th>Source</th><th>平台 / 类型</th><th>标题与摘要</th><th>状态</th><th>群范围</th><th>出现</th><th>最近看到</th>
+          </tr></thead><tbody id="source-body"></tbody></table></div>
+          <div class="table-footer" data-pager-wrap="sources"></div>
         </section>
 
         <section class="view" id="group-models" hidden>
@@ -993,6 +1005,7 @@ const ICONS = {
   box: '<path d="m21 8-9 5-9-5"/><path d="m3 8 9-5 9 5v8l-9 5-9-5Z"/><path d="M12 13v8"/>',
   smile: '<circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2M9 9h.01M15 9h.01"/>',
   image: '<rect width="18" height="18" x="3" y="3" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 21"/>',
+  link: '<path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/>',
   database: '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.7 4 3 9 3s9-1.3 9-3V5"/><path d="M3 12c0 1.7 4 3 9 3s9-1.3 9-3"/>',
   users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>',
   cpu: '<rect width="16" height="16" x="4" y="4" rx="2"/><rect width="6" height="6" x="9" y="9" rx="1"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/>',
@@ -1032,12 +1045,13 @@ const state = {
   sandboxes: { items: [] },
   stickers: { counts: {}, items: [] },
   media: { counts: {}, items: [], jobs: [] },
+  sources: { counts: {}, platforms: [], items: [] },
   databases: { available: false, overall: 'unconfigured', nodes: [], pool: {} },
   groups: { items: [] },
   contextPlans: { items: [] },
   usageDays: 30,
-  pages: { deliveries: 0, usage: 0, stickers: 0, media: 0, contextPlans: 0 },
-  pageSizes: { deliveries: 10, usage: 10, stickers: 10, media: 10, contextPlans: 10 }
+  pages: { deliveries: 0, usage: 0, stickers: 0, media: 0, sources: 0, contextPlans: 0 },
+  pageSizes: { deliveries: 10, usage: 10, stickers: 10, media: 10, sources: 10, contextPlans: 10 }
 };
 
 let loading = false;
@@ -1303,6 +1317,7 @@ function renderOverview() {
   document.querySelector('#nav-sandbox-count').textContent = number(sandboxItems.length);
   document.querySelector('#nav-sticker-count').textContent = number(stickerCounts.total);
   document.querySelector('#nav-media-count').textContent = number((state.media.counts || {}).total);
+  document.querySelector('#nav-source-count').textContent = number((state.sources.counts || {}).total);
 }
 
 function databaseRoleLabel(node) {
@@ -1495,6 +1510,38 @@ function renderMedia() {
       `<td>${number(run.candidate_count)}</td><td>${number(run.deleted_count)}</td>` +
       `<td>${fmtBytes(run.candidate_bytes)}</td><td>${fmt(run.finished_at || run.requested_at)}</td></tr>`).join('')
     : emptyRow(6, '还没有执行过旧图片清理');
+}
+
+function renderSources() {
+  const data = state.sources;
+  const counts = data.counts || {};
+  const items = data.items || [];
+  const platformSummary = (data.platforms || [])
+    .slice(0, 4)
+    .map((item) => `${item.platform} ${number(item.total)}`)
+    .join(' · ');
+  document.querySelector('#source-count').textContent =
+    `${number(counts.total)} 个 · 已读取 ${number(counts.ready)} · 失败 ${number(counts.failed)}${platformSummary ? ` · ${platformSummary}` : ''}`;
+  if (!data.available) {
+    document.querySelector('#source-body').innerHTML = emptyRow(7, data.error || '分享来源索引未启用');
+    document.querySelector('[data-pager-wrap="sources"]').innerHTML = '';
+    return;
+  }
+  renderPaged('sources', items, 'source-body', 7, (item) => {
+    const status = item.status === 'ready'
+      ? 'success'
+      : (item.status === 'failed' ? 'danger' : (item.status === 'fetching' ? 'running' : 'pending'));
+    const statusText = item.status === 'ready'
+      ? '已读取'
+      : (item.status === 'failed' ? '失败' : (item.status === 'fetching' ? '读取中' : '待读取'));
+    const detail = item.summary || item.last_error || item.canonical_url || '';
+    return `<tr><td><code>source#${esc(item.source_id)}</code><div class="subtle">${esc(item.remote_id || '-')}</div></td>` +
+      `<td>${esc(item.platform)}<div class="subtle">${esc(item.content_kind)}</div></td>` +
+      `<td><a class="truncate-cell" href="${esc(item.canonical_url)}" target="_blank" rel="noreferrer" title="${esc(item.canonical_url)}">${esc(item.title || item.canonical_url)}</a>` +
+      `<div class="subtle truncate-cell" title="${esc(detail)}">${esc(detail || '等待首次读取')}</div></td>` +
+      `<td>${statusBadge(status, statusText)}</td><td>${number(item.scopes)} 个群</td>` +
+      `<td>${number(item.occurrences)} 次</td><td>${fmt(item.last_seen_at)}</td></tr>`;
+  }, '还没有收到帖子、视频或网页分享');
 }
 
 async function cleanupLegacyMedia(button) {
@@ -1784,6 +1831,7 @@ function renderAll() {
   renderSandboxes();
   renderStickers();
   renderMedia();
+  renderSources();
   renderGroups();
   renderModels();
   drawChart();
@@ -1798,6 +1846,7 @@ function resourcePath(resource) {
     sandboxes: '/sandboxes',
     stickers: '/stickers',
     media: '/media',
+    sources: '/sources',
     databases: '/databases',
     groups: '/group-models',
     contextPlans: '/context-plans'
@@ -1835,6 +1884,10 @@ function applyResource(resource, payload, { force = false } = {}) {
     state.media = payload;
     renderMedia();
     renderOverview();
+  } else if (resource === 'sources') {
+    state.sources = payload;
+    renderSources();
+    renderOverview();
   } else if (resource === 'databases') {
     state.databases = payload;
     renderDatabases();
@@ -1871,7 +1924,7 @@ async function load() {
   setLoading(true);
   clearError();
   try {
-    const [overview, deliveries, usage, tasks, sandboxes, stickers, media, databases, groups, contextPlans] = await Promise.all([
+    const [overview, deliveries, usage, tasks, sandboxes, stickers, media, sources, databases, groups, contextPlans] = await Promise.all([
       api('/overview'),
       api('/deliveries'),
       api(`/usage?days=${state.usageDays}`),
@@ -1879,6 +1932,7 @@ async function load() {
       api('/sandboxes'),
       api('/stickers'),
       api('/media'),
+      api('/sources'),
       api('/databases'),
       api('/group-models'),
       api('/context-plans')
@@ -1890,12 +1944,13 @@ async function load() {
     state.sandboxes = sandboxes;
     state.stickers = stickers;
     state.media = media;
+    state.sources = sources;
     state.databases = databases;
     state.groups = groups;
     state.contextPlans = contextPlans;
     chartRows = state.usage;
     const loadedAt = Date.now();
-    ['overview', 'deliveries', 'usage', 'tasks', 'sandboxes', 'stickers', 'media', 'databases', 'groups', 'contextPlans'].forEach((resource) => {
+    ['overview', 'deliveries', 'usage', 'tasks', 'sandboxes', 'stickers', 'media', 'sources', 'databases', 'groups', 'contextPlans'].forEach((resource) => {
       refreshedAt[resource] = loadedAt;
     });
     renderAll();
@@ -1918,19 +1973,21 @@ const resourceIntervals = {
   sandboxes: 5000,
   stickers: 10000,
   media: 10000,
+  sources: 10000,
   databases: 10000,
   groups: 60000,
   contextPlans: 5000
 };
 
 const viewResources = {
-  overview: ['deliveries', 'usage', 'sandboxes', 'stickers', 'media', 'databases', 'groups'],
+  overview: ['deliveries', 'usage', 'sandboxes', 'stickers', 'media', 'sources', 'databases', 'groups'],
   deliveries: ['deliveries'],
   usage: ['usage'],
   tasks: ['tasks'],
   sandboxes: ['sandboxes'],
   stickers: ['stickers'],
   media: ['media'],
+  sources: ['sources'],
   databases: ['databases'],
   'group-models': ['groups'],
   'context-plans': ['contextPlans'],
@@ -2158,6 +2215,7 @@ document.addEventListener('click', (event) => {
     if (key === 'usage') renderUsage();
     if (key === 'stickers') renderStickers();
     if (key === 'media') renderMedia();
+    if (key === 'sources') renderSources();
     if (key === 'contextPlans') renderContextPlans();
   }
 
@@ -2195,6 +2253,7 @@ document.addEventListener('change', (event) => {
     if (key === 'usage') renderUsage();
     if (key === 'stickers') renderStickers();
     if (key === 'media') renderMedia();
+    if (key === 'sources') renderSources();
     if (key === 'contextPlans') renderContextPlans();
   }
 });

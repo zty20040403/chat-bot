@@ -288,6 +288,21 @@ class AdminTests(unittest.TestCase):
                         "root": "/var/lib/qq-deepseek-bot/media",
                     }
                 ),
+                source_store=SimpleNamespace(
+                    admin_snapshot=lambda limit=100: {
+                        "counts": {"total": 1, "ready": 1, "failed": 0},
+                        "platforms": [{"platform": "bilibili", "total": 1}],
+                        "items": [
+                            {
+                                "source_id": 3,
+                                "platform": "bilibili",
+                                "content_kind": "video",
+                                "title": "测试视频",
+                                "status": "ready",
+                            }
+                        ],
+                    }
+                ),
                 turn_journal=TurnJournal(),
                 database=Database(),
             ),
@@ -323,6 +338,10 @@ class AdminTests(unittest.TestCase):
                     "/bot-admin/api/media",
                     headers={"Authorization": "Bearer secret"},
                 )
+                sources = await client.get(
+                    "/bot-admin/api/sources",
+                    headers={"Authorization": "Bearer secret"},
+                )
                 context_plans = await client.get(
                     "/bot-admin/api/context-plans",
                     headers={"Authorization": "Bearer secret"},
@@ -340,6 +359,7 @@ class AdminTests(unittest.TestCase):
                     stickers,
                     group_models,
                     media,
+                    sources,
                     context_plans,
                     databases,
                 )
@@ -353,6 +373,7 @@ class AdminTests(unittest.TestCase):
             stickers,
             group_models,
             media,
+            sources,
             context_plans,
             databases,
         ) = asyncio.run(run())
@@ -378,6 +399,7 @@ class AdminTests(unittest.TestCase):
         self.assertIn("data-view=\"sandboxes\"", page.text)
         self.assertIn("data-view=\"context-plans\"", page.text)
         self.assertIn("data-view=\"databases\"", page.text)
+        self.assertIn("data-view=\"sources\"", page.text)
         self.assertIn("class=\"sidebar\"", page.text)
         self.assertIn("id=\"usage-chart\"", page.text)
         self.assertIn("QQ Bot Control", page.text)
@@ -394,6 +416,7 @@ class AdminTests(unittest.TestCase):
         self.assertEqual(stickers.json()["counts"]["total"], 1)
         self.assertEqual(media.json()["counts"]["total"], 1)
         self.assertEqual(media.json()["vision_profile"], "gpt-5.6-luna")
+        self.assertEqual(sources.json()["items"][0]["source_id"], 3)
         self.assertEqual(context_plans.json()["items"][0]["focus_message_id"], 10)
         self.assertEqual(databases.json()["writable_node"], "h610")
         self.assertEqual(

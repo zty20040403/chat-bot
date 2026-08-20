@@ -162,6 +162,31 @@ class FakeSandboxManager:
         return content
 
 
+class FakeContentSource:
+    def as_tool_payload(self, *, cached: bool) -> dict[str, object]:
+        return {
+            "handle": "source#12",
+            "platform": "bilibili",
+            "title": "Test video",
+            "cached": cached,
+        }
+
+
+class FakeContentSourceStore:
+    def __init__(self) -> None:
+        self.targets: list[str] = []
+
+    async def inspect(self, scope, target: str, **kwargs):
+        del scope, kwargs
+        self.targets.append(target)
+        return FakeContentSource(), False
+
+    def get_cached(self, scope, source_handle: str):
+        del scope
+        self.targets.append(source_handle)
+        return FakeContentSource()
+
+
 class AgentToolExecutorTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.bot = FakeBot()
@@ -202,6 +227,20 @@ class AgentToolExecutorTests(unittest.IsolatedAsyncioTestCase):
             [item["handle"] for item in result["messages"]],
             ["msg#1"],
         )
+
+    async def test_unified_shared_content_tool_uses_scoped_source_store(self) -> None:
+        source_store = FakeContentSourceStore()
+        self.executor.source_store = source_store  # type: ignore[assignment]
+        result = json.loads(
+            await self.executor.execute(
+                "inspect_shared_content",
+                {"target": "source#12"},
+            )
+            or "{}"
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["source"]["handle"], "source#12")
+        self.assertEqual(source_store.targets, ["source#12"])
 
     async def test_import_requires_file_from_current_group(self) -> None:
         listed = json.loads(

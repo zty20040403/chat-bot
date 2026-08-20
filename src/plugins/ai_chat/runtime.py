@@ -20,6 +20,7 @@ from .bridges import (
 from .browser_tools import BrowserManager, RichMessageRenderer
 from .cold_archive import ColdArchiveService
 from .config import Settings
+from .content_sources import ContentSourceStore
 from .context_store import CaptureCandidate, ContextStore
 from .delivery import DeliveryStore
 from .historian import (
@@ -115,6 +116,7 @@ class AppContext:
     browser_manager: BrowserManager | None = None
     rich_renderer: RichMessageRenderer | None = None
     media_library: MediaLibrary | None = None
+    source_store: ContentSourceStore | None = None
     media_cleanup: LegacyMediaCleanup | None = None
     vision_worker: VisionWorker | None = None
     cold_archive: ColdArchiveService | None = None
@@ -265,6 +267,8 @@ def build_app_context(
             message_ledger = MessageLedger(store_source("bot_state.sqlite3"))
         except (OSError, RuntimeError, sqlite3.Error, DatabaseError) as exc:
             logger.error(f"Canonical message ledger could not be opened: {exc}")
+
+    source_store = ContentSourceStore(database) if database is not None else None
 
     context_store: ContextStore | None = None
     if settings.context_lifecycle_enabled and message_ledger is not None:
@@ -659,6 +663,7 @@ def build_app_context(
         browser_manager=browser_manager,
         rich_renderer=rich_renderer,
         media_library=media_library,
+        source_store=source_store,
         media_cleanup=media_cleanup,
         vision_worker=vision_worker,
         cold_archive=cold_archive,

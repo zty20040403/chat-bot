@@ -198,8 +198,8 @@ from .matchers import (
 
 SEND_RETRY_DELAY_SECONDS = 2.0
 SEND_RETRY_MAX_CHARS = 800
-TURN_PROMPT_VERSION = "qqbot-turn-v9"
-BOT_VERSION = "0.5.21"
+TURN_PROMPT_VERSION = "qqbot-turn-v10"
+BOT_VERSION = "0.5.22"
 EMPTY_MENTION_FOLLOW_UP = "你觉得呢"
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 proactive_check_gate = ProactiveCheckGate()
@@ -254,6 +254,7 @@ sandbox_manager = app_context.sandbox_manager
 browser_manager = app_context.browser_manager
 rich_renderer = app_context.rich_renderer
 media_library = app_context.media_library
+source_store = app_context.source_store
 vision_worker = app_context.vision_worker
 cold_archive = app_context.cold_archive
 background_tasks = app_context.background_tasks
@@ -465,6 +466,18 @@ def _current_group_context(
             "[当前群近期消息：只用于理解指代和延续现场；当前问题主题明确时，"
             "不要被旧话题带偏]\n" + recent_messages
         )
+    if source_store is not None and isinstance(event, GroupMessageEvent):
+        try:
+            recent_sources = source_store.render_recent(scope_from_event(event))
+        except (OSError, RuntimeError, ValueError, DatabaseError) as exc:
+            logger.warning(f"Recent shared-source context failed: {exc}")
+        else:
+            if recent_sources:
+                sections.append(
+                    "[当前群近期分享来源：source# 和 msg# 句柄只能在本群使用；"
+                    "用户询问分享内容时调用 inspect_shared_content]\n"
+                    + recent_sources
+                )
     return "\n\n".join(sections)
 
 
@@ -1286,6 +1299,7 @@ async def _ask_ai(
             turn_journal=turn_journal,
             turn_id=journal_turn_id,
             browser_manager=browser_manager,
+            source_store=source_store,
         )
         if agent_executor_enabled and isinstance(event, GroupMessageEvent)
         else None
@@ -1359,6 +1373,7 @@ async def _ask_ai(
         include_media_tools=(
             vision_worker is not None or media_library is not None
         ),
+        include_source_tools=source_store is not None,
     )
     current_tool_catalog_version = tool_catalog_fingerprint(tools)
     if turn_journal is not None and journal_turn_id is not None:
@@ -4785,6 +4800,15 @@ async def handle_canonical_ingest(event: MessageEvent) -> None:
                     {"type": segment.type, "data": dict(segment.data)}
                     for segment in event.original_message
                 ],
+                canonical_message_id=stored.canonical_message_id,
+                occurred_at=int(event.time),
+            )
+        if source_store is not None and event.user_id != event.self_id:
+            source_store.ingest_message(
+                physical_scope,
+                body=decoded.body,
+                native_message_id=event.message_id,
+                sender_native_user_id=event.user_id,
                 canonical_message_id=stored.canonical_message_id,
                 occurred_at=int(event.time),
             )

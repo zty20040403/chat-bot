@@ -38,6 +38,7 @@ class AdminServices:
     sandbox_manager: Any = None
     sticker_inventory: Any = None
     media_library: Any = None
+    source_store: Any = None
     media_cleanup: Any = None
     vision_worker: Any = None
     turn_journal: Any = None
@@ -583,6 +584,37 @@ def register_admin(
             **snapshot,
             "vision": vision,
             "cleanup": cleanup,
+            "configured": True,
+            "available": True,
+        }
+
+    @router.get("/api/sources")
+    def sources(
+        limit: int = Query(default=100, ge=1, le=500),
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
+        authorize(authorization)
+        if services.source_store is None:
+            return {
+                "counts": {},
+                "platforms": [],
+                "items": [],
+                "configured": False,
+                "available": False,
+            }
+        try:
+            snapshot = services.source_store.admin_snapshot(limit=limit)
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            return {
+                "counts": {},
+                "platforms": [],
+                "items": [],
+                "configured": True,
+                "available": False,
+                "error": str(exc)[:500],
+            }
+        return {
+            **snapshot,
             "configured": True,
             "available": True,
         }

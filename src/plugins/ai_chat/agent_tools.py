@@ -27,8 +27,10 @@ from .ai_tools import (
     BROWSER_SNAPSHOT_TOOL_NAME,
     BROWSER_TYPE_TOOL_NAME,
     BROWSER_WAIT_FOR_TOOL_NAME,
+    GET_SHARED_CONTENT_TOOL_NAME,
     GET_MESSAGE_BY_ID_TOOL_NAME,
     IMPORT_FILE_TO_SANDBOX_TOOL_NAME,
+    INSPECT_SHARED_CONTENT_TOOL_NAME,
     LIST_RECENT_FILES_TOOL_NAME,
     SANDBOX_CREATE_TOOL_NAME,
     SANDBOX_DESTROY_TOOL_NAME,
@@ -45,6 +47,7 @@ from .ai_tools import (
 )
 from .browser_tools import BrowserManager, BrowserPolicyError, BrowserUnavailable
 from .conversation_scope import ConversationScope
+from .content_sources import ContentSourceError, ContentSourceStore
 from .ledger import CanonicalMessage, MessageLedger
 from .media_tools import BilibiliClient, BilibiliError
 from .message_ir import ForwardNode, MediaNode, MessageBody, TextNode, render_fallback_text
@@ -76,6 +79,9 @@ AGENT_TOOL_PROMPT = (
     "不要尝试访问宿主机、机器人密钥、其他用户沙盒或其他群的数据。"
     "工具参数里的 message_handle 一律完整照抄上下文或搜索结果中的 msg# 句柄，"
     "不要猜测 OneBot 原始消息 ID、群号或 QQ 号。"
+    "用户询问 QQ 分享卡片、帖子、视频或网页内容时，优先调用 "
+    "inspect_shared_content，并完整照抄上下文里的 source#、msg# 或链接；"
+    "不要先用普通浏览器重复打开同一个分享。"
 )
 
 
@@ -164,6 +170,7 @@ class AgentToolExecutor:
         turn_journal: TurnJournal | None = None,
         turn_id: int | None = None,
         browser_manager: BrowserManager | None = None,
+        source_store: ContentSourceStore | None = None,
     ) -> None:
         self.bot = bot
         self.event = event
@@ -175,6 +182,7 @@ class AgentToolExecutor:
         self.turn_journal = turn_journal
         self.turn_id = turn_id
         self.browser_manager = browser_manager
+        self.source_store = source_store
         self._task_sandbox_ids: set[str] = set()
         self.output_resolver = OneBotModelOutputResolver(
             bot,
@@ -240,6 +248,8 @@ class AgentToolExecutor:
             SAY_TOOL_NAME: self._say,
             VIEW_FORWARD_TOOL_NAME: self._view_forward,
             VIEW_BILIBILI_TOOL_NAME: self._view_bilibili,
+            INSPECT_SHARED_CONTENT_TOOL_NAME: self._inspect_shared_content,
+            GET_SHARED_CONTENT_TOOL_NAME: self._get_shared_content,
             BROWSER_NAVIGATE_TOOL_NAME: self._browser_navigate,
             BROWSER_SNAPSHOT_TOOL_NAME: self._browser_snapshot,
             BROWSER_CLICK_TOOL_NAME: self._browser_click,
@@ -258,7 +268,12 @@ class AgentToolExecutor:
             return await handler(arguments)
         except SandboxError as exc:
             return _json_result(ok=False, error=str(exc))
-        except (BrowserUnavailable, BrowserPolicyError, BilibiliError) as exc:
+        except (
+            BrowserUnavailable,
+            BrowserPolicyError,
+            BilibiliError,
+            ContentSourceError,
+        ) as exc:
             return _json_result(ok=False, error=str(exc))
         except ActionFailed as exc:
             logger.warning(f"NapCat agent tool {name} failed: {exc}")
@@ -439,6 +454,54 @@ class AgentToolExecutor:
         finally:
             await client.close()
         return _json_result(ok=True, video=result)
+
+    async def _inspect_shared_content(
+        self,
+        arguments: dict[str, object],
+    ) -> str:
+        if self.source_store is None or self.scope is None:
+            return _json_result(ok=False, error="分享来源索引没有开启。")
+        source, cached = await self.source_store.inspect(
+            self.scope,
+            str(arguments.get("target") or ""),
+            browser_fetch=(
+                self._fetch_source_page
+                if self.browser_manager is not None
+                else None
+            ),
+            force_refresh=bool(arguments.get("force_refresh", False)),
+            comment_count=min(
+                max(int(arguments.get("comment_count") or 10), 0),
+                20,
+            ),
+        )
+        return _json_result(
+            ok=True,
+            source=source.as_tool_payload(cached=cached),
+        )
+
+    async def _get_shared_content(
+        self,
+        arguments: dict[str, object],
+    ) -> str:
+        if self.source_store is None or self.scope is None:
+            return _json_result(ok=False, error="分享来源索引没有开启。")
+        source = self.source_store.get_cached(
+            self.scope,
+            str(arguments.get("source_handle") or ""),
+        )
+        return _json_result(
+            ok=True,
+            source=source.as_tool_payload(cached=True),
+        )
+
+    async def _fetch_source_page(self, url: str) -> dict[str, object]:
+        browser = self._require_browser()
+        page = await browser.navigate(self.owner, url)
+        if len(str(page.get("text") or "").strip()) < 300:
+            await asyncio.sleep(1.0)
+            page = await browser.snapshot(self.owner)
+        return page
 
     def _require_browser(self) -> BrowserManager:
         if self.browser_manager is None:
