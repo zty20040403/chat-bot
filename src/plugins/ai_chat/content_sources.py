@@ -15,6 +15,7 @@ from src.bot_storage import PostgresDatabase
 from .conversation_scope import ConversationScope
 from .media_tools import BilibiliClient, BilibiliError, find_bilibili_ref
 from .message_ir import CardNode, MessageBody, TextNode
+from .onebot_codec import extract_card_summary
 
 
 SOURCE_HANDLE_PATTERN = re.compile(r"^source#([1-9][0-9]*)$")
@@ -616,11 +617,16 @@ def extract_shared_urls(
     candidates: list[tuple[int, str, str]] = []
     seen: set[str] = set()
     for node in body.nodes:
-        if isinstance(node, CardNode) and node.url:
-            value = node.url.strip().rstrip(TRAILING_URL_PUNCTUATION)
+        if isinstance(node, CardNode):
+            raw_title, raw_url = extract_card_summary(dict(node.raw_data))
+            value = (raw_url or node.url).strip().rstrip(
+                TRAILING_URL_PUNCTUATION
+            )
             if value and value not in seen:
                 seen.add(value)
-                candidates.append((node.segment_index, value, node.title))
+                candidates.append(
+                    (node.segment_index, value, node.title or raw_title)
+                )
         elif isinstance(node, TextNode):
             for matched in HTTP_URL_PATTERN.finditer(node.text):
                 value = matched.group(0).rstrip(TRAILING_URL_PUNCTUATION)

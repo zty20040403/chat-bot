@@ -139,7 +139,7 @@ def decode_onebot_message(raw_message: Any) -> DecodedOneBotMessage:
             )
             continue
         if segment_type in {"json", "xml"}:
-            title, url = _card_summary(data)
+            title, url = extract_card_summary(data)
             nodes.append(
                 CardNode(
                     index,
@@ -451,7 +451,7 @@ def _message_segments(raw_message: Any) -> list[tuple[str, dict[str, Any]]]:
     return []
 
 
-def _card_summary(data: dict[str, Any]) -> tuple[str, str]:
+def extract_card_summary(data: dict[str, Any]) -> tuple[str, str]:
     encoded = data.get("data")
     if not isinstance(encoded, str):
         return "", ""

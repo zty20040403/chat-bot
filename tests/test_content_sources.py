@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 
 import nonebot
@@ -35,6 +36,32 @@ class ContentSourceHelpersTests(unittest.TestCase):
         self.assertEqual(
             urls[1][1],
             "https://www.xiaohongshu.com/explore/abc?utm_source=qq",
+        )
+
+    def test_reextracts_public_url_from_historical_qq_card(self) -> None:
+        payload = {
+            "prompt": "[QQ小程序]测试视频",
+            "meta": {
+                "detail_1": {
+                    "url": "m.q.qq.com/a/s/example",
+                    "qqdocurl": "https://b23.tv/4VaXPFH",
+                }
+            },
+        }
+        body = MessageBody(
+            (
+                CardNode(
+                    0,
+                    title="[QQ小程序]测试视频",
+                    url="m.q.qq.com/a/s/example",
+                    raw_data={"data": json.dumps(payload)},
+                ),
+            )
+        )
+
+        self.assertEqual(
+            extract_shared_urls(body),
+            ((0, "https://b23.tv/4VaXPFH", "[QQ小程序]测试视频"),),
         )
 
     def test_canonicalizes_platform_urls_and_tracking_parameters(self) -> None:
