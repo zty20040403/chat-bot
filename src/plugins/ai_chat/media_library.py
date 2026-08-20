@@ -83,6 +83,39 @@ STICKER_QUERY_FILLERS = (
     "贴纸",
     "图片",
     "一下",
+    "再换一个",
+    "再换一张",
+    "来个别的",
+    "来张别的",
+    "不一样的",
+    "不要这个",
+    "换一个",
+    "换一张",
+    "换个",
+    "换张",
+    "再来一个",
+    "再来一张",
+    "再发一个",
+    "再发一张",
+    "另一个",
+    "另一张",
+    "别的",
+)
+STICKER_VARIATION_MARKERS = (
+    "换一个",
+    "换一张",
+    "换个",
+    "换张",
+    "再来一个",
+    "再来一张",
+    "再发一个",
+    "再发一张",
+    "另一个",
+    "另一张",
+    "来个别的",
+    "来张别的",
+    "不一样的",
+    "不要这个",
 )
 
 
@@ -128,11 +161,10 @@ def choose_sticker_candidate(
     candidates: Sequence[MediaRecord],
     *,
     now: int | None = None,
+    allow_recent_fallback: bool = True,
 ) -> MediaRecord | None:
     if not candidates:
         return None
-    if len(candidates) == 1:
-        return candidates[0]
 
     current_time = int(time.time()) if now is None else int(now)
     recent_cutoff = current_time - 300
@@ -142,7 +174,12 @@ def choose_sticker_candidate(
         if candidate.last_sent_at is None
         or candidate.last_sent_at < recent_cutoff
     ]
-    pool = not_recent or list(candidates)
+    if not_recent:
+        pool = not_recent
+    elif allow_recent_fallback:
+        pool = list(candidates)
+    else:
+        return None
     minimum_sent = min(max(candidate.times_sent, 0) for candidate in pool)
     weights = [
         max(candidate.score, 0.25)
@@ -150,6 +187,14 @@ def choose_sticker_candidate(
         for candidate in pool
     ]
     return random.choices(pool, weights=weights, k=1)[0]
+
+
+def requests_sticker_variation(text: str) -> bool:
+    normalized = MediaLibrary._normalize_sticker_text(text)
+    return any(
+        MediaLibrary._normalize_sticker_text(marker) in normalized
+        for marker in STICKER_VARIATION_MARKERS
+    )
 
 
 class MediaLibrary:
@@ -1476,6 +1521,10 @@ class MediaLibrary:
         content = normalized
         for filler in STICKER_QUERY_FILLERS:
             content = content.replace(cls._normalize_sticker_text(filler), "")
+        if content.startswith("更") and len(content) > 1:
+            content = content[1:]
+        if content.endswith("的") and len(content) > 1:
+            content = content[:-1]
         terms: list[str] = [content] if content else []
         for group in STICKER_ALIAS_GROUPS:
             if any(cls._normalize_sticker_text(alias) in content for alias in group):

@@ -16,6 +16,7 @@ from src.plugins.ai_chat.media_library import (
     MediaLibraryError,
     MediaRecord,
     choose_sticker_candidate,
+    requests_sticker_variation,
 )
 
 
@@ -239,6 +240,44 @@ class MediaLibraryParsingTests(unittest.TestCase):
         selected = choose_sticker_candidate([recent, alternative], now=1000)
 
         self.assertIs(selected, alternative)
+
+    def test_explicit_variation_does_not_reuse_only_recent_candidate(self) -> None:
+        recent = MediaRecord(
+            media_id=1,
+            handle="media#1",
+            summary="刚发过",
+            description="",
+            extracted_text="",
+            emotions=(),
+            usage=(),
+            is_sticker=True,
+            safety="safe",
+            storage_path=Path("unused"),
+            mime_type="image/png",
+            score=1.0,
+            last_sent_at=900,
+        )
+
+        selected = choose_sticker_candidate(
+            [recent],
+            now=1000,
+            allow_recent_fallback=False,
+        )
+
+        self.assertIsNone(selected)
+
+    def test_variation_request_and_query_fillers_are_recognized(self) -> None:
+        self.assertTrue(requests_sticker_variation("再换一个抽象的"))
+        self.assertTrue(requests_sticker_variation("来张别的"))
+        self.assertFalse(requests_sticker_variation("发个抽象表情"))
+        self.assertEqual(
+            MediaLibrary._sticker_query_terms("换个猫猫表情"),
+            ("猫猫", "猫", "猫咪", "橘猫"),
+        )
+        self.assertEqual(
+            MediaLibrary._sticker_query_terms("再换一个更抽象的"),
+            ("抽象",),
+        )
 
     def test_exact_sticker_label_ranks_above_broader_alias(self) -> None:
         def record(media_id: int, summary: str) -> MediaRecord:

@@ -95,7 +95,7 @@ from .historian import (
 )
 from .ledger import MessageLedger
 from .long_term_memory import LongTermMemoryError, MemoryEntry
-from .media_library import choose_sticker_candidate
+from .media_library import choose_sticker_candidate, requests_sticker_variation
 from .model_catalog import ModelCatalogError, ModelProfile
 from .message_ir import MessageBody, TextNode, render_fallback_text
 from .onebot_codec import (
@@ -200,7 +200,7 @@ from .matchers import (
 SEND_RETRY_DELAY_SECONDS = 2.0
 SEND_RETRY_MAX_CHARS = 800
 TURN_PROMPT_VERSION = "qqbot-turn-v10"
-BOT_VERSION = "0.5.25"
+BOT_VERSION = "0.5.26"
 EMPTY_MENTION_FOLLOW_UP = "你觉得呢"
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 proactive_check_gate = ProactiveCheckGate()
@@ -2295,6 +2295,7 @@ async def _ask_ai(
                 )
             media_handle = str(arguments.get("media_handle") or "").strip()
             query = str(arguments.get("query") or "").strip()
+            require_different = requests_sticker_variation(user_text)
             record = None
             searched_stickers = False
             if media_library is not None and query:
@@ -2304,7 +2305,10 @@ async def _ask_ai(
                         query,
                         limit=10,
                     )
-                    record = choose_sticker_candidate(candidates)
+                    record = choose_sticker_candidate(
+                        candidates,
+                        allow_recent_fallback=not require_different,
+                    )
                 except (
                     OSError,
                     RuntimeError,
@@ -2321,6 +2325,13 @@ async def _ask_ai(
                 try:
                     media_id = int(media_handle.removeprefix("media#"))
                     record = media_library.get_sticker(media_id)
+                    if (
+                        require_different
+                        and record is not None
+                        and record.last_sent_at is not None
+                        and record.last_sent_at >= int(time.time()) - 300
+                    ):
+                        record = None
                 except (OSError, RuntimeError, TypeError, ValueError, DatabaseError):
                     record = None
             if (
@@ -2333,7 +2344,10 @@ async def _ask_ai(
                         query or user_text,
                         limit=10,
                     )
-                    record = choose_sticker_candidate(candidates)
+                    record = choose_sticker_candidate(
+                        candidates,
+                        allow_recent_fallback=not require_different,
+                    )
                 except (
                     OSError,
                     RuntimeError,
@@ -2358,7 +2372,11 @@ async def _ask_ai(
                 return json.dumps(
                     {
                         "ok": False,
-                        "error": "没有这个表情。",
+                        "error": (
+                            "没有别的匹配表情。"
+                            if require_different
+                            else "没有这个表情。"
+                        ),
                     },
                     ensure_ascii=False,
                 )
