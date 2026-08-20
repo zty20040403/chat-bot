@@ -83,15 +83,15 @@ def choose_context_policy(
 
     return ContextPolicy(
         mode=mode,
-        include_recent_group=mode == "expanded",
+        include_recent_group=mode in {"minimal", "expanded"},
         include_roster=bool(_ROSTER_REFERENCE.search(normalized)),
         include_pins=mode == "expanded" or group_memory_reference,
         include_group_memory=True,
         include_user_memory=True,
         fallback_group_memory=group_memory_reference,
         fallback_user_memory=user_memory_reference,
-        max_messages=12 if mode == "expanded" else 0,
-        max_chars=1800 if mode == "expanded" else 0,
+        max_messages=12 if mode == "expanded" else 6 if mode == "minimal" else 0,
+        max_chars=1800 if mode == "expanded" else 900 if mode == "minimal" else 0,
         roster_limit=12,
         pin_max_chars=800,
     )

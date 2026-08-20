@@ -96,6 +96,38 @@ class ReferenceResolverTests(unittest.TestCase):
         self.assertIn("recent_question", plan.reason_codes)
         self.assertIn("突然变慢", plan.rendered_context)
 
+    def test_empty_mention_prefers_latest_human_message_over_older_question(self) -> None:
+        older_question = self.record(
+            self.group_a,
+            1,
+            7,
+            "Alice",
+            "今晚几点开会？",
+        )
+        shared_card = self.record(
+            self.group_a,
+            2,
+            8,
+            "Bob",
+            "[卡片:小红书帖子 | https://xhslink.com/example]",
+        )
+        current = self.record(self.group_a, 3, 9, "Kenneth", "")
+
+        plan = self.resolver.resolve(
+            self.ledger,
+            self.group_a,
+            current_message_id=current.canonical_message_id,
+            current_text="你觉得呢",
+            current_native_user_id=9,
+            now=current.occurred_at,
+            prefer_latest=True,
+        )
+
+        self.assertEqual(plan.focus_message_id, shared_card.canonical_message_id)
+        self.assertNotEqual(plan.focus_message_id, older_question.canonical_message_id)
+        self.assertIn("empty_mention_latest", plan.reason_codes)
+        self.assertIn("xhslink.com", plan.rendered_context)
+
     def test_explicit_reply_has_absolute_priority(self) -> None:
         target = self.record(self.group_a, 1, 7, "Alice", "晚上吃面吗")
         self.record(self.group_a, 2, 8, "Bob", "服务器怎么配？")

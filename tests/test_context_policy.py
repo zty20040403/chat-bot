@@ -37,7 +37,9 @@ class ContextPolicyTests(unittest.TestCase):
         )
 
         self.assertEqual(policy.mode, "minimal")
-        self.assertFalse(policy.include_recent_group)
+        self.assertTrue(policy.include_recent_group)
+        self.assertEqual(policy.max_messages, 6)
+        self.assertEqual(policy.max_chars, 900)
         self.assertFalse(policy.include_roster)
         self.assertFalse(policy.include_pins)
 

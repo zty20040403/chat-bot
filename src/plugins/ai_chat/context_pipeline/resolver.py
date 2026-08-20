@@ -74,6 +74,7 @@ class ReferenceResolver:
         current_text: str,
         current_native_user_id: str | int,
         now: int | None = None,
+        prefer_latest: bool = False,
     ) -> TurnContextPlan:
         current = ledger.get_in_scope(scope, current_message_id)
         current_principal_id = current.sender_principal_id if current else None
@@ -117,6 +118,42 @@ class ReferenceResolver:
                     ),
                 ),
                 rendered_context=rendered,
+            )
+
+        if prefer_latest and recent:
+            focus = next(
+                (
+                    message
+                    for message in reversed(recent)
+                    if message.direction == "inbound"
+                ),
+                recent[-1],
+            )
+            related = self._related_ids(
+                recent,
+                focus.canonical_message_id,
+                current_message_id,
+            )
+            return TurnContextPlan(
+                scope_key=scope.key,
+                current_message_id=current_message_id,
+                current_principal_id=current_principal_id,
+                focus_message_id=focus.canonical_message_id,
+                confidence=0.95,
+                reason_codes=("empty_mention_latest", "same_scope"),
+                related_message_ids=related,
+                candidates=(
+                    ContextCandidate(
+                        focus.canonical_message_id,
+                        95.0,
+                        ("empty_mention_latest", "same_scope"),
+                    ),
+                ),
+                rendered_context=self._render(
+                    focus,
+                    self._messages_by_ids(recent, related),
+                    ambiguous=False,
+                ),
             )
 
         follow_up = self._looks_like_follow_up(current_text)

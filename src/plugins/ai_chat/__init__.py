@@ -197,8 +197,8 @@ from .matchers import (
 
 SEND_RETRY_DELAY_SECONDS = 2.0
 SEND_RETRY_MAX_CHARS = 800
-TURN_PROMPT_VERSION = "qqbot-turn-v7"
-BOT_VERSION = "0.5.19"
+TURN_PROMPT_VERSION = "qqbot-turn-v8"
+BOT_VERSION = "0.5.20"
 EMPTY_MENTION_FOLLOW_UP = "你觉得呢"
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 proactive_check_gate = ProactiveCheckGate()
@@ -460,7 +460,10 @@ def _current_group_context(
     if profiles:
         sections.append(f"[群成员身份记录]\n{profiles}")
     if recent_messages:
-        sections.append(f"[当前群近期消息]\n{recent_messages}")
+        sections.append(
+            "[当前群近期消息：只用于理解指代和延续现场；当前问题主题明确时，"
+            "不要被旧话题带偏]\n" + recent_messages
+        )
     return "\n\n".join(sections)
 
 
@@ -797,6 +800,10 @@ def _group_turn_context_plan(
         current_text=user_text,
         current_native_user_id=event.user_id,
         now=event.time,
+        prefer_latest=(
+            user_text == EMPTY_MENTION_FOLLOW_UP
+            and not event.message.extract_plain_text().strip()
+        ),
     )
     if turn_journal is not None and journal_turn_id is not None:
         turn_journal.record_context_plan(

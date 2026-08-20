@@ -3,7 +3,22 @@ from __future__ import annotations
 import re
 
 from nonebot import on_command, on_message, on_regex
-from nonebot.rule import to_me
+from nonebot.adapters.onebot.v11 import MessageEvent
+from nonebot.rule import Rule
+
+
+def _mentions_current_bot(event: MessageEvent) -> bool:
+    if event.user_id == event.self_id:
+        return False
+    return any(
+        segment.type == "at"
+        and str(segment.data.get("qq") or "") == str(event.self_id)
+        for segment in event.original_message
+    )
+
+
+def _addressed_to_current_bot(event: MessageEvent) -> bool:
+    return event.is_tome() or _mentions_current_bot(event)
 
 
 ai = on_command("ai", aliases={"ds", "deepseek", "问"}, priority=10, block=True)
@@ -80,7 +95,11 @@ qq_face = on_command(
 sticker_status = on_command(
     "表情状态", aliases={"表情库", "表情数量"}, priority=10, block=True
 )
-mention_ai = on_message(rule=to_me(), priority=20, block=True)
+mention_ai = on_message(
+    rule=Rule(_addressed_to_current_bot),
+    priority=20,
+    block=True,
+)
 canonical_ingest_tracker = on_message(priority=0, block=False)
 group_activity_tracker = on_message(priority=1, block=False)
 image_auto_description = on_message(priority=70, block=False)
