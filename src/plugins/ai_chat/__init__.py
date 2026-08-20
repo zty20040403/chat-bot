@@ -198,7 +198,8 @@ from .matchers import (
 SEND_RETRY_DELAY_SECONDS = 2.0
 SEND_RETRY_MAX_CHARS = 800
 TURN_PROMPT_VERSION = "qqbot-turn-v7"
-BOT_VERSION = "0.5.18"
+BOT_VERSION = "0.5.19"
+EMPTY_MENTION_FOLLOW_UP = "你觉得呢"
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 proactive_check_gate = ProactiveCheckGate()
 
@@ -4676,10 +4677,7 @@ async def handle_mention_ai(bot: Bot, event: MessageEvent) -> None:
         if _has_available_ocr_image(event) or _has_available_voice(event):
             user_text = "请理解我这条消息附带或回复的内容，并自然回答。"
         else:
-            await _finish_safely(
-                mention_ai,
-                _reply_message(event, "你想问什么？可以 @我 后面加问题。"),
-            )
+            user_text = EMPTY_MENTION_FOLLOW_UP
 
     await _finish_tracked_ai(
         mention_ai,

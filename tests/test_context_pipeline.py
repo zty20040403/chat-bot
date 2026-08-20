@@ -73,6 +73,29 @@ class ReferenceResolverTests(unittest.TestCase):
         self.assertIn("recent_question", plan.reason_codes)
         self.assertIn("PostgreSQL", plan.rendered_context)
 
+    def test_empty_mention_follow_up_prefers_recent_group_question(self) -> None:
+        question = self.record(
+            self.group_a,
+            1,
+            7,
+            "Alice",
+            "这个服务为什么突然变慢了？",
+        )
+        current = self.record(self.group_a, 2, 9, "Kenneth", "")
+
+        plan = self.resolver.resolve(
+            self.ledger,
+            self.group_a,
+            current_message_id=current.canonical_message_id,
+            current_text="你觉得呢",
+            current_native_user_id=9,
+            now=current.occurred_at,
+        )
+
+        self.assertEqual(plan.focus_message_id, question.canonical_message_id)
+        self.assertIn("recent_question", plan.reason_codes)
+        self.assertIn("突然变慢", plan.rendered_context)
+
     def test_explicit_reply_has_absolute_priority(self) -> None:
         target = self.record(self.group_a, 1, 7, "Alice", "晚上吃面吗")
         self.record(self.group_a, 2, 8, "Bob", "服务器怎么配？")
