@@ -1,49 +1,87 @@
-# Kennethbot
+<p align="center">
+  <img src="docs/assets/kennethbot-banner.svg" width="100%" alt="Kennethbot - QQ multi-model agent">
+</p>
 
-Kennethbot 是一个面向 QQ 群聊的多模型 AI Agent。它通过 NapCatQQ 接收
-OneBot V11 事件，使用 NoneBot2 处理消息，并把对话、工具调用、长期记忆、媒体任务和
-投递状态保存到 PostgreSQL。
+<h1 align="center">Kennethbot</h1>
 
-当前版本：`0.5.26`
+<p align="center">
+  一个能理解群聊上下文、调用工具并完成真实任务的 QQ 多模型 Agent
+</p>
+
+<p align="center">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.5.26-22c55e?style=for-the-badge">
+  <img alt="Python" src="https://img.shields.io/badge/Python-3.12-3776ab?style=for-the-badge&amp;logo=python&amp;logoColor=white">
+  <img alt="NoneBot2" src="https://img.shields.io/badge/NoneBot2-OneBot_V11-ea5252?style=for-the-badge">
+  <img alt="PostgreSQL" src="https://img.shields.io/badge/PostgreSQL-Durable-4169e1?style=for-the-badge&amp;logo=postgresql&amp;logoColor=white">
+  <img alt="NixOS" src="https://img.shields.io/badge/NixOS-Reproducible-5277c3?style=for-the-badge&amp;logo=nixos&amp;logoColor=white">
+</p>
+
+<p align="center">
+  <a href="#快速开始">快速开始</a> ·
+  <a href="#系统结构">系统结构</a> ·
+  <a href="#常用命令">命令</a> ·
+  <a href="#管理控制台">控制台</a> ·
+  <a href="#nix-与-nixos">NixOS</a>
+</p>
+
+---
+
+Kennethbot 通过 NapCatQQ 接收 OneBot V11 事件，使用 NoneBot2 处理消息，并把对话、
+工具调用、长期记忆、媒体任务与投递状态保存到 PostgreSQL。它不只是聊天接口：模型会在
+宿主管控的 Agent Loop 中读取证据、选择工具、执行任务，再把适合 QQ 的结果发回群聊。
 
 ## 主要能力
 
-- **多模型路由**：支持 OpenAI Chat Compatible 与 Anthropic Messages 协议，可配置
-  DeepSeek、OpenAI、Claude 或其他兼容服务，并按群、用户切换模型 profile。
-- **群聊上下文**：理解引用、@、发送者和群内最近话题；群聊、私聊和不同用户的记忆相互隔离。
-- **Agent 工具调用**：模型可以搜索网页、读取历史消息、识图、听语音、发送表情、操作临时
-  Docker 沙箱、读取群文件和汇报任务进度。
-- **图片与表情**：普通图片按需临时识别，不保存原图；QQ 表情经过视觉标签和安全检查后进入
-  全局表情库，可按对象、动作和情绪检索发送。
-- **帖子与视频**：读取网页和分享卡片的标题、正文与评论；B 站视频可进一步下载低清媒体流，
-  抽取关键帧、使用本地 Whisper 转写音轨，再交给视觉模型综合分析。
-- **语音能力**：读取 QQ 语音文本，也可以把回答合成为腾讯 SILK 语音发送。
-- **代码与文件任务**：在隔离容器内创建项目、安装依赖、运行测试、生成文件或图片，并把结果发回群聊。
-- **持久任务系统**：记录回合、工具效果、提醒、固定消息和投递状态，服务重启后仍可恢复可恢复的工作。
-- **管理控制台**：查看服务、数据库、模型、群配置、沙箱、媒体任务和用量，并实时修改群与用户的模型选择。
-- **NixOS 部署**：仓库提供可复现的 `flake.nix`、应用包和 NixOS module。
+<table>
+  <tr>
+    <td width="50%"><strong>多模型路由</strong><br>兼容 OpenAI Chat 与 Anthropic Messages；按群、用户选择模型 profile。</td>
+    <td width="50%"><strong>上下文与记忆</strong><br>理解引用、@、发送者和最近话题；群聊、私聊、个人记忆严格隔离。</td>
+  </tr>
+  <tr>
+    <td><strong>Agent 工具调用</strong><br>搜索、历史消息、提醒、群文件、浏览器与受控源码自省都由模型按需调用。</td>
+    <td><strong>图片、表情与语音</strong><br>临时识图、全局安全表情库、QQ 语音转写与腾讯 SILK 语音回复。</td>
+  </tr>
+  <tr>
+    <td><strong>帖子与视频</strong><br>读取分享正文和评论；B 站视频支持抽帧、Whisper 转写与视觉综合分析。</td>
+    <td><strong>代码沙箱</strong><br>在临时 Docker 容器中创建项目、安装依赖、测试、打包并把产物发回 QQ。</td>
+  </tr>
+  <tr>
+    <td><strong>Durable Runtime</strong><br>PostgreSQL 保存消息、回合、工具效果、Outbox、提醒和媒体元数据。</td>
+    <td><strong>生产部署</strong><br>实时管理控制台、Nix Flake、NixOS module、systemd Worker 与数据库迁移。</td>
+  </tr>
+</table>
 
 ## 系统结构
 
-```text
-QQ 客户端
-   │
-   ▼
-NapCatQQ
-   │  OneBot V11 反向 WebSocket
-   ▼
-NoneBot2 / Kennethbot
-   ├── Message IR 与规范消息账本
-   ├── 上下文规划、长期记忆与语义召回
-   ├── 多模型 LLM Gateway
-   ├── Agent Loop 与工具权限策略
-   ├── 图片、表情、语音与视频 Worker
-   ├── Docker 沙箱与持久浏览器
-   ├── Outbox、提醒与后台任务
-   └── 管理控制台
-          │
-          ▼
-      PostgreSQL
+```mermaid
+flowchart LR
+    QQ[QQ Client] --> NC[NapCatQQ]
+    NC -->|OneBot V11 WS| NB[NoneBot2 Gateway]
+
+    subgraph Runtime[Kennethbot Runtime]
+        NB --> IR[Message IR + Ledger]
+        IR --> CTX[Context Planner]
+        CTX --> AGENT[Agent Loop]
+        AGENT --> LLM[Multi-model Gateway]
+        LLM --> AGENT
+        AGENT --> TOOLS[Tool Policy + Executor]
+        TOOLS --> MEDIA[Vision / Voice / Video]
+        TOOLS --> BOX[Docker / Browser]
+        AGENT --> OUT[Output Planner + Outbox]
+    end
+
+    IR --> PG[(PostgreSQL)]
+    CTX --> PG
+    TOOLS --> PG
+    OUT --> PG
+    OUT --> NC
+
+    classDef core fill:#18181b,stroke:#22c55e,color:#fafafa,stroke-width:2px;
+    classDef service fill:#27272a,stroke:#71717a,color:#fafafa;
+    classDef data fill:#172554,stroke:#60a5fa,color:#eff6ff;
+    class AGENT,LLM core;
+    class NC,NB,IR,CTX,TOOLS,MEDIA,BOX,OUT service;
+    class PG data;
 ```
 
 模型不会直接操作 NapCat 或数据库。消息先转换成统一的 Message IR，Agent 只能调用宿主
@@ -96,7 +134,7 @@ bot/
         └── admin.py             # 管理控制台 API
 ```
 
-## 开始之前
+## 运行要求
 
 你需要准备：
 
@@ -108,7 +146,11 @@ bot/
 
 生产模式必须连接 PostgreSQL，不会静默退回 SQLite。
 
-## 本地启动
+## 快速开始
+
+> [!IMPORTANT]
+> 生产模式必须连接 PostgreSQL，不会静默退回 SQLite。API Key、数据库 DSN 和管理
+> Token 只能放在 `.env` 或服务器密钥文件中，不能提交到 Git。
 
 ### 1. 安装依赖
 
