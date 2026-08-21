@@ -1,109 +1,340 @@
-# QQ DeepSeek Bot
+# Kennethbot
 
-这是一个可长期运行的 QQ 群聊 AI 机器人：
+Kennethbot 是一个面向 QQ 群聊的多模型 AI Agent。它通过 NapCatQQ 接收
+OneBot V11 事件，使用 NoneBot2 处理消息，并把对话、工具调用、长期记忆、媒体任务和
+投递状态保存到 PostgreSQL。
 
-- 接入层：OneBot V11，推荐先用 NapCatQQ 做自用测试
-- 框架层：NoneBot2
-- 模型层：可配置的 OpenAI Chat Compatible / Anthropic Messages，多 profile 隔离
-- 当前功能：对话、联网搜索、OCR、语音、模型切换、持久化上下文、
-  长期记忆、语义召回、固定消息、提醒、并发任务、项目沙箱和持久浏览器
-- Max 风格交互：消息拆分、指定引用、静默反应、运行中反馈、旁路提问、
-  渐进式技能、受限源码自省、规范句柄、流式段落、持久 outbox、管理页和跨平台镜像
+当前版本：`0.5.26`
+
+## 主要能力
+
+- **多模型路由**：支持 OpenAI Chat Compatible 与 Anthropic Messages 协议，可配置
+  DeepSeek、OpenAI、Claude 或其他兼容服务，并按群、用户切换模型 profile。
+- **群聊上下文**：理解引用、@、发送者和群内最近话题；群聊、私聊和不同用户的记忆相互隔离。
+- **Agent 工具调用**：模型可以搜索网页、读取历史消息、识图、听语音、发送表情、操作临时
+  Docker 沙箱、读取群文件和汇报任务进度。
+- **图片与表情**：普通图片按需临时识别，不保存原图；QQ 表情经过视觉标签和安全检查后进入
+  全局表情库，可按对象、动作和情绪检索发送。
+- **帖子与视频**：读取网页和分享卡片的标题、正文与评论；B 站视频可进一步下载低清媒体流，
+  抽取关键帧、使用本地 Whisper 转写音轨，再交给视觉模型综合分析。
+- **语音能力**：读取 QQ 语音文本，也可以把回答合成为腾讯 SILK 语音发送。
+- **代码与文件任务**：在隔离容器内创建项目、安装依赖、运行测试、生成文件或图片，并把结果发回群聊。
+- **持久任务系统**：记录回合、工具效果、提醒、固定消息和投递状态，服务重启后仍可恢复可恢复的工作。
+- **管理控制台**：查看服务、数据库、模型、群配置、沙箱、媒体任务和用量，并实时修改群与用户的模型选择。
+- **NixOS 部署**：仓库提供可复现的 `flake.nix`、应用包和 NixOS module。
+
+## 系统结构
+
+```text
+QQ 客户端
+   │
+   ▼
+NapCatQQ
+   │  OneBot V11 反向 WebSocket
+   ▼
+NoneBot2 / Kennethbot
+   ├── Message IR 与规范消息账本
+   ├── 上下文规划、长期记忆与语义召回
+   ├── 多模型 LLM Gateway
+   ├── Agent Loop 与工具权限策略
+   ├── 图片、表情、语音与视频 Worker
+   ├── Docker 沙箱与持久浏览器
+   ├── Outbox、提醒与后台任务
+   └── 管理控制台
+          │
+          ▼
+      PostgreSQL
+```
+
+模型不会直接操作 NapCat 或数据库。消息先转换成统一的 Message IR，Agent 只能调用宿主
+明确提供且经过 JSON Schema 校验的工具，最终输出再由宿主降级为 OneBot 消息段并发送。
+
+## 技术栈
+
+| 层级 | 实现 |
+| --- | --- |
+| QQ 接入 | NapCatQQ、OneBot V11 |
+| Bot 框架 | NoneBot2、FastAPI、Uvicorn |
+| 模型网关 | OpenAI Python SDK、HTTPX、自定义 Anthropic 协议适配 |
+| 数据库 | PostgreSQL、Alembic，可选 pgvector |
+| 浏览器 | Playwright、Chromium |
+| 沙箱 | Docker |
+| 图片理解 | 可配置视觉模型 profile |
+| 视频分析 | Bilibili 公共接口、FFmpeg、whisper.cpp |
+| 语音 | Edge TTS、腾讯 SILK、NapCat 语音转写 |
+| 富文本 | CodeSnap、Pygments |
+| 部署 | Nix Flakes、NixOS、systemd |
 
 ## 目录结构
 
 ```text
 bot/
-  bot.py
-  .env.example
-  requirements.txt
-  pyproject.toml
-  src/plugins/ai_chat/
-    __init__.py
-    bootstrap.py
-    config.py
-    deepseek.py
-    llm_gateway.py
-    lifecycle.py
-    matchers.py
-    model_catalog.py
-    runtime.py
-    agent_tools.py
-    context_store.py
-    conversation_scope.py
-    delivery.py
-    bridges.py
-    semantic_recall.py
-    historian.py
-    quota.py
-    admin.py
-    browser_tools.py
-    media_tools.py
-    ledger.py
-    long_term_memory.py
-    message_ir.py
-    message_lowering.py
-    memory.py
-    onebot_codec.py
-    output_planner.py
-    pins.py
-    reminders.py
-    sandbox.py
-    self_source.py
-    skills.py
-    tool_policy.py
-    turn_journal.py
-  skills/
-    browser.md
-    qq-chat.md
-    reminders.md
-    sandbox.md
-    self-knowledge.md
-    web.md
+├── bot.py                       # NoneBot 启动入口
+├── pyproject.toml               # Python 项目与依赖声明
+├── uv.lock                      # 可复现依赖锁
+├── flake.nix                    # Nix 包、开发环境和模块导出
+├── nix/module.nix               # NixOS 服务模块
+├── migrations/                  # PostgreSQL / Alembic 迁移
+├── skills/                      # Agent 按需加载的操作说明
+├── docs/                        # 架构、运维和迁移文档
+├── tests/                       # 单元测试与集成测试
+└── src/
+    ├── bot_storage/             # PostgreSQL、迁移与存储工具
+    └── plugins/ai_chat/
+        ├── __init__.py          # 插件装配与消息主流程
+        ├── runtime.py           # 全局服务和后台 Worker 生命周期
+        ├── deepseek.py          # Agent Loop
+        ├── llm_gateway.py       # 多协议模型网关
+        ├── context_pipeline/    # 上下文规划与证据选择
+        ├── turn_journal.py      # 持久回合、工具事件和连续任务
+        ├── media_library.py     # 永久表情库
+        ├── vision_worker.py     # 一次性图片理解任务
+        ├── video_analysis.py    # B 站视频深度分析
+        ├── sandbox.py           # Docker 任务沙箱
+        ├── browser_tools.py     # 持久浏览器工具
+        ├── output_planner.py    # 回复拆分与控制句柄
+        └── admin.py             # 管理控制台 API
 ```
 
-`__init__.py` 是 NoneBot 业务入口；`matchers.py` 只声明触发器，`runtime.py`
-统一创建并持有存储、桥接、浏览器和调度器，`lifecycle.py` 监管长时间运行的后台任务，
-`bootstrap.py` 注册管理页和桥接 HTTP 路由。业务模块不应自行创建第二套全局资源。
+## 开始之前
+
+你需要准备：
+
+1. Python 3.12，或启用了 Flakes 的 Nix。
+2. PostgreSQL 服务器。
+3. 至少一个可用的大模型 API Key。
+4. 已登录 QQ 的 NapCatQQ。
+5. 可选的 Docker、Chromium、FFmpeg 和 whisper.cpp。
+
+生产模式必须连接 PostgreSQL，不会静默退回 SQLite。
 
 ## 本地启动
 
+### 1. 安装依赖
+
 ```bash
-cd /path/to/chat-bot
-python3 -m venv .venv
+git clone https://github.com/zty20040403/chat-bot.git
+cd chat-bot
+python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
 ```
 
-编辑 `.env`，至少填上：
+也可以使用 Nix 开发环境：
 
-```text
-DEEPSEEK_API_KEY=你的 DeepSeek API Key
+```bash
+nix develop
 ```
 
-然后启动：
+### 2. 准备 PostgreSQL
+
+下面是只适合本地开发的 Docker 示例：
+
+```bash
+docker run -d \
+  --name kennethbot-postgres \
+  -e POSTGRES_USER=qq_bot \
+  -e POSTGRES_PASSWORD=change-me \
+  -e POSTGRES_DB=qq_bot \
+  -p 5432:5432 \
+  postgres:17
+```
+
+在 `.env` 中配置连接：
+
+```dotenv
+AI_POSTGRES_DSN=postgresql://qq_bot:change-me@127.0.0.1:5432/qq_bot
+AI_POSTGRES_SCHEMA=qq_bot
+```
+
+初始化数据库：
+
+```bash
+python -m src.bot_storage.cli upgrade
+python -m src.bot_storage.cli check
+```
+
+### 3. 配置模型
+
+最小 DeepSeek 配置：
+
+```dotenv
+DEEPSEEK_API_KEY=replace-with-your-key
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_MODEL=deepseek-v4-flash
+AI_MODEL_DEFAULT_PROFILE=deepseek
+```
+
+多模型配置使用一个 JSON 目录。Key 只通过环境变量引用，不要写进 JSON：
+
+```dotenv
+DEEPSEEK_API_KEY=replace-with-your-deepseek-key
+OPENAI_API_KEY=replace-with-your-openai-key
+AI_MODEL_PROFILES_JSON={"default":"deepseek","profiles":{"deepseek":{"provider":"deepseek","protocol":"openai-chat","base_url":"https://api.deepseek.com","api_key_env":"DEEPSEEK_API_KEY","model":"deepseek-v4-flash","aliases":["ds"]},"openai":{"provider":"openai","protocol":"openai-chat","base_url":"https://api.openai.com/v1","api_key_env":"OPENAI_API_KEY","model":"gpt-5-mini","vision":true,"aliases":["gpt"]}}}
+```
+
+完整字段和可选服务见 [`.env.example`](.env.example)。
+
+### 4. 启动 Bot
 
 ```bash
 python bot.py
 ```
 
-默认监听：
+默认监听 `127.0.0.1:8080`。根路径没有网页内容，返回 `Not Found` 是正常现象。
+
+### 5. 连接 NapCatQQ
+
+在 NapCatQQ 中新增 OneBot V11 反向 WebSocket：
 
 ```text
-127.0.0.1:8080
+ws://127.0.0.1:8080/onebot/v11/ws
 ```
 
-## Nix 打包与 NixOS 服务
+NapCat 日志出现连接成功后，可以在 QQ 中测试：
 
-仓库根目录的 `flake.nix` 会根据 `uv.lock` 构建固定版本的 Python 依赖和机器人源码：
+```text
+/ai 你好
+@机器人 帮我解释一下递归
+```
+
+## 常用命令
+
+| 命令 | 作用 |
+| --- | --- |
+| `/ai 问题` | 发起普通 AI 对话 |
+| `/搜 关键词` | 直接联网搜索，不经过模型整理 |
+| `/模型` | 查看当前可用模型与选择 |
+| `/模型 profile` | 为当前用户切换模型 |
+| `/模型 默认` | 恢复群默认模型 |
+| `/识图` | 读取当前、引用或最近图片 |
+| `/听` | 转写引用或最近 QQ 语音 |
+| `/语音 内容` | 使用语音回答 |
+| `/表情` | 从全局表情库发送图片表情 |
+| `/qq表情 名称` | 发送 QQ 自带表情 |
+| `/表情状态` | 查看表情库状态 |
+| `/记忆` | 查看或管理长期记忆 |
+| `/任务` | 查看当前任务 |
+| `/停止` | 取消当前任务 |
+| `/usage` | 查看当前会话用量 |
+| `/pin`、`/pins` | 固定消息或查看固定列表 |
+| `/ai_reset` | 重置当前会话的 AI 上下文边界 |
+| `/clear` | 清理当前会话的上下文和存储数据 |
+
+自然语言请求不依赖关键词硬编码。`@机器人 看看这张图`、`帮我查一下最新消息`、
+`创建一个 Python 项目并把文件发出来` 等请求会进入同一个 Agent Loop，由当前模型决定
+是否调用相应工具。
+
+## 上下文与记忆
+
+每条 QQ 消息会写入不可变的规范消息账本。模型看到的是 `msg#12`、`[mention#3]`、
+`image#12.0`、`t#8` 等内部句柄；原始 QQ 号、群号和 NapCat 消息 ID 留在本地适配层。
+
+上下文由四部分组成：
+
+1. 当前问题、引用链和被 @ 的完整句子。
+2. 当前群最近的原始消息窗口。
+3. 较旧消息生成的分段摘要和按需展开证据。
+4. 当前群、当前用户可见的 Pins 与长期记忆。
+
+消息事实按群聊或私聊隔离，个人记忆进一步按用户隔离。模型不能通过猜测内部编号读取
+其他群的数据。`/clear` 只影响当前会话，不会清除其他群的上下文。
+
+每个 Agent 请求还会生成持久回合 `t#`，记录模型、工具调用、进度、最终回答和异常状态。
+引用机器人之前的任务回复继续提问时，新回合可以继承旧回合摘要和期间新增的群聊消息。
+
+## 图片与表情
+
+普通图片和表情使用两条独立链路：
+
+- **普通图片**：创建一次性 `vision_jobs`，按图片地址调用视觉模型。交付结果后清理 URL 和
+  识别结果，不保存图片 Blob。
+- **QQ 表情**：只有平台明确标记为表情的图片才会下载，按 SHA-256 去重，并经过真人、隐私和
+  安全检查后进入永久表情库。
+
+所有群共享同一套安全表情库。`send_sticker` 会综合标签相关度、近期发送记录和历史使用次数
+选择候选；用户说“换个”时会排除刚发过的图片，没有其他匹配候选就明确返回没有。
+
+管理台中的群“识图”开关只控制自动图片介绍：开启后，成员单独发送不带文字的普通图片时，
+机器人会自动回复简短简介；关闭后仍然可以通过 @ 或 `/识图` 手动查看图片。
+
+## 帖子与视频
+
+`inspect_shared_content` 可以读取群里的 `source#`、`msg#` 或完整链接。普通模式读取页面元数据、
+正文和评论；B 站视频支持额外的深度模式：
+
+1. 获取低清 DASH 视频与音频流。
+2. 临时下载媒体文件。
+3. 使用 FFmpeg 均匀抽取关键帧。
+4. 使用本地 whisper.cpp 转写音轨。
+5. 把关键帧、转写、标题和用户问题交给视觉模型综合分析。
+6. 删除临时媒体文件，只缓存有时效的分析结果。
+
+默认深度分析上限为 30 分钟、500MB 和 8 张关键帧。它不是逐帧审片，转写也可能误识别
+专有名词，回答中会保留这些限制说明。
+
+## Docker 沙箱
+
+启用沙箱后，Agent 可以在临时 Docker 容器中：
+
+- 创建和修改项目文件。
+- 安装依赖、执行命令和运行测试。
+- 导入当前群上传的文件。
+- 把构建产物、压缩包或图片发回当前群。
+- 使用 `say` 汇报长任务进度。
+
+沙箱不挂载宿主机目录，并按“群 + 发起用户”授权。任务结束后，本轮创建的容器会自动销毁。
+生产环境应配置允许使用沙箱的 QQ 账号和并发数量；开放给所有群成员可能消耗大量 CPU、
+内存、网络和磁盘。
+
+```dotenv
+AI_SANDBOX_ENABLED=true
+AI_SANDBOX_ALLOWED_USERS=123456789
+AI_SANDBOX_MAX_PER_USER=2
+AI_SANDBOX_MAX_TOTAL=8
+AI_SANDBOX_TIMEOUT_SECONDS=120
+```
+
+## 管理控制台
+
+启用管理台：
+
+```dotenv
+AI_ADMIN_ENABLED=true
+AI_ADMIN_TOKEN=replace-with-a-long-random-token
+AI_ADMIN_PATH=/bot-admin
+```
+
+访问：
+
+```text
+http://127.0.0.1:8080/bot-admin
+```
+
+控制台提供：
+
+- Bot、NapCat、后台 Worker 与数据库状态。
+- 模型 profile 的协议、模型名和能力开关。
+- “我自己”和“其他群友”两类默认模型配置。
+- 每个群的启用开关、自动识图开关和成员单独覆盖。
+- 当前沙箱、执行任务、媒体库、识图队列和旧数据治理状态。
+- Token 用量、Agent 回合、工具调用和投递状态。
+
+推荐只通过 Tailscale、反向代理或 SSH 隧道在可信内网访问。不要把无 Token 的管理台直接暴露
+到公网。
+
+## Nix 与 NixOS
+
+仓库可直接构建和运行：
 
 ```bash
 nix build
 nix run
+nix flake check
 ```
 
-机器人仓库同时导出 `nixosModules.qq-deepseek-bot`。在另一份 NixOS flake 中引用：
+在自己的 NixOS flake 中引用：
 
 ```nix
 inputs.qq-bot = {
@@ -112,471 +343,86 @@ inputs.qq-bot = {
 };
 ```
 
-把 `inputs.qq-bot.nixosModules.qq-deepseek-bot` 加入目标主机模块后即可配置：
+把模块加入目标主机：
 
 ```nix
+imports = [inputs.qq-bot.nixosModules.qq-deepseek-bot];
+
 services.qq-deepseek-bot = {
   enable = true;
   environmentFile = "/run/secrets/qq-deepseek-bot.env";
-  host = "172.17.0.1";
+  host = "127.0.0.1";
   port = 18080;
+
+  sandbox.enable = true;
   browser.enable = true;
+  codesnap.enable = true;
+  videoDeep.enable = true;
 };
 ```
 
-API Key 只应放在服务器上的 `environmentFile`，不能直接写进 Nix 配置，否则会进入
-可被本机用户读取的 Nix store。Docker 沙箱和独立 NapCat 分别通过
-`sandbox.enable`、`napcat.enable` 开启。
+`environmentFile` 应位于 Nix store 外部并由 sops-nix、agenix 或其他密钥系统生成。
+不要把 API Key、管理 Token 或数据库密码直接写进 Nix 表达式。
 
-## 连接 NapCatQQ
+更新服务器前建议严格按下面的顺序操作，避免共享配置被旧工作树回滚：
 
-在 NapCatQQ 里配置 OneBot V11 反向 WebSocket，连接到本机 NoneBot：
-
-```text
-ws://127.0.0.1:8080/onebot/v11/ws
+```bash
+git fetch origin
+git status -sb
+git pull --ff-only
+sudo nixos-rebuild switch --flake .#your-host
 ```
 
-机器人在线后，在群里发送：
+## 数据库与归档
 
-```text
-/ai 帮我解释一下递归
-```
+PostgreSQL 是消息、上下文、模型选择、记忆、工具日志、媒体元数据和任务状态的事实来源。
+Alembic 在升级时管理 schema 版本，NixOS module 默认在服务启动前执行迁移。
 
-机器人正常回答 AI 问题时，会自动在结尾带一个合适的颜文字。
-普通 `@机器人` 提问统一进入 LLM Tool Call 循环，不再按“看图”、
-“听语音”或“发表情”等关键词提前走固定回复。联网搜索、可用图片理解与 OCR、
-语音、表情和授权用户的沙箱工具都会按现场条件提供给模型，由模型判断是否调用；
-工具结果会交回当前 profile 对应的模型后再生成最终回答。
-模型还可以按需展开 Bilibili 视频、QQ 合并转发和持久网页会话。浏览器默认关闭；
-启用方法及 PostgreSQL、Matrix、iMessage 等可选基础设施见
+生产环境可以把低延迟节点作为首选数据库，把容量更大的节点用于复制、备份和冷归档。
+普通回复不应同步读取冷归档；旧媒体、投递正文和大文件由后台任务异步迁移，归档不可用时不会
+阻塞普通聊天。
+
+旧 SQLite/JSON 数据的迁移方法见
+[`docs/postgresql-migration.md`](docs/postgresql-migration.md)。完整生产配置和故障边界见
 [`docs/operations-v3.md`](docs/operations-v3.md)。
-机器人会引用触发它的原消息。QQ 消息进入机器人后，会先转换成统一的
-Message IR，再存入 PostgreSQL 规范消息账本。模型在群聊上下文和消息工具里
-只看到 `msg#12`、`[mention#3]` 这类机器人内部句柄；原始群号、QQ 号和 NapCat
-消息 ID 只留在本地适配层，不直接交给模型，也不会提交到 Git 仓库。
-每条未点名的普通群消息都会经过一次轻量 LLM 兴趣判断；只有模型给出很高兴趣分，
-并且确实有自然、有用或有趣的话可说时才主动接一句。主动回复没有随机抽样、冷却或
-每日次数限制，但默认阈值为 90，因此大多数消息保持沉默。适合短口语表达的主动回复
-有 60% 概率直接发送为独立 QQ 语音；语音生成失败会退回文字。机器人不再定时暖场。
-消息、上下文、长期记忆、提醒、配额和工具执行记录统一写入 PostgreSQL；
-`AI_STATE_DIR` 只保留浏览器 profile 等主机本地状态。生产启动必须配置
-`AI_POSTGRES_DSN`，不会自动退回 SQLite。旧 SQLite/JSON 数据只由一次性迁移工具
-读取，步骤见 [`docs/postgresql-migration.md`](docs/postgresql-migration.md)。同一个
-OneBot 消息重复到达只会命中原记录，不会覆盖原文。较旧聊天按 token 水位压成带精确来源范围、
-源哈希和 `episode#` 句柄的 P1/P2/P3 分段，最近消息保留为原文尾部。摘要只是可
-重建投影，原始 Message IR 才是事实来源。投影失败时会退回有界原始消息，不会
-推进覆盖游标。群聊、私聊和用户长期记忆严格按 `ConversationScope` 隔离。
 
-启用视觉与表情服务后，只有 QQ 明确标记的表情会按 SHA-256 去重保存到
-`AI_MEDIA_ROOT`；所有群共用同一套经过安全审核的表情标签和检索索引。普通图片只会
-建立一次性 `vision_jobs` 任务，后台固定使用 `AI_VISION_PROFILE` 识别，交付结果后
-清除图片 URL 和结果，不保存 Blob，也不提供历史图片检索。聊天模型通过
-`view_image` 的 `summary`/`detail` 模式按图片地址重新识别，通过 `find_stickers` 和
-`send_sticker` 使用永久表情库。详细部署参数见
-[`docs/operations-v3.md`](docs/operations-v3.md)。
-开启 `AI_VISION_AUTO_DESCRIBE` 后，成员单独发送普通图片时，Worker 会直接回复 Luna
-生成的十几字简介；带文字、@机器人或回复图片的问题仍由 Agent 决定识图模式。
-升级前已经保存的普通图片会暂时作为不可见遗留数据保留，避免迁移自动误删；运行时不再
-读取或新增这些记录，后续应通过单独的审计清理命令处理。
+## 开发与测试
 
-## Max 风格交互
+进入固定开发环境：
 
-机器人现在会先把模型回答交给宿主侧输出规划器，再发给 QQ。规划器能够：
-
-- 按空行或模型给出的 `[split]` 把长回答拆成最多 10 条，代码块不会从中间截断。
-- 用 `[reply#编号]` 把某一段引用到当前会话内的指定 `msg#`；句柄在发送前重新校验 Scope。
-- 用 `[mention#人物编号]` 指定群成员；发送前会把人物映射到当前群真实 QQ 账号，
-  确认成员仍在群里后才生成 OneBot `at` 消息段，内部编号永远不会直接作为 QQ 号。
-- 用 `[face#编号]`、`[image#消息.段]` 和 `[sticker#消息.段]` 发送 QQ 表情或
-  重用当前会话中的媒体；代码块和行内代码里的这些文本不会被执行。
-- 把严格的 `[silence]` 变成 QQ 反应，不把控制标记泄漏到聊天文本。
-- 开始处理时临时添加“正在想”反应，成功、失败和静默都有各自的宿主侧状态。
-- 第一段默认引用并 @ 提问者，后续拆分段不重复刷引用；语音仍作为独立消息发送。
-- 当前 profile 支持流式返回时，闭合的完整段落会先发；代码围栏和 `[silence]` 会等到
-  完整答案确定，`/停止` 会取消底层 HTTP stream。
-- fenced code 和 Markdown 表格可渲染为 PNG；Playwright 不可用时自动退回原文本。
-
-常用控制命令：
-
-```text
-!ps                         查看当前群正在运行的任务
-!kill [tID]                 停止指定任务或最新任务
-!feedback 补充内容          把新要求送进仍在运行的任务
-!btw 另一个问题             并行开启一个不打断原任务的新回合
-回复消息并发送 !pin         固定重要消息
-!unpin msg#12               取消固定
-!pins                       查看当前会话的固定消息
-!usage                      查看当前会话 token 用量
-!version                    查看机器人版本
+```bash
+nix develop
 ```
 
-固定消息按群聊或私聊 Scope 隔离，`/clear` 只清上下文和记忆，不会误删 Pins。
-模型还可以通过 `reminder_set`、`reminder_list`、`reminder_cancel` 创建、查看和取消
-持久提醒；机器人重启后提醒仍在，发送失败会重试，发送结果不确定时不会盲目重复。
+运行测试：
 
-宿主只把简短技能目录放进 system prompt。模型需要某项能力时再调用 `use_skill`
-读取完整说明，避免所有操作手册永久占用上下文。`inspect_source` 只允许查看本仓库
-白名单目录，禁止访问 `.env`、状态数据库、隐藏文件、绝对路径、符号链接和目录
-穿越；`group_members` 只返回 `[mention#principal]`，不会把原始 QQ 号交给模型。
-
-## 工作回合与连续任务
-
-每个 AI 请求现在都会留下一个当前会话内可见的回合编号，例如
-`t#3`。机器人会把模型说明、工具开始、成功、失败或已实际发送等事件写入
-PostgreSQL 的 `agent_turns` 与 `turn_journal_events`，而不是只保留最后一句回答。普通闲聊仍会记录为回合，
-但不会挤进提供给模型的 recent turns 工作摘要。
-
-你可以自然地说：
-
-```text
-@机器人 继续 t#3，把刚才的项目再加一个登录页
-@机器人 展开 t#3，告诉我上次执行到了哪里
+```bash
+AI_ALLOW_LEGACY_SQLITE=true python -m unittest discover -s tests
+nix flake check
 ```
 
-当前模型会按需调用 `context_search` 查找当前会话的 `msg#` 和 `episode#`，再用
-`context_expand` 展开 `t#` 或 `episode#` 的证据。所有句柄都必须连同宿主给定的
-当前 `ConversationScope` 查询；猜中其他群的编号或 UUID 也读不到内容。
+提交前至少检查：
 
-机器人成功发出的最终回复、`say` 进度消息和沙箱图片会绑定到对应回合。群友
-直接引用这些消息继续提问时，机器人会新建一个 `fork-from` 回合，并自动注入
-旧回合摘要、经过时间以及期间新增的少量群聊消息；它不会恢复已经结束的 Python
-协程。旧回合只有在成功完成、包含工具工作、归档仍在、模型、提示词版本和工具
-目录完全匹配且链预算足够时，才会原样重放 provider 消息段。任一条件不满足就
-自动降级到永久保存的确定性摘要，当前 system prompt 永远不会从归档恢复。
-
-为了排查中断，模型和工具之间的短期 trace 默认压缩保留 14 天，每个会话最多
-50 份；检测到密码、Token、API Key 或验证码的 trace 不会归档。`/ai_reset`
-和 `/clear` 会立刻移动当前会话的可见性边界，让旧 `t#` 不再进入模型上下文。
-底层审计行保留在 Tank 的 PostgreSQL 中，不会上传 Git。机器人启动时会把没有完成行
-的 `started` 工具效果标记为 `outcome-unknown`，并把未结束回合标为异常中断，
-避免把“可能已经执行过”误当成“肯定没执行”。最终 QQ 回复也按发送尝试记录
-`started`、`committed`、`failed` 或 `outcome-unknown`；NapCat 超时不会被伪装成
-明确失败，若启用短回复重试，两次尝试会分别留下记录。
-
-## 长期记忆和任务管理
-
-自然聊天时当前模型可以调用：
-
-```text
-memory_add / memory_list / memory_remove
-context_search / context_expand
-pin_message / unpin_message
-reminder_set / reminder_list / reminder_cancel
-use_skill / inspect_source / group_members
+```bash
+git diff --check
+git status -sb
 ```
 
-它只应保存稳定偏好、身份事实和长期约定，不保存临时聊天、密码、Token、
-API Key 或验证码。所有记忆都可以手动审计：
+涉及数据库、工具权限、消息 Scope、媒体发送或 NixOS module 的改动，应补充相应的定向测试。
 
-```text
-/记忆
-/记忆 添加 我喜欢简洁回答
-/记忆 群 项目统一使用 Python 3.12
-/记忆 删除 3
-/记忆 清空
-/记忆 清空 群
-/记忆 审计
-```
+## 安全边界
 
-个人记忆只能用于“当前群 + 当前 QQ 用户”；群记忆只有群管理员或
-`AI_SANDBOX_ALLOWED_USERS` 中明确授权的用户可以修改。每条记忆记录版本、创建者
-`[mention#principal]`、来源 `msg#` 和更新时间；新增、更新、删除、清空与容量淘汰都会
-写入 mutation 审计记录，更新接口使用版本比较避免静默覆盖。
+- `.env`、API Key、数据库 DSN、QQ Token 和管理 Token 不应提交到 Git。
+- 模型只获得当前会话可见的规范句柄，工具执行时会再次检查 Scope 与权限。
+- 图片 OCR、网页内容、群文件和工具返回值都视为不可信输入，不能覆盖 system prompt。
+- Docker 沙箱不是宿主机管理员权限；不要挂载宿主目录或 Docker Socket 到任务容器。
+- NapCat 和 QQ 账号应运行在受控环境中，并定期备份数据库与表情 Blob。
+- 管理控制台应使用强 Token，并限制在可信网络访问。
 
-长时间执行沙盒任务时，可以查看或取消自己的当前任务：
+## 文档
 
-```text
-/任务
-/停止
-/停止 t2
-```
-
-私聊消息现在也复用同一套 AI、长期记忆、工具和任务管理流程。
-
-按用户和会话切换已配置的模型 profile：
-
-```text
-/模型
-/模型 deepseek
-/模型 claude
-/模型 默认
-```
-
-`/模型` 会显示 profile 名、provider、真实模型和工具/流式/JSON 能力。选择只保存
-profile 名，不保存 API Key；它不影响同群其他用户，也不会提交到 Git 仓库。可用
-`AI_GROUP_MODEL_PROFILES_JSON={"201644592":"gpt-5.6-sol"}` 为群配置默认 profile；
-群友自己的 `/模型` 选择优先级更高，执行 `/模型 默认` 后会恢复该群默认值。
-管理页的“群模型”可以直接修改群默认和单个群友的 profile，结果立即写入持久化
-状态并生效，不需要修改环境变量或 rebuild。`AI_ADMIN_USER_IDS` 中的 QQ 账号会单独
-显示在“我自己”，其余机器人观察到的账号显示在“其他群友”。
-
-## 项目沙箱和群文件工具
-
-开启 Docker Desktop 后，可以直接在群里让机器人完成代码任务：
-
-```text
-@机器人 创建一个 Python 记账 CLI，运行测试后打包发到群里
-@机器人 用 Node.js 做一个静态网页，把源码压缩包发给我
-@机器人 看看群里最近上传的文件，把 CSV 导入沙箱后做个统计
-@机器人 搜一下最近群聊里谁提到过“比赛”
-```
-
-当前模型可以按任务自动调用：
-
-```text
-get_message_by_id / context_search / context_expand
-search_messages / view_forward / view_bilibili
-sandbox_create / sandbox_list / sandbox_destroy / sandbox_exec
-sandbox_write_file / sandbox_read_file
-send_file_from_sandbox / send_image_from_sandbox
-list_recent_files / import_file_to_sandbox
-say / send_sticker / send_qq_face
-memory_add / memory_list / memory_remove
-pin_message / unpin_message
-reminder_set / reminder_list / reminder_cancel
-use_skill / inspect_source / group_members
-browser_navigate / browser_snapshot / browser_click / browser_type
-browser_press_key / browser_wait_for / browser_scroll / browser_close
-browser_clear
-```
-
-`context_search` 会统一搜索当前会话的消息、摘要片段、Pins 和长期记忆，并返回
-完整规范句柄。后续读取消息或导入该消息中的附件时，把 `msg#` 原样放进
-`message_handle`；消息附件使用 `file#消息.段号`，
-群文件列表使用 Scope 绑定的 `groupfile#...`。执行器会在当前群 Scope 内映射回
-NapCat 原始消息和文件 ID，模型不能直接看到或提交这些原生 ID。
-
-所有模型工具调用先经过宿主维护的工具目录和 JSON Schema 校验；不存在的工具、
-缺少必填参数、越界值和多余字段都会在执行前拒绝，并记为 `rejected`，模型不能
-靠自己声明一个新工具来获得权限。每轮和每回合分别有调用预算。
-
-沙箱以“群 + 发起用户”隔离，不挂载宿主机目录。每个容器最多使用 8GB 内存，
-CPU 和进程数不设上限。生产部署应使用 `AI_SANDBOX_ALLOWED_USERS` 限制调用者，
-并限制同时存在的沙箱数量。
-它可以联网安装依赖、构建、测试、打包并把产物发到当前群。
-这里的“部署”是把项目在临时沙箱中构建并运行验证；
-发布成公网服务仍需要对应云平台的账号、密钥和部署配置。
-每次 `sandbox_exec` 还会返回并记入观测清单：完整命令、耗时、退出码、原始
-stdout/stderr 的长度与 SHA-256、`/workspace` 变更路径、`docker diff` 和容器
-网络模式。它说明命令实际碰过什么，但不会因此扩大沙箱权限。
-
-建议先在 `.env` 中只允许自己的 QQ 使用：
-
-```text
-AI_SANDBOX_ENABLED=true
-AI_SANDBOX_ALLOWED_USERS=你的QQ号
-AI_SANDBOX_MAX_PER_USER=2
-AI_SANDBOX_MAX_TOTAL=8
-AI_SANDBOX_TIMEOUT_SECONDS=120
-AI_SANDBOX_MAX_FILE_MB=0
-```
-
-`AI_SANDBOX_MAX_FILE_MB=0` 表示 Bot 不额外限制沙箱文件导入和发送大小；
-实际传输仍受 QQ、NapCat、网络和服务器剩余磁盘空间限制。
-
-`AI_SANDBOX_ALLOWED_USERS` 留空时，所有已启用群的成员都能创建沙箱，
-会占用本机内存和磁盘。机器人关闭后，已创建容器仍会保留，之后可让机器人
-调用 `sandbox_list` 和 `sandbox_destroy` 清理。
-
-手动联网搜索：
-
-```text
-/搜 DeepSeek 最新模型
-/搜索 Arch Linux 新闻
-```
-
-`/搜` 会把原始关键词直接交给 DuckDuckGo，返回标题、摘要和完整链接；
-它不经过大模型，也不会写入 AI 对话上下文。普通 `/ai` 和 `@机器人`
-仍可由当前模型自动调用 `web_search` 工具并整理回答。
-DuckDuckGo 返回人机验证、空结果或请求失败时，会自动改用 Bing RSS
-作为备用搜索入口。
-
-识别截图中的文字并交给 AI 分析：
-
-```text
-先发送图片，5 分钟内再发送：@机器人 看看这张图
-回复一张图片并发送：@机器人 识别并总结
-/ocr [可与图片分开发送]
-@机器人 看看这张图
-```
-
-`/ocr` 会强制调用 `read_image_text` 工具；普通 `@机器人` 消息由
-当前模型根据问题和图片是否可用自行决定是否调用，不再使用关键词匹配。
-机器人优先识别当前消息中的图片，其次识别被回复的图片，最后使用同一用户
-5 分钟内最近发送的图片。Windows 使用 NapCat OCR；macOS 使用系统 Vision OCR，
-图片不会上传到第三方视觉服务。
-
-让机器人用 QQ 语音回答：
-
-```text
-/语音 给我讲个短笑话
-@机器人 用语音回答：递归是什么
-```
-
-读取群友发出的 QQ 语音：
-
-```text
-先发送语音，5 分钟内再发送：@机器人 听一下
-回复一条语音并发送：/听
-回复一条语音并发送：@机器人 帮我理解这段内容
-```
-
-`/语音` 强制调用 `reply_with_voice`，`/听` 强制调用
-`transcribe_voice`；普通 `@机器人` 时由当前模型自己决定是否调用。
-语音回答默认使用标记为 `Cute` 的在线神经音色
-`zh-CN-YunxiaNeural`，再由机器人本地
-解码并编码为腾讯 SILK；不依赖 NapCat PacketBackend，也不需要 NapCat
-转换音频。生成语音时，只有待朗读文字会发送给在线 TTS 服务。
-网络失败时自动降级到 macOS `Tingting`，语音转文字使用 `fetch_ptt_text`。
-可通过 `.env` 中的 `AI_VOICE_NAME`、`AI_VOICE_RATE`、
-`AI_VOICE_PITCH` 调整在线音色。
-当前音色偏好是软萌、少年感；`Flo（中文中国大陆）` 和
-`zh-TW-HsiaoYuNeural` 已试用并明确排除，不要自动改回。
-语音回复会作为独立 QQ 语音发送，不附带引用回复；普通文字回答仍会引用原消息。
-
-发送表情包图片：
-
-```text
-/表情
-@机器人 发个适合现在气氛的表情包
-```
-
-发送 QQ 自带表情：
-
-```text
-/qq表情
-/qq表情 14
-/qq表情 微笑
-@机器人 发一个可爱的 QQ 自带表情
-```
-
-斜杠命令是手动快捷入口；自然语言请求会由当前模型调用
-`send_sticker` 或 `send_qq_face`，不会再靠关键词直接发送。
-
-清空当前群的上下文：
-
-```text
-/ai_reset
-```
-
-## 常用配置
-
-```text
-DEEPSEEK_MODEL=deepseek-v4-flash
-DEEPSEEK_THINKING=disabled
-AI_MODEL_DEFAULT_PROFILE=deepseek
-# AI_MODEL_PROFILES_JSON 的完整示例见 .env.example 和 docs/operations-v3.md
-AI_MAX_CONTEXT_TURNS=6
-AI_GROUP_CONTEXT_MESSAGES=40
-AI_GROUP_CONTEXT_CHARS=4000
-AI_LEDGER_ENABLED=true
-AI_CONTEXT_LIFECYCLE_ENABLED=true
-AI_CONTEXT_INPUT_BUDGET_TOKENS=6000
-AI_CONTEXT_HIGH_WATERMARK_TOKENS=4500
-AI_CONTEXT_LOW_WATERMARK_TOKENS=2200
-AI_CONTEXT_COMPARTMENT_TARGET_TOKENS=1200
-AI_CONTEXT_RAW_TAIL_MIN_MESSAGES=8
-AI_CONTEXT_MAX_COMPARTMENTS=12
-AI_TURN_JOURNAL_ENABLED=true
-AI_TURN_RECENT_HOURS=24
-AI_TURN_RECENT_LIMIT=5
-AI_TURN_ARCHIVE_TTL_DAYS=14
-AI_TURN_ARCHIVE_MAX_PER_SCOPE=50
-AI_TURN_ARCHIVE_MAX_KB=512
-AI_TURN_EVENT_MAX_CHARS=12000
-AI_TURN_EXPAND_MAX_CHARS=10000
-AI_TURN_REPLAY_ENABLED=true
-AI_TURN_REPLAY_MAX_CHARS=40000
-AI_TURN_REPLAY_MAX_SEGMENTS=3
-AI_MEMORY_MAX_ENTRIES=30
-AI_MEMORY_MAX_CHARS=300
-AI_MAX_INPUT_CHARS=1500
-AI_MAX_REPLY_CHARS=3000
-AI_REPLY_CHUNK_DELAY_SECONDS=0.6
-AI_TOOL_MAX_ROUNDS=30
-AI_TOOL_SIMPLE_MAX_ROUNDS=3
-AI_TOOL_MAX_CALLS_PER_ROUND=4
-AI_TOOL_MAX_TOTAL_CALLS=60
-AI_TOOL_MAX_RESULT_CHARS=12000
-AI_TOOL_MAX_CONTEXT_CHARS=60000
-AI_SEARCH_ENABLED=true
-AI_SEARCH_AUTO_ENABLED=true
-AI_SEARCH_MAX_RESULTS=5
-AI_SEARCH_TIMEOUT_SECONDS=10
-AI_OCR_ENABLED=true
-AI_OCR_MAX_IMAGES=2
-AI_OCR_MAX_CHARS=4000
-AI_OCR_TIMEOUT_SECONDS=30
-AI_OCR_RECENT_IMAGE_SECONDS=300
-AI_PROACTIVE_ENABLED=true
-AI_PROACTIVE_INTEREST_THRESHOLD=90
-AI_PROACTIVE_VOICE_PERCENT=60
-AI_PROACTIVE_MAX_REPLY_CHARS=180
-AI_REMINDERS_ENABLED=true
-AI_REMINDER_CHECK_SECONDS=20
-AI_REMINDER_MAX_PER_SCOPE=50
-AI_OUTBOX_ENABLED=true
-AI_STREAM_ENABLED=true
-AI_QUOTA_ENABLED=true
-AI_QUOTA_DAILY_CALLS=0
-AI_QUOTA_DAILY_INPUT_TOKENS=0
-AI_QUOTA_DAILY_OUTPUT_TOKENS=0
-AI_POSTGRES_DSN=postgresql://qq_bot:强密码@100.64.0.4:5432/qq_bot
-AI_POSTGRES_SCHEMA=qq_bot
-AI_POSTGRES_POOL_MIN_SIZE=1
-AI_POSTGRES_POOL_MAX_SIZE=10
-AI_POSTGRES_POOL_TIMEOUT_SECONDS=10
-AI_ALLOW_LEGACY_SQLITE=false
-AI_RICH_RENDER_ENABLED=true
-AI_BROWSER_ENABLED=false
-AI_SEMANTIC_ENABLED=false
-AI_HISTORIAN_ENABLED=false
-AI_DREAM_ENABLED=false
-AI_ADMIN_ENABLED=false
-AI_ADMIN_USER_IDS=
-AI_MIRROR_ROUTES_JSON=[]
-AI_SANDBOX_ENABLED=false
-AI_SANDBOX_ALLOWED_USERS=
-AI_SANDBOX_MAX_PER_USER=2
-AI_SANDBOX_MAX_TOTAL=8
-AI_SANDBOX_TIMEOUT_SECONDS=120
-AI_SANDBOX_MAX_FILE_MB=20
-```
-
-只允许某些群使用，填 QQ 群号，逗号分隔：
-
-```text
-AI_ENABLED_GROUPS=123456789,987654321
-```
-
-留空则所有群都可以用。
-
-需要让机器人在个别群完全静默时，使用禁用名单：
-
-```text
-AI_DISABLED_GROUPS=201644592
-```
-
-禁用名单优先于允许名单，并同时阻止命令回复、主动聊天、提醒和待投递消息。
-
-## 五份 ADR 的落地范围
-
-本项目参考了 [HCHogan/max 的 ADR](https://github.com/HCHogan/max/tree/main/docs/adr)
-（MIT），但继续使用 NoneBot2、OneBot V11 和独立 LLM Gateway；PostgreSQL 保存规范事实，
-pgvector 在同一数据库内保存可重建的语义派生索引：
-
-| ADR | 本项目中的对应实现 |
-| --- | --- |
-| 001 Context/Memory | 不可变账本、token 水位、`episode#`、来源哈希、pgvector 混合召回、Historian 与 Dream CAS |
-| 002 Partial Plans | 宿主 schema、规范效果事件、outbox 租约与 `outcome-unknown`、沙箱观测清单；ADR 标为未来工作的完整 Plan/Hole 执行机仍未伪装启用 |
-| 003 Message IR | 富 IR 只存一次；OneBot/Matrix/iMessage 从 IR 降级；统一 outbox、echo、镜像、富截图和 UTF-8 分块 |
-| 004 Canonical Handles | 模型只使用 `msg#`、`image#/file#消息.段序号`、`groupfile#`、`[mention#principal]`、`episode#`、`t#`；原生 QQ ID 留在适配层，所有读取和发送重新校验 Scope |
-| 005 Turn Continuity | durable turn、`fork-from`、Level 0/1/2、trace TTL/LRU、有效性判定、原样回放、ledger 去重和 digest 退化 |
-
-更细的模块和数据流见 [`docs/architecture-five-adrs.md`](docs/architecture-five-adrs.md)。
-本轮与 Max 的功能对照及有意保留的差异见
-[`docs/max-compatibility.md`](docs/max-compatibility.md)。引用或改编部分的许可见
-[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
-默认 `context_search` 使用本地词面检索；配置 embedding provider 和 pgvector 后，
-会合并 Scope 受限的语义结果。完整启用与故障边界见
-[`docs/operations-v3.md`](docs/operations-v3.md)。
+- [从零搭建教程](docs/from-zero.html)
+- [生产运维与配置](docs/operations-v3.md)
+- [PostgreSQL 迁移](docs/postgresql-migration.md)
+- [上下文、消息 IR 与连续任务架构](docs/architecture-five-adrs.md)
+- [第三方组件声明](THIRD_PARTY_NOTICES.md)
