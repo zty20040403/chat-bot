@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.5.26-22c55e?style=for-the-badge">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.5.27-22c55e?style=for-the-badge">
   <img alt="Python" src="https://img.shields.io/badge/Python-3.12-3776ab?style=for-the-badge&amp;logo=python&amp;logoColor=white">
   <img alt="NoneBot2" src="https://img.shields.io/badge/NoneBot2-OneBot_V11-ea5252?style=for-the-badge">
   <img alt="PostgreSQL" src="https://img.shields.io/badge/PostgreSQL-Durable-4169e1?style=for-the-badge&amp;logo=postgresql&amp;logoColor=white">
@@ -313,7 +313,7 @@ NapCat 日志出现连接成功后，可以在 QQ 中测试：
 5. 把关键帧、转写、标题和用户问题交给视觉模型综合分析。
 6. 删除临时媒体文件，只缓存有时效的分析结果。
 
-默认深度分析上限为 30 分钟、500MB 和 8 张关键帧。它不是逐帧审片，转写也可能误识别
+默认深度分析上限为 60 分钟、1GB 和 12 张关键帧。它不是逐帧审片，转写也可能误识别
 专有名词，回答中会保留这些限制说明。
 
 ## Docker 沙箱

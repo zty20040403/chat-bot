@@ -459,19 +459,19 @@ class Settings:
                 "AI_VIDEO_WHISPER_MODEL_PATH", ""
             ).strip(),
             video_frame_count=min(
-                max(_get_int("AI_VIDEO_FRAME_COUNT", 8), 4), 12
+                max(_get_int("AI_VIDEO_FRAME_COUNT", 12), 4), 12
             ),
             video_max_download_bytes=max(
-                _get_int("AI_VIDEO_MAX_DOWNLOAD_MB", 500), 10
+                _get_int("AI_VIDEO_MAX_DOWNLOAD_MB", 1024), 10
             )
             * 1024
             * 1024,
             video_max_duration_seconds=max(
-                _get_int("AI_VIDEO_MAX_DURATION_MINUTES", 30), 1
+                _get_int("AI_VIDEO_MAX_DURATION_MINUTES", 60), 1
             )
             * 60,
             video_timeout_seconds=min(
-                max(_get_int("AI_VIDEO_TIMEOUT_SECONDS", 600), 60), 1800
+                max(_get_int("AI_VIDEO_TIMEOUT_SECONDS", 1800), 60), 1800
             ),
             video_whisper_threads=min(
                 max(_get_int("AI_VIDEO_WHISPER_THREADS", 8), 1), 32

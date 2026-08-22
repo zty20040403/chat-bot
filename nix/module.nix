@@ -212,25 +212,25 @@ in {
 
       frameCount = lib.mkOption {
         type = lib.types.ints.between 4 12;
-        default = 8;
+        default = 12;
         description = "Number of evenly sampled video frames sent to the vision model.";
       };
 
       maxDownloadMB = lib.mkOption {
         type = lib.types.ints.positive;
-        default = 500;
+        default = 1024;
         description = "Maximum combined temporary video and audio download size.";
       };
 
       maxDurationMinutes = lib.mkOption {
         type = lib.types.ints.positive;
-        default = 30;
+        default = 60;
         description = "Maximum video duration accepted by deep analysis.";
       };
 
       timeoutSeconds = lib.mkOption {
         type = lib.types.ints.positive;
-        default = 600;
+        default = 1800;
         description = "Timeout for media preparation and local transcription.";
       };
     };

@@ -27,7 +27,7 @@
     <circle cx="289" cy="200" r="6" fill="#22c55e"/>
     <text x="306" y="207" fill="#d4d4d8" font-size="16">agent runtime online</text>
     <text x="77" y="286" fill="#71717a" font-size="14">ONEBOT V11  /  NONEBOT2  /  POSTGRESQL  /  NIXOS</text>
-    <text x="1082" y="286" fill="#71717a" font-size="14">v0.5.26</text>
+    <text x="1082" y="286" fill="#71717a" font-size="14">v0.5.27</text>
   </g>
 
   <g font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="14">
