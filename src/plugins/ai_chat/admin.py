@@ -31,6 +31,7 @@ class AdminServices:
     browser_manager: Any = None
     background_tasks: Any = None
     model_catalog: Any = None
+    llm_gateway: Any = None
     model_preferences: Any = None
     user_profiles: Any = None
     message_ledger: Any = None
@@ -154,7 +155,10 @@ def register_admin(
                 if services.background_tasks is not None
                 else {"running": [], "failures": {}}
             ),
-            "models": _model_overview(services.model_catalog),
+            "models": _model_overview(
+                services.model_catalog,
+                services.llm_gateway,
+            ),
             "bridges": (
                 services.bridge_state.stats()
                 if services.bridge_state is not None
@@ -658,9 +662,17 @@ def register_admin(
     app.include_router(router)
 
 
-def _model_overview(catalog: Any) -> dict[str, object]:
+def _model_overview(
+    catalog: Any,
+    gateway: Any = None,
+) -> dict[str, object]:
     if catalog is None:
         return {"default": "", "profiles": []}
+    health = (
+        gateway.health_snapshot()
+        if gateway is not None and hasattr(gateway, "health_snapshot")
+        else {}
+    )
     return {
         "default": str(catalog.default_name),
         "profiles": [
@@ -670,6 +682,15 @@ def _model_overview(catalog: Any) -> dict[str, object]:
                 "protocol": profile.protocol,
                 "model": profile.model,
                 "configured": profile.configured,
+                "fallback_profiles": list(profile.fallback_profiles),
+                "health": health.get(
+                    profile.name,
+                    {
+                        "status": "unknown",
+                        "consecutive_failures": 0,
+                        "retry_after_seconds": 0,
+                    },
+                ),
                 "capabilities": {
                     "tools": profile.capabilities.tools,
                     "streaming": profile.capabilities.streaming,

@@ -1150,6 +1150,9 @@ const STATUS_LABELS = {
   offline: '离线',
   healthy: '双节点正常',
   degraded: '部分异常',
+  unknown: '等待首调',
+  open: '已熔断',
+  half_open: '恢复探测',
   unconfigured: '未配置'
 };
 
@@ -1157,8 +1160,8 @@ function statusTone(value) {
   const status = String(value || '').toLowerCase();
   if (['committed', 'completed', 'succeeded', 'running', 'up', 'enabled', 'online', 'healthy'].includes(status)) return 'success';
   if (status.startsWith('up ')) return 'success';
-  if (['failed', 'cancelled', 'disabled', 'error', 'offline'].includes(status)) return 'danger';
-  if (['ambiguous', 'pending', 'degraded'].includes(status)) return 'warning';
+  if (['failed', 'cancelled', 'disabled', 'error', 'offline', 'open'].includes(status)) return 'danger';
+  if (['ambiguous', 'pending', 'degraded', 'half_open'].includes(status)) return 'warning';
   if (status === 'sending') return 'info';
   return '';
 }
@@ -1175,6 +1178,17 @@ function capabilityHtml(capabilities) {
   return `<div class="capability-list">${enabled.map(([name]) => (
     `<span class="capability">${esc(labels[name] || name)}</span>`
   )).join('')}</div>`;
+}
+
+function modelHealthHtml(item) {
+  if (!item.configured) return statusBadge('disabled', '缺少密钥');
+  const health = item.health || {};
+  const status = String(health.status || 'unknown');
+  let detail = '';
+  if (health.retry_after_seconds) detail += `，${number(health.retry_after_seconds)} 秒后探测`;
+  if (health.last_error_kind) detail += `，最近错误：${health.last_error_kind}`;
+  const labels = { healthy: '健康', degraded: '波动', open: '已熔断', half_open: '恢复探测', unknown: '等待首调' };
+  return `<span title="${esc((health.last_error || '') + detail)}">${statusBadge(status, labels[status] || status)}</span>`;
 }
 
 function ownerHtml(item) {
@@ -1706,7 +1720,7 @@ function renderModels() {
   document.querySelector('#model-body').innerHTML = items.length
     ? items.map((item) => `<tr><td><code>${esc(item.name)}</code>${item.name === modelState.default ? ' <span class="capability">默认</span>' : ''}</td>` +
       `<td>${esc(item.provider)}</td><td><code>${esc(item.protocol)}</code></td><td><code>${esc(item.model)}</code></td>` +
-      `<td>${capabilityHtml(item.capabilities)}</td><td>${statusBadge(item.configured ? 'enabled' : 'disabled', item.configured ? '已配置' : '缺少密钥')}</td></tr>`).join('')
+      `<td>${capabilityHtml(item.capabilities)}</td><td>${modelHealthHtml(item)}</td></tr>`).join('')
     : emptyRow(6, '没有模型配置');
 }
 

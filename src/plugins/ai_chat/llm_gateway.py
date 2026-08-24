@@ -1,13 +1,22 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
+import re
+import time
+from dataclasses import dataclass
+from enum import Enum
 from types import SimpleNamespace
 from typing import Any, Protocol
 
 import httpx
 from openai import APIConnectionError, APIStatusError, AsyncOpenAI, RateLimitError
 
-from .model_catalog import ModelProfile
+from .model_catalog import ModelCatalog, ModelProfile
+
+
+_logger = logging.getLogger(__name__)
 
 
 class LLMError(RuntimeError):
@@ -35,6 +44,155 @@ class LLMProviderError(LLMError):
         if detail:
             message += f" ({detail})"
         super().__init__(message)
+
+
+class LLMUnavailableError(LLMError):
+    pass
+
+
+class LLMFailureKind(str, Enum):
+    NETWORK = "network"
+    RATE_LIMIT = "rate_limit"
+    AUTH = "auth"
+    BILLING = "billing"
+    MODEL_UNAVAILABLE = "model_unavailable"
+    PROVIDER = "provider"
+    INVALID_REQUEST = "invalid_request"
+    REFUSAL = "refusal"
+    CONFIG = "config"
+
+
+@dataclass(frozen=True)
+class CompletionResult:
+    response: Any
+    profile: ModelProfile
+    fallback_count: int = 0
+
+
+@dataclass(frozen=True)
+class ClassifiedFailure:
+    kind: LLMFailureKind
+    retryable: bool
+    open_immediately: bool = False
+    long_cooldown: bool = False
+
+
+@dataclass
+class ModelCircuit:
+    consecutive_failures: int = 0
+    total_failures: int = 0
+    total_successes: int = 0
+    fallback_uses: int = 0
+    opened_until: float = 0.0
+    probe_in_flight: bool = False
+    last_error_kind: str = ""
+    last_error: str = ""
+    last_failure_at: int = 0
+    last_success_at: int = 0
+
+
+class ModelHealthRegistry:
+    def __init__(
+        self,
+        *,
+        failure_threshold: int = 2,
+        cooldown_seconds: float = 120.0,
+        long_cooldown_seconds: float = 3600.0,
+    ) -> None:
+        self.failure_threshold = max(int(failure_threshold), 1)
+        self.cooldown_seconds = max(float(cooldown_seconds), 1.0)
+        self.long_cooldown_seconds = max(float(long_cooldown_seconds), 1.0)
+        self._circuits: dict[str, ModelCircuit] = {}
+
+    def acquire(self, profile_name: str, *, now: float | None = None) -> bool:
+        current = time.monotonic() if now is None else now
+        circuit = self._circuits.setdefault(profile_name, ModelCircuit())
+        if circuit.opened_until <= 0:
+            return True
+        if circuit.opened_until > current:
+            return False
+        if circuit.probe_in_flight:
+            return False
+        circuit.probe_in_flight = True
+        return True
+
+    def record_success(
+        self,
+        profile_name: str,
+        *,
+        used_as_fallback: bool = False,
+    ) -> None:
+        circuit = self._circuits.setdefault(profile_name, ModelCircuit())
+        circuit.consecutive_failures = 0
+        circuit.opened_until = 0.0
+        circuit.probe_in_flight = False
+        circuit.last_error_kind = ""
+        circuit.last_error = ""
+        circuit.last_success_at = int(time.time())
+        circuit.total_successes += 1
+        circuit.fallback_uses += int(used_as_fallback)
+
+    def record_failure(
+        self,
+        profile_name: str,
+        failure: ClassifiedFailure,
+        exc: BaseException,
+    ) -> None:
+        circuit = self._circuits.setdefault(profile_name, ModelCircuit())
+        circuit.probe_in_flight = False
+        circuit.total_failures += 1
+        circuit.last_error_kind = failure.kind.value
+        circuit.last_error = _safe_error_text(exc)
+        circuit.last_failure_at = int(time.time())
+        if not failure.retryable:
+            return
+        circuit.consecutive_failures += 1
+        should_open = (
+            failure.open_immediately
+            or circuit.consecutive_failures >= self.failure_threshold
+        )
+        if should_open:
+            duration = (
+                self.long_cooldown_seconds
+                if failure.long_cooldown
+                else self.cooldown_seconds
+            )
+            circuit.opened_until = time.monotonic() + duration
+
+    def snapshot(self, profile_names: list[str]) -> dict[str, dict[str, object]]:
+        monotonic_now = time.monotonic()
+        result: dict[str, dict[str, object]] = {}
+        for name in profile_names:
+            circuit = self._circuits.get(name)
+            if circuit is None:
+                result[name] = {
+                    "status": "unknown",
+                    "consecutive_failures": 0,
+                    "retry_after_seconds": 0,
+                }
+                continue
+            retry_after = max(int(circuit.opened_until - monotonic_now), 0)
+            if circuit.opened_until > monotonic_now:
+                status = "open"
+            elif circuit.opened_until > 0:
+                status = "half_open"
+            elif circuit.consecutive_failures:
+                status = "degraded"
+            else:
+                status = "healthy"
+            result[name] = {
+                "status": status,
+                "consecutive_failures": circuit.consecutive_failures,
+                "total_failures": circuit.total_failures,
+                "total_successes": circuit.total_successes,
+                "fallback_uses": circuit.fallback_uses,
+                "retry_after_seconds": retry_after,
+                "last_error_kind": circuit.last_error_kind,
+                "last_error": circuit.last_error,
+                "last_failure_at": circuit.last_failure_at,
+                "last_success_at": circuit.last_success_at,
+            }
+        return result
 
 
 class CompletionProvider(Protocol):
@@ -89,6 +247,7 @@ class OpenAIChatProvider:
             raise LLMProviderError(
                 profile.provider,
                 exc.status_code,
+                _openai_error_detail(exc),
             ) from exc
 
     async def list_models(self, profile: ModelProfile) -> list[str]:
@@ -107,6 +266,7 @@ class OpenAIChatProvider:
             raise LLMProviderError(
                 profile.provider,
                 exc.status_code,
+                _openai_error_detail(exc),
             ) from exc
         return sorted(
             item.id
@@ -197,6 +357,12 @@ class LLMGateway:
     def __init__(
         self,
         providers: dict[str, CompletionProvider] | None = None,
+        *,
+        catalog: ModelCatalog | None = None,
+        fallback_enabled: bool = True,
+        failure_threshold: int = 2,
+        cooldown_seconds: float = 120.0,
+        long_cooldown_seconds: float = 3600.0,
     ) -> None:
         self._providers: dict[str, CompletionProvider] = (
             {
@@ -206,9 +372,75 @@ class LLMGateway:
             if providers is None
             else dict(providers)
         )
+        self._catalog = catalog
+        self._fallback_enabled = bool(fallback_enabled)
+        self.health = ModelHealthRegistry(
+            failure_threshold=failure_threshold,
+            cooldown_seconds=cooldown_seconds,
+            long_cooldown_seconds=long_cooldown_seconds,
+        )
         self._closed = False
 
     async def create_completion(
+        self,
+        profile: ModelProfile,
+        **kwargs: Any,
+    ) -> Any:
+        result = await self.create_completion_with_profile(profile, **kwargs)
+        return result.response
+
+    async def create_completion_with_profile(
+        self,
+        profile: ModelProfile,
+        **kwargs: Any,
+    ) -> CompletionResult:
+        candidates = self._completion_candidates(profile, kwargs)
+        attempted = 0
+        last_error: BaseException | None = None
+        for candidate in candidates:
+            if not self.health.acquire(candidate.name):
+                continue
+            attempted += 1
+            request = _request_for_profile(candidate, kwargs)
+            try:
+                response = await self._create_single(candidate, **request)
+            except (LLMError, asyncio.TimeoutError, httpx.TimeoutException) as exc:
+                failure = classify_llm_failure(exc)
+                self.health.record_failure(candidate.name, failure, exc)
+                last_error = exc
+                _logger.warning(
+                    "Model profile %s failed (%s); fallback=%s",
+                    candidate.name,
+                    failure.kind.value,
+                    failure.retryable and self._fallback_enabled,
+                )
+                if not failure.retryable or not self._fallback_enabled:
+                    raise
+                continue
+            self.health.record_success(
+                candidate.name,
+                used_as_fallback=candidate.name != profile.name,
+            )
+            if candidate.name != profile.name:
+                _logger.warning(
+                    "Model request routed from profile %s to fallback %s",
+                    profile.name,
+                    candidate.name,
+                )
+            return CompletionResult(
+                response=response,
+                profile=candidate,
+                fallback_count=max(attempted - 1, 1)
+                if candidate.name != profile.name
+                else 0,
+            )
+        if last_error is not None:
+            raise last_error
+        raise LLMUnavailableError(
+            f"all compatible fallback profiles for {profile.name!r} are cooling down"
+        )
+
+    async def _create_single(
         self,
         profile: ModelProfile,
         **kwargs: Any,
@@ -227,6 +459,44 @@ class LLMGateway:
                 f"model profile {profile.name!r} does not support native JSON mode"
             )
         return await provider.create_completion(profile, **kwargs)
+
+    def health_snapshot(self) -> dict[str, dict[str, object]]:
+        names = (
+            [profile.name for profile in self._catalog.profiles]
+            if self._catalog is not None
+            else list(self.health._circuits)
+        )
+        return self.health.snapshot(names)
+
+    def _completion_candidates(
+        self,
+        primary: ModelProfile,
+        kwargs: dict[str, Any],
+    ) -> list[ModelProfile]:
+        candidates = [primary]
+        if not self._fallback_enabled or self._catalog is None:
+            return candidates
+
+        preferred: list[ModelProfile] = []
+        for name in primary.fallback_profiles:
+            selected = self._catalog.try_resolve(name)
+            if selected is not None:
+                preferred.append(selected)
+        automatic = [
+            candidate
+            for candidate in self._catalog.profiles
+            if candidate.name != primary.name
+        ]
+        automatic.sort(key=lambda item: item.provider != primary.provider)
+        seen = {primary.name}
+        for candidate in (*preferred, *automatic):
+            if candidate.name in seen or not candidate.configured:
+                continue
+            if not _profile_supports_request(candidate, kwargs):
+                continue
+            seen.add(candidate.name)
+            candidates.append(candidate)
+        return candidates
 
     async def list_models(self, profile: ModelProfile) -> list[str]:
         if not profile.capabilities.model_listing:
@@ -255,6 +525,163 @@ class LLMGateway:
                 f"unsupported model protocol: {profile.protocol}"
             )
         return provider
+
+
+def classify_llm_failure(exc: BaseException) -> ClassifiedFailure:
+    if isinstance(exc, LLMRateLimitError):
+        return ClassifiedFailure(
+            LLMFailureKind.RATE_LIMIT,
+            retryable=True,
+            open_immediately=True,
+        )
+    if isinstance(
+        exc,
+        (LLMConnectionError, asyncio.TimeoutError, httpx.TimeoutException),
+    ):
+        return ClassifiedFailure(LLMFailureKind.NETWORK, retryable=True)
+    if isinstance(exc, LLMConfigError):
+        if "missing its API key" in str(exc):
+            return ClassifiedFailure(
+                LLMFailureKind.CONFIG,
+                retryable=True,
+                open_immediately=True,
+                long_cooldown=True,
+            )
+        return ClassifiedFailure(LLMFailureKind.CONFIG, retryable=False)
+    if isinstance(exc, LLMProviderError):
+        status = exc.status_code
+        detail = exc.detail.lower()
+        if status == 429:
+            return ClassifiedFailure(
+                LLMFailureKind.RATE_LIMIT,
+                retryable=True,
+                open_immediately=True,
+            )
+        if status in {401, 403}:
+            return ClassifiedFailure(
+                LLMFailureKind.AUTH,
+                retryable=True,
+                open_immediately=True,
+                long_cooldown=True,
+            )
+        if status == 402:
+            return ClassifiedFailure(
+                LLMFailureKind.BILLING,
+                retryable=True,
+                open_immediately=True,
+                long_cooldown=True,
+            )
+        if status == 404:
+            return ClassifiedFailure(
+                LLMFailureKind.MODEL_UNAVAILABLE,
+                retryable=True,
+                open_immediately=True,
+                long_cooldown=True,
+            )
+        if status == 400 and any(
+            marker in detail
+            for marker in (
+                "content_filter",
+                "content policy",
+                "safety policy",
+                "moderation",
+            )
+        ):
+            return ClassifiedFailure(LLMFailureKind.REFUSAL, retryable=False)
+        if status in {400, 404, 413, 422}:
+            return ClassifiedFailure(
+                LLMFailureKind.INVALID_REQUEST,
+                retryable=False,
+            )
+        if status in {408, 409, 425} or status >= 500:
+            return ClassifiedFailure(LLMFailureKind.PROVIDER, retryable=True)
+        return ClassifiedFailure(LLMFailureKind.PROVIDER, retryable=False)
+    return ClassifiedFailure(LLMFailureKind.PROVIDER, retryable=False)
+
+
+def _request_for_profile(
+    profile: ModelProfile,
+    kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    request = dict(kwargs)
+    request["model"] = profile.model
+    if profile.temperature is None:
+        request.pop("temperature", None)
+    else:
+        request["temperature"] = profile.temperature
+    if profile.protocol == "openai-chat":
+        if profile.thinking == "enabled":
+            request["extra_body"] = {"thinking": {"type": "enabled"}}
+        elif profile.thinking == "disabled":
+            request["extra_body"] = {"thinking": {"type": "disabled"}}
+        else:
+            request.pop("extra_body", None)
+    else:
+        request.pop("extra_body", None)
+    return request
+
+
+def _profile_supports_request(
+    profile: ModelProfile,
+    kwargs: dict[str, Any],
+) -> bool:
+    if kwargs.get("tools") and not profile.capabilities.tools:
+        return False
+    if kwargs.get("stream") and not profile.capabilities.streaming:
+        return False
+    if kwargs.get("response_format") and not profile.capabilities.json_mode:
+        return False
+    if _request_contains_images(kwargs.get("messages")):
+        return profile.capabilities.vision
+    return True
+
+
+def _request_contains_images(messages: object) -> bool:
+    if not isinstance(messages, list):
+        return False
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if isinstance(block, dict) and block.get("type") in {
+                "image",
+                "image_url",
+            }:
+                return True
+    return False
+
+
+def _openai_error_detail(exc: APIStatusError) -> str:
+    body = getattr(exc, "body", None)
+    if not isinstance(body, dict):
+        return ""
+    error = body.get("error")
+    if not isinstance(error, dict):
+        return ""
+    parts = [
+        str(error.get(key) or "").strip().replace("\n", " ")
+        for key in ("type", "code", "message")
+    ]
+    return ": ".join(part for part in parts if part)[:300]
+
+
+def _safe_error_text(exc: BaseException) -> str:
+    if isinstance(exc, LLMProviderError):
+        text = f"HTTP {exc.status_code}"
+        if exc.detail:
+            text += f": {exc.detail}"
+    else:
+        text = str(exc)
+    text = re.sub(r"\bsk-[A-Za-z0-9_-]{8,}\b", "[redacted]", text)
+    text = re.sub(
+        r"(?i)\bBearer\s+[A-Za-z0-9._~+/-]{8,}",
+        "Bearer [redacted]",
+        text,
+    )
+    return " ".join(text.split())[:300]
 
 
 def _require_configured(profile: ModelProfile) -> None:

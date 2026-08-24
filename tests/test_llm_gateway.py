@@ -15,7 +15,9 @@ nonebot.init()
 from src.plugins.ai_chat.llm_gateway import (
     AnthropicMessagesProvider,
     LLMConfigError,
+    LLMConnectionError,
     LLMGateway,
+    LLMProviderError,
     LLMRateLimitError,
     OpenAIChatProvider,
     _anthropic_request,
@@ -69,6 +71,88 @@ class RecordingProvider:
 
 
 class LLMGatewayTests(unittest.IsolatedAsyncioTestCase):
+    async def test_retryable_failure_uses_fallback_and_opens_circuit(self) -> None:
+        primary = profile("primary", provider="same-provider")
+        backup = profile("backup", provider="same-provider")
+        primary = ModelProfile(
+            **{
+                **primary.__dict__,
+                "fallback_profiles": ("backup",),
+            }
+        )
+        catalog = ModelCatalog(
+            {primary.name: primary, backup.name: backup},
+            default_profile=primary.name,
+        )
+
+        class SelectiveProvider(RecordingProvider):
+            async def create_completion(self, selected, **kwargs):
+                self.calls.append((selected, kwargs))
+                if selected.name == "primary":
+                    raise LLMConnectionError("temporary network failure")
+                return selected.name
+
+        provider = SelectiveProvider()
+        gateway = LLMGateway(
+            {"openai-chat": provider},
+            catalog=catalog,
+            failure_threshold=1,
+        )
+
+        messages = [
+            {"role": "tool", "tool_call_id": "call-1", "content": "done"}
+        ]
+        first = await gateway.create_completion_with_profile(
+            primary,
+            messages=messages,
+        )
+        second = await gateway.create_completion_with_profile(
+            primary,
+            messages=[],
+        )
+
+        self.assertEqual(first.response, "backup")
+        self.assertEqual(first.profile.name, "backup")
+        self.assertEqual(provider.calls[1][1]["messages"], messages)
+        self.assertEqual(second.profile.name, "backup")
+        self.assertEqual(
+            [item[0].name for item in provider.calls],
+            ["primary", "backup", "backup"],
+        )
+        health = gateway.health_snapshot()
+        self.assertEqual(health["primary"]["status"], "open")
+        self.assertEqual(health["backup"]["fallback_uses"], 2)
+
+    async def test_content_policy_failure_does_not_try_another_model(self) -> None:
+        primary = profile("primary")
+        backup = profile("backup")
+        catalog = ModelCatalog(
+            {primary.name: primary, backup.name: backup},
+            default_profile=primary.name,
+        )
+
+        class RefusingProvider(RecordingProvider):
+            async def create_completion(self, selected, **kwargs):
+                self.calls.append((selected, kwargs))
+                raise LLMProviderError(
+                    selected.provider,
+                    400,
+                    "content_filter: safety policy",
+                )
+
+        provider = RefusingProvider()
+        gateway = LLMGateway(
+            {"openai-chat": provider},
+            catalog=catalog,
+        )
+
+        with self.assertRaises(LLMProviderError):
+            await gateway.create_completion(primary, messages=[])
+        self.assertEqual(
+            [item[0].name for item in provider.calls],
+            ["primary"],
+        )
+
     async def test_concurrent_requests_keep_their_own_profiles(self) -> None:
         first = profile("first")
         second = profile(

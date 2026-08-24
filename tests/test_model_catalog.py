@@ -145,6 +145,45 @@ class ModelCatalogTests(unittest.TestCase):
                 environ={},
             )
 
+    def test_fallback_profiles_resolve_aliases_and_reject_unknown_names(self) -> None:
+        catalog = ModelCatalog.from_json(
+            json.dumps(
+                {
+                    "primary": {
+                        "model": "model-a",
+                        "api_key_required": False,
+                        "fallback_profiles": ["backup-alias"],
+                    },
+                    "backup": {
+                        "model": "model-b",
+                        "api_key_required": False,
+                        "aliases": ["backup-alias"],
+                    },
+                }
+            ),
+            default_profile="primary",
+            environ={},
+        )
+
+        self.assertEqual(
+            catalog.resolve("primary").fallback_profiles,
+            ("backup",),
+        )
+        with self.assertRaisesRegex(ModelCatalogError, "unknown fallback"):
+            ModelCatalog.from_json(
+                json.dumps(
+                    {
+                        "primary": {
+                            "model": "model-a",
+                            "api_key_required": False,
+                            "fallback_profiles": ["missing"],
+                        }
+                    }
+                ),
+                default_profile="primary",
+                environ={},
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

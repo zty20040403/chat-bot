@@ -259,7 +259,15 @@ def build_app_context(
         model_catalog.resolve(settings.historian_profile)
     if settings.dream_enabled and settings.dream_profile:
         model_catalog.resolve(settings.dream_profile)
-    llm_gateway = LLMGateway()
+    llm_gateway = LLMGateway(
+        catalog=model_catalog,
+        fallback_enabled=settings.model_fallback_enabled,
+        failure_threshold=settings.model_circuit_failure_threshold,
+        cooldown_seconds=settings.model_circuit_cooldown_seconds,
+        long_cooldown_seconds=(
+            settings.model_circuit_long_cooldown_seconds
+        ),
+    )
 
     message_ledger: MessageLedger | None = None
     if settings.ledger_enabled:

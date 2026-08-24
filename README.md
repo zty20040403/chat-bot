@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.5.27-22c55e?style=for-the-badge">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.5.28-22c55e?style=for-the-badge">
   <img alt="Python" src="https://img.shields.io/badge/Python-3.12-3776ab?style=for-the-badge&amp;logo=python&amp;logoColor=white">
   <img alt="NoneBot2" src="https://img.shields.io/badge/NoneBot2-OneBot_V11-ea5252?style=for-the-badge">
   <img alt="PostgreSQL" src="https://img.shields.io/badge/PostgreSQL-Durable-4169e1?style=for-the-badge&amp;logo=postgresql&amp;logoColor=white">
@@ -213,8 +213,13 @@ AI_MODEL_DEFAULT_PROFILE=deepseek
 ```dotenv
 DEEPSEEK_API_KEY=replace-with-your-deepseek-key
 OPENAI_API_KEY=replace-with-your-openai-key
-AI_MODEL_PROFILES_JSON={"default":"deepseek","profiles":{"deepseek":{"provider":"deepseek","protocol":"openai-chat","base_url":"https://api.deepseek.com","api_key_env":"DEEPSEEK_API_KEY","model":"deepseek-v4-flash","aliases":["ds"]},"openai":{"provider":"openai","protocol":"openai-chat","base_url":"https://api.openai.com/v1","api_key_env":"OPENAI_API_KEY","model":"gpt-5-mini","vision":true,"aliases":["gpt"]}}}
+AI_MODEL_PROFILES_JSON={"default":"deepseek","profiles":{"deepseek":{"provider":"deepseek","protocol":"openai-chat","base_url":"https://api.deepseek.com","api_key_env":"DEEPSEEK_API_KEY","model":"deepseek-v4-flash","aliases":["ds"],"fallback_profiles":["openai"]},"openai":{"provider":"openai","protocol":"openai-chat","base_url":"https://api.openai.com/v1","api_key_env":"OPENAI_API_KEY","model":"gpt-5-mini","capabilities":{"vision":true},"aliases":["gpt"]}}}
 ```
+
+当首选模型超时、断网、限流、欠费或密钥失效时，网关会在同一轮 Agent
+中切到兼容的备用模型，不会重复已经完成的工具操作。连续失败会临时熔断；
+到达冷却时间后自动进行一次恢复探测。`fallback_profiles` 决定优先顺序，
+其余已配置且能力匹配的模型会作为后备候选。模型健康状态可在管理台查看。
 
 完整字段和可选服务见 [`.env.example`](.env.example)。
 

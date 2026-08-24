@@ -93,6 +93,10 @@ class Settings:
     deepseek_thinking: str
     model_default_profile: str
     model_profiles_json: str
+    model_fallback_enabled: bool
+    model_circuit_failure_threshold: int
+    model_circuit_cooldown_seconds: int
+    model_circuit_long_cooldown_seconds: int
     group_model_profiles: dict[int, str]
     system_prompt: str
     max_context_turns: int
@@ -278,6 +282,25 @@ class Settings:
                 or "deepseek"
             ),
             model_profiles_json=os.getenv("AI_MODEL_PROFILES_JSON", "").strip(),
+            model_fallback_enabled=_get_bool("AI_MODEL_FALLBACK_ENABLED", True),
+            model_circuit_failure_threshold=min(
+                max(_get_int("AI_MODEL_CIRCUIT_FAILURE_THRESHOLD", 2), 1),
+                10,
+            ),
+            model_circuit_cooldown_seconds=min(
+                max(_get_int("AI_MODEL_CIRCUIT_COOLDOWN_SECONDS", 120), 10),
+                3600,
+            ),
+            model_circuit_long_cooldown_seconds=min(
+                max(
+                    _get_int(
+                        "AI_MODEL_CIRCUIT_LONG_COOLDOWN_SECONDS",
+                        3600,
+                    ),
+                    60,
+                ),
+                86400,
+            ),
             group_model_profiles=_get_group_model_profiles(
                 "AI_GROUP_MODEL_PROFILES_JSON"
             ),

@@ -96,6 +96,7 @@ class ModelProfile:
     max_input_tokens: int = 0
     max_output_tokens: int = 0
     aliases: tuple[str, ...] = ()
+    fallback_profiles: tuple[str, ...] = ()
     capabilities: ModelCapabilities = field(default_factory=ModelCapabilities)
 
     @property
@@ -160,6 +161,23 @@ class ModelCatalog:
                         f"model alias {alias!r} is used by both {owner!r} and {name!r}"
                     )
                 aliases[alias] = name
+
+        for name, profile in tuple(normalized.items()):
+            fallbacks: list[str] = []
+            for candidate in profile.fallback_profiles:
+                alias = _normalize_profile_name(candidate)
+                resolved = aliases.get(alias)
+                if resolved is None:
+                    raise ModelCatalogError(
+                        f"model profile {name!r} references unknown fallback {alias!r}"
+                    )
+                if resolved != name and resolved not in fallbacks:
+                    fallbacks.append(resolved)
+            if profile.fallback_profiles != tuple(fallbacks):
+                normalized[name] = replace(
+                    profile,
+                    fallback_profiles=tuple(fallbacks),
+                )
 
         selected_default = _normalize_profile_name(default_profile)
         resolved_default = aliases.get(selected_default)
@@ -411,6 +429,18 @@ def _parse_profile(
     else:
         raise ModelCatalogError(f"model profile {name!r} aliases must be an array")
 
+    fallback_raw = raw.get("fallback_profiles", ())
+    if isinstance(fallback_raw, str):
+        fallback_profiles = (_normalize_profile_name(fallback_raw),)
+    elif isinstance(fallback_raw, (list, tuple)):
+        fallback_profiles = tuple(
+            _normalize_profile_name(item) for item in fallback_raw
+        )
+    else:
+        raise ModelCatalogError(
+            f"model profile {name!r} fallback_profiles must be an array"
+        )
+
     timeout_seconds = _bounded_float(
         raw.get("timeout_seconds", 60.0),
         field_name=f"{name}.timeout_seconds",
@@ -456,6 +486,7 @@ def _parse_profile(
             f"{name}.max_output_tokens",
         ),
         aliases=aliases,
+        fallback_profiles=fallback_profiles,
         capabilities=ModelCapabilities.from_mapping(
             protocol,
             raw.get("capabilities"),

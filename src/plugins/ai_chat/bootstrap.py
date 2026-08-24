@@ -55,6 +55,7 @@ def register_http_surfaces(
                 browser_manager=context.browser_manager,
                 background_tasks=context.background_tasks,
                 model_catalog=context.model_catalog,
+                llm_gateway=context.llm_gateway,
                 model_preferences=context.model_preferences,
                 user_profiles=context.user_profiles,
                 message_ledger=context.message_ledger,

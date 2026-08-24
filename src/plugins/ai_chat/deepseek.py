@@ -48,6 +48,7 @@ class DeepSeekTrace:
     input_tokens: int = 0
     output_tokens: int = 0
     total_tokens: int = 0
+    model_routes: list[dict[str, str]] = field(default_factory=list)
     created_at: int = field(default_factory=lambda: int(time.time()))
 
     def add_usage(self, response: Any) -> None:
@@ -72,6 +73,7 @@ class DeepSeekTrace:
                 "output_tokens": self.output_tokens,
                 "total_tokens": self.total_tokens,
             },
+            "model_routes": self.model_routes,
             "messages": self.messages,
         }
 
@@ -89,6 +91,10 @@ _model_catalog: ModelCatalog | None = None
 _llm_gateway: LLMGateway | None = None
 _active_profile: ContextVar[ModelProfile | None] = ContextVar(
     "ai_chat_active_model_profile",
+    default=None,
+)
+_last_completion_profile: ContextVar[ModelProfile | None] = ContextVar(
+    "ai_chat_last_completion_profile",
     default=None,
 )
 
@@ -233,7 +239,14 @@ def _extra_body(profile: ModelProfile) -> dict[str, object] | None:
 async def _create_completion(**kwargs: Any) -> Any:
     profile = _active_profile.get() or _resolve_profile()
     _catalog, gateway = _runtime()
-    return await gateway.create_completion(profile, **kwargs)
+    resilient = getattr(gateway, "create_completion_with_profile", None)
+    if callable(resilient):
+        result = await resilient(profile, **kwargs)
+        _last_completion_profile.set(result.profile)
+        return result.response
+    response = await gateway.create_completion(profile, **kwargs)
+    _last_completion_profile.set(profile)
+    return response
 
 
 async def _invoke_completion(
@@ -343,6 +356,7 @@ async def ask_deepseek(
     final_text_sink: FinalTextSink | None = None,
     final_stream_state: FinalStreamState | None = None,
 ) -> str:
+    _last_completion_profile.set(None)
     selected_profile = _resolve_profile(profile, model)
     messages = _build_messages(
         user_text,
@@ -361,7 +375,7 @@ async def ask_deepseek(
         **_completion_kwargs(messages, selected_profile),
     )
     if trace is not None:
-        _configure_trace(trace, selected_profile)
+        _configure_trace(trace, _actual_profile(selected_profile))
         trace.add_usage(response)
         trace.messages.extend(messages)
         trace.messages.append(_assistant_final_message(response.choices[0].message))
@@ -380,6 +394,7 @@ async def ask_deepseek_json(
     profile: ModelProfile | str | None = None,
     trace: DeepSeekTrace | None = None,
 ) -> dict[str, Any]:
+    _last_completion_profile.set(None)
     selected_profile = _resolve_profile(profile, model)
     if not selected_profile.capabilities.json_mode:
         system_prompt = (
@@ -398,7 +413,7 @@ async def ask_deepseek_json(
         **request,
     )
     if trace is not None:
-        _configure_trace(trace, selected_profile)
+        _configure_trace(trace, _actual_profile(selected_profile))
         trace.add_usage(response)
         trace.messages.extend(messages)
     content = (response.choices[0].message.content or "").strip()
@@ -437,6 +452,7 @@ async def ask_deepseek_with_tools(
     final_text_sink: FinalTextSink | None = None,
     final_stream_state: FinalStreamState | None = None,
 ) -> str:
+    _last_completion_profile.set(None)
     selected_profile = _resolve_profile(profile, model)
     if not tools or not selected_profile.capabilities.tools:
         return await ask_deepseek(
@@ -484,6 +500,7 @@ async def ask_deepseek_with_tools(
             tool_choice=next_tool_choice,
         )
         if trace is not None:
+            _configure_trace(trace, _actual_profile(selected_profile))
             trace.add_usage(response)
         message = response.choices[0].message
         tool_calls = list(getattr(message, "tool_calls", None) or [])
@@ -685,6 +702,7 @@ async def ask_deepseek_with_tools(
         **_completion_kwargs(messages, selected_profile),
     )
     if trace is not None:
+        _configure_trace(trace, _actual_profile(selected_profile))
         trace.add_usage(response)
     content = response.choices[0].message.content
     if content:
@@ -931,6 +949,17 @@ def _configure_trace(trace: DeepSeekTrace, profile: ModelProfile) -> None:
     trace.provider = profile.provider_identity
     trace.profile = profile.name
     trace.model = profile.model
+    route = {
+        "provider": profile.provider_identity,
+        "profile": profile.name,
+        "model": profile.model,
+    }
+    if not trace.model_routes or trace.model_routes[-1] != route:
+        trace.model_routes.append(route)
+
+
+def _actual_profile(fallback: ModelProfile) -> ModelProfile:
+    return _last_completion_profile.get() or fallback
 
 
 async def list_deepseek_models(
