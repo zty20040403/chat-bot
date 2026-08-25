@@ -4,6 +4,7 @@ import functools
 import logging
 import os
 import time
+from collections import defaultdict
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
@@ -274,6 +275,145 @@ class BotTelemetry:
     def render(self) -> bytes:
         return generate_latest(self.registry)
 
+    def admin_snapshot(
+        self,
+        *,
+        running_tasks: Any = None,
+        delivery_store: Any = None,
+    ) -> dict[str, object]:
+        """Return a credential-free process snapshot for the admin console."""
+        self.update_runtime_gauges(running_tasks, delivery_store)
+        samples = [
+            sample
+            for metric in self.registry.collect()
+            for sample in metric.samples
+        ]
+
+        models = _counter_breakdown(
+            samples,
+            "kennethbot_model_requests_total",
+            ("profile", "provider"),
+            status_label="status",
+        )
+        _attach_histogram_percentile(
+            models,
+            samples,
+            "kennethbot_model_request_duration_seconds",
+            ("profile", "provider"),
+        )
+        tools = _counter_breakdown(
+            samples,
+            "kennethbot_tool_calls_total",
+            ("tool",),
+            status_label="status",
+        )
+        _attach_histogram_percentile(
+            tools,
+            samples,
+            "kennethbot_tool_call_duration_seconds",
+            ("tool",),
+        )
+        deliveries = _counter_breakdown(
+            samples,
+            "kennethbot_deliveries_total",
+            ("platform",),
+            status_label="status",
+        )
+        _attach_histogram_percentile(
+            deliveries,
+            samples,
+            "kennethbot_delivery_duration_seconds",
+            ("platform",),
+        )
+        stages = _histogram_breakdown(
+            samples,
+            "kennethbot_stage_duration_seconds",
+            ("stage", "status"),
+        )
+        turns = _counter_breakdown(
+            samples,
+            "kennethbot_ai_turns_total",
+            ("platform", "kind"),
+            status_label="status",
+        )
+        _attach_histogram_percentile(
+            turns,
+            samples,
+            "kennethbot_ai_turn_duration_seconds",
+            ("platform", "kind"),
+        )
+        tokens = _plain_counter_breakdown(
+            samples,
+            "kennethbot_model_tokens_total",
+            ("profile", "direction"),
+        )
+        fallbacks = _plain_counter_breakdown(
+            samples,
+            "kennethbot_model_fallbacks_total",
+            ("requested_profile", "actual_profile"),
+        )
+        outbox = {
+            str(sample.labels.get("status", "unknown")): int(sample.value)
+            for sample in samples
+            if sample.name == "kennethbot_outbox_deliveries"
+        }
+
+        model_requests = sum(int(item["total"]) for item in models)
+        model_failures = sum(int(item.get("failed", 0)) for item in models)
+        tool_calls = sum(int(item["total"]) for item in tools)
+        tool_failures = sum(int(item.get("failed", 0)) for item in tools)
+        delivery_attempts = sum(int(item["total"]) for item in deliveries)
+        delivery_failures = sum(int(item.get("failed", 0)) for item in deliveries)
+        turn_count = sum(int(item["total"]) for item in turns)
+        turn_failures = sum(
+            int(item.get("failed", 0)) + int(item.get("crashed", 0))
+            for item in turns
+        )
+        input_tokens = sum(
+            int(item["value"])
+            for item in tokens
+            if item.get("direction") == "input"
+        )
+        output_tokens = sum(
+            int(item["value"])
+            for item in tokens
+            if item.get("direction") == "output"
+        )
+        return {
+            "generated_at": int(time.time()),
+            "window": "process",
+            "totals": {
+                "turns": turn_count,
+                "turn_failures": turn_failures,
+                "turn_p95_seconds": _overall_histogram_p95(
+                    samples,
+                    "kennethbot_ai_turn_duration_seconds",
+                ),
+                "model_requests": model_requests,
+                "model_failures": model_failures,
+                "fallbacks": sum(int(item["value"]) for item in fallbacks),
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "tool_calls": tool_calls,
+                "tool_failures": tool_failures,
+                "deliveries": delivery_attempts,
+                "delivery_failures": delivery_failures,
+                "running_tasks": int(
+                    _sample_value(samples, "kennethbot_runtime_tasks")
+                ),
+                "outbox_pending": int(outbox.get("pending", 0)),
+                "outbox_ambiguous": int(outbox.get("ambiguous", 0)),
+            },
+            "models": models,
+            "tools": tools,
+            "deliveries": deliveries,
+            "stages": stages,
+            "turn_breakdown": turns,
+            "tokens": tokens,
+            "fallback_routes": fallbacks,
+            "outbox": outbox,
+        }
+
 
 _trace_id: ContextVar[str] = ContextVar("kennethbot_trace_id", default="")
 telemetry = BotTelemetry()
@@ -365,3 +505,128 @@ def observed_ai_turn(
 
 def _new_local_trace_id() -> str:
     return os.urandom(16).hex()
+
+
+def _sample_value(samples: list[Any], name: str) -> float:
+    return sum(float(sample.value) for sample in samples if sample.name == name)
+
+
+def _plain_counter_breakdown(
+    samples: list[Any],
+    metric_name: str,
+    group_labels: tuple[str, ...],
+) -> list[dict[str, object]]:
+    grouped: dict[tuple[str, ...], float] = defaultdict(float)
+    for sample in samples:
+        if sample.name != metric_name:
+            continue
+        key = tuple(str(sample.labels.get(label, "")) for label in group_labels)
+        grouped[key] += float(sample.value)
+    return [
+        {
+            **dict(zip(group_labels, key)),
+            "value": int(value),
+        }
+        for key, value in sorted(grouped.items())
+    ]
+
+
+def _counter_breakdown(
+    samples: list[Any],
+    metric_name: str,
+    group_labels: tuple[str, ...],
+    *,
+    status_label: str,
+) -> list[dict[str, object]]:
+    grouped: dict[tuple[str, ...], dict[str, int]] = defaultdict(dict)
+    for sample in samples:
+        if sample.name != metric_name:
+            continue
+        key = tuple(str(sample.labels.get(label, "")) for label in group_labels)
+        status = str(sample.labels.get(status_label, "unknown"))
+        grouped[key][status] = grouped[key].get(status, 0) + int(sample.value)
+    rows: list[dict[str, object]] = []
+    for key, statuses in sorted(grouped.items()):
+        rows.append(
+            {
+                **dict(zip(group_labels, key)),
+                **statuses,
+                "total": sum(statuses.values()),
+                "p95_seconds": None,
+            }
+        )
+    return rows
+
+
+def _histogram_breakdown(
+    samples: list[Any],
+    metric_name: str,
+    group_labels: tuple[str, ...],
+) -> list[dict[str, object]]:
+    keys = {
+        tuple(str(sample.labels.get(label, "")) for label in group_labels)
+        for sample in samples
+        if sample.name == f"{metric_name}_count"
+    }
+    rows = [{**dict(zip(group_labels, key))} for key in sorted(keys)]
+    _attach_histogram_percentile(rows, samples, metric_name, group_labels)
+    return rows
+
+
+def _attach_histogram_percentile(
+    rows: list[dict[str, object]],
+    samples: list[Any],
+    metric_name: str,
+    group_labels: tuple[str, ...],
+) -> None:
+    for row in rows:
+        labels = {label: str(row.get(label, "")) for label in group_labels}
+        count = sum(
+            float(sample.value)
+            for sample in samples
+            if sample.name == f"{metric_name}_count"
+            and all(str(sample.labels.get(key, "")) == value for key, value in labels.items())
+        )
+        total = sum(
+            float(sample.value)
+            for sample in samples
+            if sample.name == f"{metric_name}_sum"
+            and all(str(sample.labels.get(key, "")) == value for key, value in labels.items())
+        )
+        buckets = sorted(
+            (
+                float(sample.labels.get("le", "+Inf")),
+                float(sample.value),
+            )
+            for sample in samples
+            if sample.name == f"{metric_name}_bucket"
+            and all(str(sample.labels.get(key, "")) == value for key, value in labels.items())
+        )
+        threshold = count * 0.95
+        p95: float | None = None
+        for boundary, cumulative in buckets:
+            if cumulative >= threshold and boundary != float("inf"):
+                p95 = boundary
+                break
+        row["count"] = int(count)
+        row["average_seconds"] = round(total / count, 4) if count else None
+        row["p95_seconds"] = p95
+
+
+def _overall_histogram_p95(samples: list[Any], metric_name: str) -> float | None:
+    count = sum(
+        float(sample.value)
+        for sample in samples
+        if sample.name == f"{metric_name}_count"
+    )
+    if count <= 0:
+        return None
+    buckets: dict[float, float] = defaultdict(float)
+    for sample in samples:
+        if sample.name == f"{metric_name}_bucket":
+            buckets[float(sample.labels.get("le", "+Inf"))] += float(sample.value)
+    threshold = count * 0.95
+    for boundary, cumulative in sorted(buckets.items()):
+        if cumulative >= threshold and boundary != float("inf"):
+            return boundary
+    return None

@@ -304,6 +304,98 @@ class TurnJournal:
             for row in rows
         ]
 
+    def recent_trace_summaries(self, *, limit: int = 50) -> list[dict[str, object]]:
+        """Return recent operational trace metadata without conversation content."""
+        bounded = min(max(int(limit), 1), 200)
+        now = int(time.time())
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT turn.turn_id, turn.turn_ordinal, turn.status,
+                       turn.provider, turn.model, turn.profile,
+                       turn.started_at, turn.finished_at,
+                       turn.tool_call_count, turn.input_tokens,
+                       turn.output_tokens, turn.total_tokens,
+                       archive.payload AS archive_payload,
+                       archive.expires_at AS archive_expires_at
+                FROM agent_turns AS turn
+                LEFT JOIN turn_archives AS archive
+                  ON archive.turn_id = turn.turn_id
+                WHERE turn.status != 'running'
+                ORDER BY turn.started_at DESC, turn.turn_id DESC
+                LIMIT ?
+                """,
+                (bounded,),
+            ).fetchall()
+            turn_ids = [int(row["turn_id"]) for row in rows]
+            events = []
+            if turn_ids:
+                placeholders = ", ".join("?" for _ in turn_ids)
+                events = self._connection.execute(
+                    f"""
+                    SELECT turn_id, tool_name, state
+                    FROM turn_journal_events
+                    WHERE event_kind = 'tool'
+                      AND state != 'started'
+                      AND turn_id IN ({placeholders})
+                    ORDER BY event_id ASC
+                    """,
+                    turn_ids,
+                ).fetchall()
+
+        tools_by_turn: dict[int, set[str]] = {}
+        failures_by_turn: dict[int, int] = {}
+        for event in events:
+            turn_id = int(event["turn_id"])
+            tool_name = str(event["tool_name"] or "").strip()
+            if tool_name:
+                tools_by_turn.setdefault(turn_id, set()).add(tool_name)
+            if str(event["state"]) in {"failed", "rejected", "outcome-unknown"}:
+                failures_by_turn[turn_id] = failures_by_turn.get(turn_id, 0) + 1
+
+        summaries: list[dict[str, object]] = []
+        for row in rows:
+            turn_id = int(row["turn_id"])
+            payload = _decode_trace_archive(
+                row["archive_payload"],
+                int(row["archive_expires_at"] or 0),
+                now,
+            )
+            routes = _safe_model_routes(payload.get("model_routes"))
+            started_at = int(row["started_at"])
+            finished_at = (
+                int(row["finished_at"])
+                if row["finished_at"] is not None
+                else None
+            )
+            summaries.append(
+                {
+                    "trace_id": _safe_trace_id(payload.get("trace_id")),
+                    "turn_id": turn_id,
+                    "turn_handle": f"t#{int(row['turn_ordinal'])}",
+                    "status": str(row["status"]),
+                    "provider": str(row["provider"]),
+                    "model": str(row["model"]),
+                    "profile": str(row["profile"]),
+                    "started_at": started_at,
+                    "finished_at": finished_at,
+                    "duration_seconds": (
+                        max(finished_at - started_at, 0)
+                        if finished_at is not None
+                        else None
+                    ),
+                    "tool_call_count": int(row["tool_call_count"]),
+                    "tool_failures": failures_by_turn.get(turn_id, 0),
+                    "tools": sorted(tools_by_turn.get(turn_id, set())),
+                    "input_tokens": int(row["input_tokens"]),
+                    "output_tokens": int(row["output_tokens"]),
+                    "total_tokens": int(row["total_tokens"]),
+                    "model_routes": routes,
+                    "fallback": len(routes) > 1,
+                }
+            )
+        return summaries
+
     def record_model_note(
         self,
         turn_id: int,
@@ -1722,6 +1814,42 @@ def _status_label(status: str) -> str:
         "aborted": "已取消",
         "crashed": "异常中断",
     }.get(status, status)
+
+
+def _decode_trace_archive(
+    encoded: Any,
+    expires_at: int,
+    now: int,
+) -> dict[str, Any]:
+    if encoded is None or expires_at <= now:
+        return {}
+    try:
+        decoded = zlib.decompress(bytes(encoded)).decode("utf-8")
+        payload = json.loads(decoded)
+    except (OSError, TypeError, UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _safe_trace_id(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if re.fullmatch(r"[0-9a-f]{32}", normalized) else ""
+
+
+def _safe_model_routes(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    routes: list[dict[str, str]] = []
+    for raw_route in value[:8]:
+        if not isinstance(raw_route, dict):
+            continue
+        route = {
+            key: _safe_text(str(raw_route.get(key) or ""), 160)
+            for key in ("provider", "profile", "model")
+        }
+        if any(route.values()):
+            routes.append(route)
+    return routes
 
 
 def _replay_messages(payload: dict[str, Any] | None) -> list[dict[str, Any]]:

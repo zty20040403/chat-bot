@@ -233,6 +233,8 @@ class Settings:
     admin_user_ids: set[int]
     observability_enabled: bool
     metrics_path: str
+    prometheus_url: str
+    alertmanager_url: str
     otel_service_name: str
     otel_exporter_otlp_endpoint: str
     mirror_routes_json: str
@@ -702,6 +704,8 @@ class Settings:
             metrics_path=(
                 os.getenv("AI_METRICS_PATH", "/metrics").strip() or "/metrics"
             ),
+            prometheus_url=os.getenv("AI_PROMETHEUS_URL", "").strip().rstrip("/"),
+            alertmanager_url=os.getenv("AI_ALERTMANAGER_URL", "").strip().rstrip("/"),
             otel_service_name=(
                 os.getenv("OTEL_SERVICE_NAME", "kennethbot").strip()
                 or "kennethbot"

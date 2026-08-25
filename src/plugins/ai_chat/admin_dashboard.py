@@ -63,6 +63,10 @@ _DASHBOARD_TEMPLATE = r"""<!doctype html>
             data-title="运行概览" data-subtitle="实时状态与模型消耗">
             <span data-icon="dashboard"></span><span>概览</span>
           </button>
+          <button class="nav-item" type="button" data-view="observability"
+            data-title="可观测性" data-subtitle="模型、工具、投递、Trace 与告警">
+            <span data-icon="pulse"></span><span>可观测性</span><b id="nav-alert-count">0</b>
+          </button>
           <button class="nav-item" type="button" data-view="tasks"
             data-title="运行任务" data-subtitle="正在处理的模型请求">
             <span data-icon="activity"></span><span>任务</span><b id="nav-task-count">0</b>
@@ -203,6 +207,71 @@ _DASHBOARD_TEMPLATE = r"""<!doctype html>
               <th>ID</th><th>目标</th><th>状态</th><th>尝试</th><th>更新时间</th>
             </tr></thead><tbody id="recent-delivery-body"></tbody></table>
           </div>
+        </section>
+
+        <section class="view" id="observability" hidden>
+          <div class="metrics observability-metrics">
+            <article class="metric-card">
+              <div class="metric-top"><span>Prometheus</span><span class="metric-tag">采集</span></div>
+              <strong id="obs-prometheus">--</strong>
+              <div class="metric-foot"><span class="trend-icon" data-icon="pulse"></span><span id="obs-prometheus-note">等待数据</span></div>
+            </article>
+            <article class="metric-card">
+              <div class="metric-top"><span>AI 回合</span><span class="metric-tag">本次进程</span></div>
+              <strong id="obs-turns">--</strong>
+              <div class="metric-foot"><span class="trend-icon" data-icon="activity"></span><span id="obs-turns-note">等待数据</span></div>
+            </article>
+            <article class="metric-card">
+              <div class="metric-top"><span>P95 回复耗时</span><span class="metric-tag">端到端</span></div>
+              <strong id="obs-turn-p95">--</strong>
+              <div class="metric-foot"><span class="trend-icon" data-icon="clock"></span><span>本次进程直方图</span></div>
+            </article>
+            <article class="metric-card">
+              <div class="metric-top"><span>模型成功率</span><span class="metric-tag">请求</span></div>
+              <strong id="obs-model-success">--</strong>
+              <div class="metric-foot"><span class="trend-icon" data-icon="cpu"></span><span id="obs-model-note">等待数据</span></div>
+            </article>
+            <article class="metric-card">
+              <div class="metric-top"><span>Token</span><span class="metric-tag">输入 + 输出</span></div>
+              <strong id="obs-tokens">--</strong>
+              <div class="metric-foot"><span class="trend-icon" data-icon="chart"></span><span id="obs-token-note">等待数据</span></div>
+            </article>
+            <article class="metric-card">
+              <div class="metric-top"><span>当前告警</span><span class="metric-tag">Alertmanager</span></div>
+              <strong id="obs-alerts">--</strong>
+              <div class="metric-foot"><span class="trend-icon" data-icon="activity"></span><span id="obs-alert-note">等待数据</span></div>
+            </article>
+          </div>
+
+          <div class="section-heading"><div><h2>模型与降级</h2><p>请求结果、延迟和备用路由</p></div><span class="count-label" id="obs-model-count">0 个</span></div>
+          <div class="table-wrap"><table><thead><tr>
+            <th>Profile / Provider</th><th>请求</th><th>成功</th><th>失败</th><th>P95</th><th>降级路由</th>
+          </tr></thead><tbody id="obs-model-body"></tbody></table></div>
+
+          <div class="observability-grid">
+            <div class="observability-column">
+              <div class="section-heading compact-heading"><div><h2>工具调用</h2><p>Agent Loop 工具执行</p></div></div>
+              <div class="table-wrap"><table><thead><tr>
+                <th>工具</th><th>调用</th><th>失败</th><th>P95</th>
+              </tr></thead><tbody id="obs-tool-body"></tbody></table></div>
+            </div>
+            <div class="observability-column">
+              <div class="section-heading compact-heading"><div><h2>消息发送</h2><p>各平台投递结果</p></div></div>
+              <div class="table-wrap"><table><thead><tr>
+                <th>平台</th><th>投递</th><th>失败</th><th>P95</th>
+              </tr></thead><tbody id="obs-delivery-body"></tbody></table></div>
+            </div>
+          </div>
+
+          <div class="section-heading"><div><h2>最近 Trace</h2><p>跨重启保留的安全执行摘要</p></div><span class="count-label" id="obs-trace-count">0 条</span></div>
+          <div class="table-wrap"><table class="wide-table"><thead><tr>
+            <th>时间</th><th>Trace ID</th><th>模型</th><th>状态</th><th>工具</th><th>Token</th><th>耗时</th>
+          </tr></thead><tbody id="obs-trace-body"></tbody></table></div>
+
+          <div class="section-heading compact-heading"><div><h2>当前告警</h2><p>Prometheus 告警规则的活动事件</p></div><span class="count-label" id="obs-alert-count">0 条</span></div>
+          <div class="table-wrap"><table><thead><tr>
+            <th>级别</th><th>告警</th><th>摘要</th><th>实例</th><th>开始时间</th>
+          </tr></thead><tbody id="obs-alert-body"></tbody></table></div>
         </section>
 
         <section class="view" id="tasks" hidden>
@@ -625,6 +694,19 @@ main { width: 100%; max-width: 1500px; margin: 0 auto; padding: 24px; }
 
 .metric-foot { display: flex; align-items: center; gap: 7px; margin-top: auto; color: #52525b; font-size: 12px; }
 .trend-icon { display: grid; place-items: center; color: var(--foreground); }
+.observability-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.observability-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+  margin: 22px 0;
+}
+.observability-column { min-width: 0; }
+.observability-column table { min-width: 500px; }
+.trace-id { display: inline-block; max-width: 148px; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }
+.alert-summary { display: grid; min-width: 220px; max-width: 520px; }
+.alert-summary strong { font-size: 13px; font-weight: 600; }
+.alert-summary span { color: var(--muted-foreground); font-size: 11px; overflow-wrap: anywhere; }
 
 .chart-panel {
   margin-bottom: 22px;
@@ -936,6 +1018,8 @@ details summary { color: #3f3f46; cursor: pointer; white-space: nowrap; }
 
 @media (max-width: 1120px) {
   .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .observability-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .observability-grid { grid-template-columns: 1fr; }
   .metric-card { min-height: 150px; }
   .pool-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 0; }
   .pool-metrics > div:nth-child(3) { padding-left: 0; border-left: 0; }
@@ -972,6 +1056,7 @@ details summary { color: #3f3f46; cursor: pointer; white-space: nowrap; }
   .page-heading p { display: none; }
   .token-control { width: 150px; }
   .metrics { grid-template-columns: 1fr; gap: 10px; }
+  .observability-metrics { grid-template-columns: 1fr; }
   .database-grid { grid-template-columns: 1fr; }
   .metric-card { min-height: 134px; padding: 15px; }
   .metric-card > strong { font-size: 25px; }
@@ -1000,6 +1085,7 @@ const ICONS = {
   refresh: '<path d="M21 12a9 9 0 0 0-15-6.7L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 15 6.7l3-2.7"/><path d="M16 16h5v5"/>',
   dashboard: '<rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/>',
   activity: '<path d="M3 12h4l3-9 4 18 3-9h4"/>',
+  pulse: '<path d="M2 12h4l2.5-6 4 12 3-8 2 4H22"/>',
   send: '<path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/>',
   chart: '<path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/>',
   box: '<path d="m21 8-9 5-9-5"/><path d="m3 8 9-5 9 5v8l-9 5-9-5Z"/><path d="M12 13v8"/>',
@@ -1039,6 +1125,7 @@ const refreshButtons = [
 
 const state = {
   overview: {},
+  observability: { process: { totals: {}, models: [], tools: [], deliveries: [], fallback_routes: [] }, prometheus: {}, alertmanager: { items: [] }, traces: { items: [] } },
   deliveries: [],
   usage: [],
   tasks: [],
@@ -1153,6 +1240,9 @@ const STATUS_LABELS = {
   unknown: '等待首调',
   open: '已熔断',
   half_open: '恢复探测',
+  silence: '无可见回复',
+  aborted: '已取消',
+  crashed: '异常中断',
   unconfigured: '未配置'
 };
 
@@ -1160,8 +1250,8 @@ function statusTone(value) {
   const status = String(value || '').toLowerCase();
   if (['committed', 'completed', 'succeeded', 'running', 'up', 'enabled', 'online', 'healthy'].includes(status)) return 'success';
   if (status.startsWith('up ')) return 'success';
-  if (['failed', 'cancelled', 'disabled', 'error', 'offline', 'open'].includes(status)) return 'danger';
-  if (['ambiguous', 'pending', 'degraded', 'half_open'].includes(status)) return 'warning';
+  if (['failed', 'cancelled', 'disabled', 'error', 'offline', 'open', 'crashed', 'critical'].includes(status)) return 'danger';
+  if (['ambiguous', 'pending', 'degraded', 'half_open', 'warning'].includes(status)) return 'warning';
   if (status === 'sending') return 'info';
   return '';
 }
@@ -1332,6 +1422,109 @@ function renderOverview() {
   document.querySelector('#nav-sticker-count').textContent = number(stickerCounts.total);
   document.querySelector('#nav-media-count').textContent = number((state.media.counts || {}).total);
   document.querySelector('#nav-source-count').textContent = number((state.sources.counts || {}).total);
+}
+
+function fmtLatency(value) {
+  if (value === null || value === undefined || value === '') return '-';
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds < 0) return '-';
+  if (seconds < 1) return `${Math.round(seconds * 1000)} ms`;
+  if (seconds < 60) return `${seconds.toFixed(seconds >= 10 ? 1 : 2)} 秒`;
+  return fmtDuration(seconds);
+}
+
+function successRate(total, failures) {
+  const requests = Math.max(Number(total) || 0, 0);
+  if (!requests) return '--';
+  return `${Math.max((requests - (Number(failures) || 0)) / requests * 100, 0).toFixed(1)}%`;
+}
+
+function fmtIso(value) {
+  const milliseconds = Date.parse(String(value || ''));
+  if (!Number.isFinite(milliseconds)) return '-';
+  return new Date(milliseconds).toLocaleString('zh-CN', { hour12: false });
+}
+
+function renderObservability() {
+  const data = state.observability || {};
+  const process = data.process || {};
+  const totals = process.totals || {};
+  const prometheus = data.prometheus || {};
+  const alertmanager = data.alertmanager || {};
+  const traces = (data.traces || {}).items || [];
+  const models = process.models || [];
+  const tools = process.tools || [];
+  const deliveries = process.deliveries || [];
+  const fallbacks = process.fallback_routes || [];
+  const alertItems = alertmanager.items || [];
+
+  const prometheusLabel = !prometheus.configured
+    ? '未配置'
+    : prometheus.available && prometheus.up
+    ? '正常'
+    : prometheus.available
+    ? '异常'
+    : '不可达';
+  document.querySelector('#obs-prometheus').textContent = prometheusLabel;
+  document.querySelector('#obs-prometheus-note').textContent = prometheus.available
+    ? `${number(prometheus.targets)} 个 Kennethbot 目标`
+    : prometheus.error || '等待私网监控组件';
+  document.querySelector('#obs-turns').textContent = number(totals.turns);
+  document.querySelector('#obs-turns-note').textContent = `${number(totals.turn_failures)} 个异常回合`;
+  document.querySelector('#obs-turn-p95').textContent = fmtLatency(totals.turn_p95_seconds);
+  document.querySelector('#obs-model-success').textContent = successRate(totals.model_requests, totals.model_failures);
+  document.querySelector('#obs-model-note').textContent = `${number(totals.model_requests)} 次请求 · ${number(totals.fallbacks)} 次降级`;
+  document.querySelector('#obs-tokens').textContent = compact((Number(totals.input_tokens) || 0) + (Number(totals.output_tokens) || 0));
+  document.querySelector('#obs-token-note').textContent = `${compact(totals.input_tokens)} 输入 · ${compact(totals.output_tokens)} 输出`;
+  document.querySelector('#obs-alerts').textContent = number(alertmanager.active_count);
+  document.querySelector('#obs-alert-note').textContent = alertmanager.available
+    ? (alertmanager.active_count ? '需要关注' : '当前没有活动告警')
+    : (alertmanager.configured ? 'Alertmanager 不可达' : '未配置 Alertmanager');
+  document.querySelector('#nav-alert-count').textContent = number(alertmanager.active_count);
+
+  document.querySelector('#obs-model-count').textContent = `${number(models.length)} 个`;
+  document.querySelector('#obs-model-body').innerHTML = models.length
+    ? models.map((item) => {
+      const routes = fallbacks.filter((route) => route.requested_profile === item.profile || route.actual_profile === item.profile);
+      const routeHtml = routes.length
+        ? routes.map((route) => `<span class="capability">${esc(route.requested_profile)} → ${esc(route.actual_profile)} · ${number(route.value)}</span>`).join('')
+        : '<span class="muted">无</span>';
+      return `<tr><td><div class="stack"><code>${esc(item.profile)}</code><span class="subtle">${esc(item.provider)}</span></div></td>` +
+        `<td>${number(item.total)}</td><td>${number(item.succeeded)}</td><td>${number(item.failed)}</td>` +
+        `<td>${esc(fmtLatency(item.p95_seconds))}</td><td><div class="capability-list">${routeHtml}</div></td></tr>`;
+    }).join('')
+    : emptyRow(6, '本次进程尚无模型调用');
+
+  document.querySelector('#obs-tool-body').innerHTML = tools.length
+    ? tools.map((item) => `<tr><td><code>${esc(item.tool)}</code></td><td>${number(item.total)}</td>` +
+      `<td>${number(item.failed)}</td><td>${esc(fmtLatency(item.p95_seconds))}</td></tr>`).join('')
+    : emptyRow(4, '本次进程尚无工具调用');
+  document.querySelector('#obs-delivery-body').innerHTML = deliveries.length
+    ? deliveries.map((item) => `<tr><td><code>${esc(item.platform)}</code></td><td>${number(item.total)}</td>` +
+      `<td>${number(item.failed)}</td><td>${esc(fmtLatency(item.p95_seconds))}</td></tr>`).join('')
+    : emptyRow(4, '本次进程尚无消息投递');
+
+  document.querySelector('#obs-trace-count').textContent = `${number(traces.length)} 条`;
+  document.querySelector('#obs-trace-body').innerHTML = traces.length
+    ? traces.map((item) => {
+      const traceId = item.trace_id || '-';
+      const toolsText = (item.tools || []).join(', ') || '-';
+      return `<tr><td>${esc(fmt(item.started_at))}</td>` +
+        `<td><code class="trace-id" title="${esc(traceId)}">${esc(traceId)}</code></td>` +
+        `<td><div class="stack"><code>${esc(item.profile)}</code><span class="subtle">${esc(item.model)}</span></div></td>` +
+        `<td>${statusBadge(item.status)}${item.fallback ? '<span class="capability">降级</span>' : ''}</td>` +
+        `<td><span class="truncate-cell" title="${esc(toolsText)}">${esc(toolsText)}</span></td>` +
+        `<td>${number(item.total_tokens)}</td><td>${esc(fmtLatency(item.duration_seconds))}</td></tr>`;
+    }).join('')
+    : emptyRow(7, '尚无可追溯回合');
+
+  document.querySelector('#obs-alert-count').textContent = `${number(alertItems.length)} 条`;
+  document.querySelector('#obs-alert-body').innerHTML = alertItems.length
+    ? alertItems.map((item) => `<tr><td>${statusBadge(item.severity, item.severity)}</td>` +
+      `<td><strong>${esc(item.name)}</strong></td><td><div class="alert-summary"><strong>${esc(item.summary || '-')}</strong>` +
+      `<span>${esc(item.description || '')}</span></div></td><td><div class="stack"><code>${esc(item.instance || '-')}</code>` +
+      `<span class="subtle">${esc(item.job || '')}</span></div></td><td>${esc(fmtIso(item.starts_at))}</td></tr>`).join('')
+    : emptyRow(5, alertmanager.available ? '当前没有活动告警' : 'Alertmanager 暂不可用');
 }
 
 function databaseRoleLabel(node) {
@@ -1837,6 +2030,7 @@ function drawChart() {
 
 function renderAll() {
   renderOverview();
+  renderObservability();
   renderTasks();
   renderDeliveries();
   renderUsage();
@@ -1854,6 +2048,7 @@ function renderAll() {
 function resourcePath(resource) {
   const paths = {
     overview: '/overview',
+    observability: '/observability',
     deliveries: '/deliveries',
     usage: `/usage?days=${state.usageDays}`,
     tasks: '/tasks',
@@ -1873,6 +2068,9 @@ function applyResource(resource, payload, { force = false } = {}) {
     state.overview = payload;
     renderOverview();
     renderModels();
+  } else if (resource === 'observability') {
+    state.observability = payload;
+    renderObservability();
   } else if (resource === 'deliveries') {
     state.deliveries = payload.items || [];
     renderDeliveries();
@@ -1938,8 +2136,9 @@ async function load() {
   setLoading(true);
   clearError();
   try {
-    const [overview, deliveries, usage, tasks, sandboxes, stickers, media, sources, databases, groups, contextPlans] = await Promise.all([
+    const [overview, observability, deliveries, usage, tasks, sandboxes, stickers, media, sources, databases, groups, contextPlans] = await Promise.all([
       api('/overview'),
+      api('/observability'),
       api('/deliveries'),
       api(`/usage?days=${state.usageDays}`),
       api('/tasks'),
@@ -1952,6 +2151,7 @@ async function load() {
       api('/context-plans')
     ]);
     state.overview = overview;
+    state.observability = observability;
     state.deliveries = deliveries.items || [];
     state.usage = usage.items || [];
     state.tasks = tasks.items || [];
@@ -1964,7 +2164,7 @@ async function load() {
     state.contextPlans = contextPlans;
     chartRows = state.usage;
     const loadedAt = Date.now();
-    ['overview', 'deliveries', 'usage', 'tasks', 'sandboxes', 'stickers', 'media', 'sources', 'databases', 'groups', 'contextPlans'].forEach((resource) => {
+    ['overview', 'observability', 'deliveries', 'usage', 'tasks', 'sandboxes', 'stickers', 'media', 'sources', 'databases', 'groups', 'contextPlans'].forEach((resource) => {
       refreshedAt[resource] = loadedAt;
     });
     renderAll();
@@ -1981,6 +2181,7 @@ async function load() {
 
 const resourceIntervals = {
   overview: 3000,
+  observability: 10000,
   deliveries: 3000,
   usage: 30000,
   tasks: 3000,
@@ -1995,6 +2196,7 @@ const resourceIntervals = {
 
 const viewResources = {
   overview: ['deliveries', 'usage', 'sandboxes', 'stickers', 'media', 'sources', 'databases', 'groups'],
+  observability: ['observability'],
   deliveries: ['deliveries'],
   usage: ['usage'],
   tasks: ['tasks'],

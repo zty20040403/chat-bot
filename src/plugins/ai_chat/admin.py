@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator
 from dataclasses import asdict, dataclass
 from typing import Any, Optional
 
+import httpx
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel
@@ -44,6 +45,7 @@ class AdminServices:
     vision_worker: Any = None
     turn_journal: Any = None
     database: Any = None
+    telemetry: Any = None
 
 
 class ModelSelectionRequest(BaseModel):
@@ -659,7 +661,148 @@ def register_admin(
             }
         return {"items": items, "configured": True, "available": True}
 
+    @router.get("/api/observability")
+    async def observability(
+        limit: int = Query(default=50, ge=1, le=200),
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
+        authorize(authorization)
+        process: dict[str, object] = {
+            "generated_at": int(time.time()),
+            "window": "process",
+            "totals": {},
+            "models": [],
+            "tools": [],
+            "deliveries": [],
+            "stages": [],
+            "fallback_routes": [],
+        }
+        if services.telemetry is not None:
+            try:
+                process = services.telemetry.admin_snapshot(
+                    running_tasks=services.running_tasks,
+                    delivery_store=services.delivery_store,
+                )
+            except (OSError, RuntimeError, TypeError, ValueError):
+                pass
+
+        traces: list[dict[str, object]] = []
+        traces_available = services.turn_journal is not None
+        if traces_available:
+            try:
+                traces = services.turn_journal.recent_trace_summaries(limit=limit)
+            except (OSError, RuntimeError, TypeError, ValueError):
+                traces_available = False
+
+        settings = services.settings
+        prometheus_url = str(getattr(settings, "prometheus_url", "") or "")
+        alertmanager_url = str(getattr(settings, "alertmanager_url", "") or "")
+        prometheus, alerts = await asyncio.gather(
+            _prometheus_health(prometheus_url),
+            _alertmanager_alerts(alertmanager_url),
+        )
+        return {
+            "process": process,
+            "prometheus": prometheus,
+            "alertmanager": alerts,
+            "traces": {
+                "configured": services.turn_journal is not None,
+                "available": traces_available,
+                "items": traces,
+            },
+        }
+
     app.include_router(router)
+
+
+async def _prometheus_health(base_url: str) -> dict[str, object]:
+    if not base_url:
+        return {"configured": False, "available": False, "up": None}
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            response = await client.get(
+                f"{base_url.rstrip('/')}/api/v1/query",
+                params={"query": 'up{job="kennethbot"}'},
+            )
+            response.raise_for_status()
+            payload = response.json()
+        result = payload.get("data", {}).get("result", [])
+        values = [
+            float(item.get("value", [0, 0])[1])
+            for item in result
+            if isinstance(item, dict)
+        ]
+        return {
+            "configured": True,
+            "available": True,
+            "up": bool(values) and all(value >= 1 for value in values),
+            "targets": len(values),
+            "checked_at": int(time.time()),
+        }
+    except (httpx.HTTPError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        return {
+            "configured": True,
+            "available": False,
+            "up": None,
+            "error": str(exc)[:240],
+            "checked_at": int(time.time()),
+        }
+
+
+async def _alertmanager_alerts(base_url: str) -> dict[str, object]:
+    if not base_url:
+        return {
+            "configured": False,
+            "available": False,
+            "active_count": 0,
+            "items": [],
+        }
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            response = await client.get(
+                f"{base_url.rstrip('/')}/api/v2/alerts",
+                params={"active": "true", "silenced": "false", "inhibited": "false"},
+            )
+            response.raise_for_status()
+            payload = response.json()
+        raw_alerts = payload if isinstance(payload, list) else []
+        items = [_safe_alert(item) for item in raw_alerts if isinstance(item, dict)]
+        return {
+            "configured": True,
+            "available": True,
+            "active_count": len(items),
+            "items": items[:100],
+            "checked_at": int(time.time()),
+        }
+    except (httpx.HTTPError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        return {
+            "configured": True,
+            "available": False,
+            "active_count": 0,
+            "items": [],
+            "error": str(exc)[:240],
+            "checked_at": int(time.time()),
+        }
+
+
+def _safe_alert(raw: dict[str, Any]) -> dict[str, object]:
+    labels = raw.get("labels") if isinstance(raw.get("labels"), dict) else {}
+    annotations = (
+        raw.get("annotations") if isinstance(raw.get("annotations"), dict) else {}
+    )
+    status = raw.get("status") if isinstance(raw.get("status"), dict) else {}
+    return {
+        "name": str(labels.get("alertname") or "Alert")[:160],
+        "severity": str(labels.get("severity") or "warning")[:32],
+        "instance": str(labels.get("instance") or "")[:160],
+        "job": str(labels.get("job") or "")[:120],
+        "state": str(status.get("state") or "active")[:32],
+        "summary": str(annotations.get("summary") or "")[:300],
+        "description": str(annotations.get("description") or "")[:500],
+        "starts_at": str(raw.get("startsAt") or "")[:64],
+        "ends_at": str(raw.get("endsAt") or "")[:64],
+        "fingerprint": str(raw.get("fingerprint") or "")[:128],
+    }
 
 
 def _model_overview(

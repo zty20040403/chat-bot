@@ -5,7 +5,7 @@ from typing import Any, Protocol
 from .admin import AdminServices, register_admin
 from .bridges import register_bridge_routes
 from .config import Settings
-from .observability import register_metrics_endpoint
+from .observability import register_metrics_endpoint, telemetry
 from .runtime import AppContext
 from .stickers import sticker_inventory
 
@@ -83,6 +83,7 @@ def register_http_surfaces(
                 vision_worker=context.vision_worker,
                 turn_journal=context.turn_journal,
                 database=context.database,
+                telemetry=telemetry,
             ),
             path=settings.admin_path,
             token=settings.admin_token,

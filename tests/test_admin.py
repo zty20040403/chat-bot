@@ -160,6 +160,45 @@ class TurnJournal:
             }
         ]
 
+    def recent_trace_summaries(self, limit=50):
+        del limit
+        return [
+            {
+                "trace_id": "a" * 32,
+                "turn_id": 3,
+                "turn_handle": "t#3",
+                "status": "succeeded",
+                "provider": "test",
+                "model": "model-a",
+                "profile": "main",
+                "started_at": 123,
+                "finished_at": 125,
+                "duration_seconds": 2,
+                "tool_call_count": 1,
+                "tool_failures": 0,
+                "tools": ["web_search"],
+                "input_tokens": 20,
+                "output_tokens": 10,
+                "total_tokens": 30,
+                "model_routes": [],
+                "fallback": False,
+            }
+        ]
+
+
+class Telemetry:
+    def admin_snapshot(self, **_kwargs):
+        return {
+            "generated_at": 123,
+            "window": "process",
+            "totals": {"turns": 1, "model_requests": 1},
+            "models": [],
+            "tools": [],
+            "deliveries": [],
+            "stages": [],
+            "fallback_routes": [],
+        }
+
 
 class Settings:
     enabled_groups = {930690526}
@@ -167,6 +206,8 @@ class Settings:
     group_model_profiles = {930690526: "main"}
     admin_user_ids = {3526452465}
     vision_auto_describe = True
+    prometheus_url = ""
+    alertmanager_url = ""
 
     @staticmethod
     def is_group_enabled(group_id):
@@ -305,6 +346,7 @@ class AdminTests(unittest.TestCase):
                 ),
                 turn_journal=TurnJournal(),
                 database=Database(),
+                telemetry=Telemetry(),
             ),
             token="secret",
         )
@@ -350,6 +392,10 @@ class AdminTests(unittest.TestCase):
                     "/bot-admin/api/databases",
                     headers={"Authorization": "Bearer secret"},
                 )
+                observability = await client.get(
+                    "/bot-admin/api/observability",
+                    headers={"Authorization": "Bearer secret"},
+                )
                 return (
                     page,
                     favicon,
@@ -362,6 +408,7 @@ class AdminTests(unittest.TestCase):
                     sources,
                     context_plans,
                     databases,
+                    observability,
                 )
 
         (
@@ -376,8 +423,10 @@ class AdminTests(unittest.TestCase):
             sources,
             context_plans,
             databases,
+            observability,
         ) = asyncio.run(run())
         self.assertEqual(page.status_code, 200)
+        self.assertIn('data-view="observability"', page.text)
         self.assertEqual(favicon.status_code, 200)
         self.assertTrue(favicon.headers["content-type"].startswith("image/svg+xml"))
         self.assertIn("<svg", favicon.text)
@@ -425,6 +474,14 @@ class AdminTests(unittest.TestCase):
         )
         self.assertNotIn("password", databases.text.lower())
         self.assertNotIn("rendered_context", context_plans.text)
+        self.assertEqual(observability.status_code, 200)
+        self.assertEqual(observability.json()["process"]["totals"]["turns"], 1)
+        self.assertEqual(
+            observability.json()["traces"]["items"][0]["trace_id"],
+            "a" * 32,
+        )
+        self.assertNotIn("scope_key", observability.text)
+        self.assertNotIn("objective", observability.text)
         group_rows = group_models.json()["items"]
         self.assertEqual(
             [row["group_id"] for row in group_rows],

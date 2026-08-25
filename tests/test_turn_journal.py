@@ -82,6 +82,53 @@ class TurnJournalTests(unittest.TestCase):
             self.journal.render_turn(self.group_a, turn.turn_ordinal)
         )
 
+    def test_recent_trace_summaries_exclude_conversation_content(self) -> None:
+        turn = self.start(self.group_a, "private conversation text")
+        self.journal.record_tool_started(
+            turn.turn_id,
+            1,
+            "web_search",
+            {"query": "private query"},
+            (),
+        )
+        self.journal.record_tool_finished(
+            turn.turn_id,
+            1,
+            "web_search",
+            "succeeded",
+            '{"ok":true}',
+            (),
+        )
+        trace = DeepSeekTrace(
+            provider="provider-b",
+            model="model-b",
+            profile="fallback",
+            trace_id="b" * 32,
+            model_routes=[
+                {"provider": "provider-a", "profile": "main", "model": "model-a"},
+                {"provider": "provider-b", "profile": "fallback", "model": "model-b"},
+            ],
+        )
+        self.journal.finish_turn(
+            turn.turn_id,
+            status="succeeded",
+            final_text="private answer",
+            trace_payload=trace.to_payload(),
+            input_tokens=20,
+            output_tokens=10,
+            total_tokens=30,
+        )
+
+        summaries = self.journal.recent_trace_summaries()
+
+        self.assertEqual(summaries[0]["trace_id"], "b" * 32)
+        self.assertEqual(summaries[0]["tools"], ["web_search"])
+        self.assertTrue(summaries[0]["fallback"])
+        self.assertEqual(summaries[0]["total_tokens"], 30)
+        self.assertNotIn("scope_key", summaries[0])
+        self.assertNotIn("objective", summaries[0])
+        self.assertNotIn("final_text", summaries[0])
+
     def test_context_plan_is_scoped_and_visible_to_admin(self) -> None:
         turn = self.start(self.group_a, "你觉得呢")
         self.journal.record_context_plan(

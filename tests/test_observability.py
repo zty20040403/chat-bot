@@ -12,6 +12,7 @@ nonebot.init()
 
 from src.plugins.ai_chat.deepseek import DeepSeekTrace
 from src.plugins.ai_chat.observability import (
+    BotTelemetry,
     current_trace_id,
     register_metrics_endpoint,
     telemetry,
@@ -29,6 +30,49 @@ class EmptyDeliveries:
 
 
 class ObservabilityTests(unittest.TestCase):
+    def test_admin_snapshot_groups_process_metrics(self) -> None:
+        metrics = BotTelemetry()
+        metrics.observe_model(
+            requested_profile="main",
+            actual_profile="fallback",
+            provider="test-provider",
+            status="succeeded",
+            duration=1.2,
+        )
+        metrics.observe_tokens("fallback", 120, 30)
+        metrics.turns.labels(
+            platform="onebot-v11",
+            kind="group",
+            status="succeeded",
+        ).inc()
+        metrics.turn_duration.labels(
+            platform="onebot-v11",
+            kind="group",
+            status="succeeded",
+        ).observe(2.0)
+
+        async def call_tool() -> None:
+            async with metrics.tool("web_search"):
+                return None
+
+        import asyncio
+
+        asyncio.run(call_tool())
+        with metrics.delivery("onebot-v11"):
+            pass
+        snapshot = metrics.admin_snapshot(
+            running_tasks=EmptyTasks(),
+            delivery_store=EmptyDeliveries(),
+        )
+
+        self.assertEqual(snapshot["totals"]["turns"], 1)
+        self.assertEqual(snapshot["totals"]["model_requests"], 1)
+        self.assertEqual(snapshot["totals"]["fallbacks"], 1)
+        self.assertEqual(snapshot["totals"]["input_tokens"], 120)
+        self.assertEqual(snapshot["totals"]["output_tokens"], 30)
+        self.assertEqual(snapshot["tools"][0]["tool"], "web_search")
+        self.assertEqual(snapshot["outbox"]["pending"], 2)
+
     def test_trace_id_is_attached_to_archived_model_trace(self) -> None:
         telemetry.configure("kennethbot-test", service_version="test")
         with telemetry.span("test.turn") as trace_id:
