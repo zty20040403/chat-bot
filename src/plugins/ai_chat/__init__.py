@@ -98,6 +98,7 @@ from .long_term_memory import LongTermMemoryError, MemoryEntry
 from .media_library import choose_sticker_candidate, requests_sticker_variation
 from .model_catalog import ModelCatalogError, ModelProfile
 from .message_ir import MessageBody, TextNode, render_fallback_text
+from .observability import observed_ai_turn, telemetry
 from .onebot_codec import (
     compose_onebot_reply,
     decode_onebot_message,
@@ -200,7 +201,7 @@ from .matchers import (
 SEND_RETRY_DELAY_SECONDS = 2.0
 SEND_RETRY_MAX_CHARS = 800
 TURN_PROMPT_VERSION = "qqbot-turn-v10"
-BOT_VERSION = "0.5.28"
+BOT_VERSION = "0.5.29"
 EMPTY_MENTION_FOLLOW_UP = "你觉得呢"
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 proactive_check_gate = ProactiveCheckGate()
@@ -1164,7 +1165,8 @@ async def _finish_safely(
     attempt = 1
     await notify(on_attempt, attempt, message)
     try:
-        response = await matcher.send(message)
+        with telemetry.delivery("onebot-v11"):
+            response = await matcher.send(message)
         await notify(on_sent, response, message, attempt)
         if finish:
             raise FinishedException
@@ -1186,7 +1188,8 @@ async def _finish_safely(
             attempt += 1
             await notify(on_attempt, attempt, retry_message)
             try:
-                response = await matcher.send(retry_message)
+                with telemetry.delivery("onebot-v11"):
+                    response = await matcher.send(retry_message)
                 await notify(on_sent, response, retry_message, attempt)
             except ActionFailed as retry_exc:
                 if not _is_napcat_send_timeout(retry_exc):
@@ -1443,11 +1446,12 @@ async def _ask_ai(
                     )
 
     try:
-        context_plan = _group_turn_context_plan(
-            event,
-            user_text,
-            journal_turn_id,
-        )
+        with telemetry.stage("context.resolve"):
+            context_plan = _group_turn_context_plan(
+                event,
+                user_text,
+                journal_turn_id,
+            )
     except (OSError, RuntimeError, ValueError, sqlite3.Error, DatabaseError) as exc:
         logger.warning(f"Group reference resolution failed softly: {exc}")
     context_policy = choose_context_policy(
@@ -1456,7 +1460,7 @@ async def _ask_ai(
         is_group=isinstance(event, GroupMessageEvent),
     )
 
-    async def execute_tool(name: str, arguments: dict[str, object]) -> str:
+    async def _execute_tool_impl(name: str, arguments: dict[str, object]) -> str:
         nonlocal visual_reply_segment, voice_reply_segment, voice_reply_text
 
         logger.info(f"LLM Tool Call: {name}")
@@ -2421,6 +2425,10 @@ async def _ask_ai(
             ensure_ascii=False,
         )
 
+    async def execute_tool(name: str, arguments: dict[str, object]) -> str:
+        async with telemetry.tool(name):
+            return await _execute_tool_impl(name, arguments)
+
     async def record_loop_event(event_record: AgentLoopEvent) -> None:
         if journal_turn_id is not None:
             await _record_turn_loop_event(journal_turn_id, event_record)
@@ -2709,6 +2717,7 @@ def _finish_turn_record(
             logger.warning(f"Could not record model usage: {exc}")
 
 
+@observed_ai_turn
 async def _run_tracked_ai(
     bot: Bot,
     event: MessageEvent,
@@ -2952,7 +2961,8 @@ async def _finish_tracked_ai(
             if turn_id is not None and turn_journal is not None:
                 turn_journal.record_send_started(turn_id, 100000 + stream_index)
             try:
-                response = await bot.send(event, outgoing)
+                with telemetry.delivery("onebot-v11"):
+                    response = await bot.send(event, outgoing)
             except ActionFailed as exc:
                 if delivery_store is not None and delivery is not None:
                     if _is_napcat_send_timeout(exc):
@@ -3577,15 +3587,17 @@ async def _deliver_onebot_outbox(bot: Bot, delivery: Delivery) -> None:
         if reply_id > 0:
             message = Message([MessageSegment.reply(reply_id), *message])
     if delivery.target_kind == "group":
-        response = await bot.send_group_msg(
-            group_id=int(delivery.target_native_conversation_id),
-            message=message,
-        )
+        with telemetry.delivery(delivery.target_platform):
+            response = await bot.send_group_msg(
+                group_id=int(delivery.target_native_conversation_id),
+                message=message,
+            )
     else:
-        response = await bot.send_private_msg(
-            user_id=int(delivery.target_native_conversation_id),
-            message=message,
-        )
+        with telemetry.delivery(delivery.target_platform):
+            response = await bot.send_private_msg(
+                user_id=int(delivery.target_native_conversation_id),
+                message=message,
+            )
     native_message_id = _sent_message_id(response)
     if delivery_store is not None:
         delivery_store.mark_committed(

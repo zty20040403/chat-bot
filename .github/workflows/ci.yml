@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Python 3.12
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: qq_bot
+          POSTGRES_PASSWORD: ci-password
+          POSTGRES_DB: qq_bot
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U qq_bot -d qq_bot"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      AI_POSTGRES_DSN: postgresql://qq_bot:ci-password@127.0.0.1:5432/qq_bot
+      AI_POSTGRES_SCHEMA: qq_bot_test
+      TEST_POSTGRES_DSN: postgresql://qq_bot:ci-password@127.0.0.1:5432/qq_bot
+      TEST_POSTGRES_SCHEMA: qq_bot_test
+      AI_ALLOW_LEGACY_SQLITE: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install locked runtime requirements
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Compile all Python modules
+        run: python -m compileall -q bot.py src migrations tests
+      - name: Apply and verify Alembic schema
+        run: |
+          python -m src.bot_storage.cli upgrade
+          python -m src.bot_storage.cli check
+      - name: Run unit and PostgreSQL integration tests
+        run: python -m unittest discover -s tests -p 'test_*.py'
+
+  nix:
+    name: Nix package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      - run: nix flake check --no-build --print-build-logs
+      - run: nix build .#packages.x86_64-linux.default --no-link --print-build-logs
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

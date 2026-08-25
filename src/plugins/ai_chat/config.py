@@ -231,6 +231,10 @@ class Settings:
     admin_token: str
     admin_path: str
     admin_user_ids: set[int]
+    observability_enabled: bool
+    metrics_path: str
+    otel_service_name: str
+    otel_exporter_otlp_endpoint: str
     mirror_routes_json: str
     bridge_path: str
     matrix_enabled: bool
@@ -694,6 +698,18 @@ class Settings:
                 or "/bot-admin"
             ),
             admin_user_ids=_get_group_ids("AI_ADMIN_USER_IDS"),
+            observability_enabled=_get_bool("AI_OBSERVABILITY_ENABLED", True),
+            metrics_path=(
+                os.getenv("AI_METRICS_PATH", "/metrics").strip() or "/metrics"
+            ),
+            otel_service_name=(
+                os.getenv("OTEL_SERVICE_NAME", "kennethbot").strip()
+                or "kennethbot"
+            ),
+            otel_exporter_otlp_endpoint=os.getenv(
+                "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+                "",
+            ).strip(),
             mirror_routes_json=os.getenv("AI_MIRROR_ROUTES_JSON", "").strip(),
             bridge_path=(
                 os.getenv("AI_BRIDGE_PATH", "/bot-bridge").strip()

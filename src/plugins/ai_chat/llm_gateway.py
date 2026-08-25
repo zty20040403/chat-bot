@@ -14,6 +14,7 @@ import httpx
 from openai import APIConnectionError, APIStatusError, AsyncOpenAI, RateLimitError
 
 from .model_catalog import ModelCatalog, ModelProfile
+from .observability import telemetry
 
 
 _logger = logging.getLogger(__name__)
@@ -399,13 +400,29 @@ class LLMGateway:
         last_error: BaseException | None = None
         for candidate in candidates:
             if not self.health.acquire(candidate.name):
+                telemetry.observe_model(
+                    requested_profile=profile.name,
+                    actual_profile=candidate.name,
+                    provider=candidate.provider_identity,
+                    status="circuit_open",
+                    duration=0.0,
+                )
                 continue
             attempted += 1
             request = _request_for_profile(candidate, kwargs)
+            request_started = time.monotonic()
             try:
-                response = await self._create_single(candidate, **request)
+                with telemetry.stage("model.request"):
+                    response = await self._create_single(candidate, **request)
             except (LLMError, asyncio.TimeoutError, httpx.TimeoutException) as exc:
                 failure = classify_llm_failure(exc)
+                telemetry.observe_model(
+                    requested_profile=profile.name,
+                    actual_profile=candidate.name,
+                    provider=candidate.provider_identity,
+                    status=failure.kind.value,
+                    duration=time.monotonic() - request_started,
+                )
                 self.health.record_failure(candidate.name, failure, exc)
                 last_error = exc
                 _logger.warning(
@@ -417,6 +434,22 @@ class LLMGateway:
                 if not failure.retryable or not self._fallback_enabled:
                     raise
                 continue
+            except BaseException:
+                telemetry.observe_model(
+                    requested_profile=profile.name,
+                    actual_profile=candidate.name,
+                    provider=candidate.provider_identity,
+                    status="unexpected_error",
+                    duration=time.monotonic() - request_started,
+                )
+                raise
+            telemetry.observe_model(
+                requested_profile=profile.name,
+                actual_profile=candidate.name,
+                provider=candidate.provider_identity,
+                status="succeeded",
+                duration=time.monotonic() - request_started,
+            )
             self.health.record_success(
                 candidate.name,
                 used_as_fallback=candidate.name != profile.name,

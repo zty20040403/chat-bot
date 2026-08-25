@@ -10,20 +10,21 @@ h610: qq-deepseek-bot
     |
     | libpq 自动选择当前 read-write 节点
     v
-Tank  100.64.0.4:55432  <==同步复制==>  h610 100.64.0.3:55432
-首选节点，14T 冷存储                    故障接管，小盘热数据
+h610 100.64.0.3:55432  <==同步复制==>  Tank 100.64.0.4:55432
+首选主库，优先级 100                    热备副本，优先级 50
 ```
 
 两个 PostgreSQL 节点保存相同的结构化热数据，由 `pg_auto_failover` 决定唯一可写
-主库。Tank 正常时是首选主库；Tank 离线时 h610 接管。连接串同时列出两个地址并
-使用 `target_session_attrs=read-write`，不会误写只读副本。
+主库。h610 是稳定首选主库；Tank 恢复后只作为副本追平，不自动抢占主库。连接串
+同时列出两个地址并使用 `target_session_attrs=read-write`，不会误写只读副本。
 
 Tank 的 14T 空间用于媒体、群文件、沙盒产物和旧数据归档，这些大对象不进入双机
 PostgreSQL。h610 实际只有约 476.9G，总数据库规模必须按 h610 的容量设计。浏览器
 profile、沙盒工作目录和下载缓存仍留在 h610，因为它们是主机相关或可重建数据。
 
-Tank 离线期间 monitor 暂时位于 h610。正式生产应迁移到第三台常在线的小机器；
-monitor 只保存集群状态，不保存机器人业务数据。
+monitor 当前也位于 h610。正式生产应迁移到第三台常在线的小机器；monitor 只保存
+集群状态，不保存机器人业务数据。当前形态在 h610 整机离线时不能自动提升 Tank，
+这是明确记录的剩余单点，不应描述为完整三节点高可用。
 
 PostgreSQL 只允许 `qq_bot` 用户从 h610 的 Tailscale 地址连接。密码放在 sops 和
 systemd `EnvironmentFile`，不能写进 Git、Nix store 或命令行历史。Alembic 在线
@@ -98,11 +99,19 @@ Bot 包并临时设置 `AI_ALLOW_LEGACY_SQLITE=true` 即可读取原目录。不
 
 ## 备份与恢复
 
-当前可写节点每天把 `qq_bot` 备份为带 UTC 时间戳的 PostgreSQL custom-format
-文件，生成后立即运行 `pg_restore --list` 做结构检查；只读副本会自动跳过备份。
-Tank 最多保留 30 份、30 天，h610 只保留最新 1 份且预留至少 30G 空间。至少再复制
-一份到第三台机器或对象存储。恢复演练要落到临时数据库，运行 Alembic revision、
-逐表行数和 Bot 只读冒烟检查，不能只看 `pg_dump` 退出码。
+两个节点每天各自把 `qq_bot` 备份为带 UTC 时间戳的 PostgreSQL custom-format
+文件，生成后立即运行 `pg_restore --list` 做结构检查；只读副本也保留独立逻辑
+备份，避免备份只存在 h610。
+Tank 最多保留 30 份、30 天，h610 只保留最新 1 份且预留至少 30G 空间。
+
+`qq-bot-postgres-restore-check` 会把最新备份恢复进一次性 PostgreSQL 实例，检查
+Alembic revision、业务表数量和关键表可读性，再写入 `restore-check-latest.json`。
+定时器每周执行一次，验证的是“真的能恢复”，而不只是压缩包目录可读。
+
+逻辑备份和热备复制仍不能提供任意时间点恢复。WAL/PITR 必须配合物理基础备份与
+第三份持久仓库；在第三个备份目标确定之前，不把 Tank 的 NFS 挂载直接用作同步
+`archive_command`，避免 Tank 离线反过来填满 h610 的 `pg_wal`。相关目标配置和
+演练完成前，生产能力应准确标记为“主从 + 已验证逻辑恢复”，而不是“完整 PITR”。
 
 当前向量列固定为 `vector(1536)`；若以后更换为其他维度的 embedding 模型，必须新增
 Alembic migration 修改列类型，不能只改 `AI_EMBEDDING_DIMENSIONS`。

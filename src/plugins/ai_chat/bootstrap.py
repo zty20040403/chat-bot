@@ -5,6 +5,7 @@ from typing import Any, Protocol
 from .admin import AdminServices, register_admin
 from .bridges import register_bridge_routes
 from .config import Settings
+from .observability import register_metrics_endpoint
 from .runtime import AppContext
 from .stickers import sticker_inventory
 
@@ -23,6 +24,20 @@ def register_http_surfaces(
     version: str,
     logger: BootstrapLogger,
 ) -> None:
+    if settings.observability_enabled:
+        try:
+            register_metrics_endpoint(
+                app,
+                path=settings.metrics_path,
+                service_name=settings.otel_service_name,
+                service_version=version,
+                otlp_endpoint=settings.otel_exporter_otlp_endpoint,
+                running_tasks=context.running_tasks,
+                delivery_store=context.delivery_store,
+            )
+        except (RuntimeError, TypeError, ValueError) as exc:
+            logger.error(f"Observability endpoint could not be registered: {exc}")
+
     if context.bridge_manager is not None:
         try:
             register_bridge_routes(

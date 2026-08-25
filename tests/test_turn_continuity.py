@@ -600,6 +600,7 @@ class TurnContinuityTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 occurred_at=index,
             )
+        context.build_projection(self.ledger, scope)
         captured: dict[str, object] = {}
 
         async def fake_deepseek(

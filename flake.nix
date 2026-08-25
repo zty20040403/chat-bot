@@ -153,7 +153,7 @@
       inherit package;
       imports = pkgs.runCommand "qq-deepseek-bot-import-check" {} ''
         cd ${package}/share/qq-deepseek-bot
-        ${virtualenv}/bin/python -c 'import alembic, edge_tts, httpx, miniaudio, nonebot, openai, playwright, psycopg, psycopg_pool, pygments, pysilk, sqlalchemy'
+        ${virtualenv}/bin/python -c 'import alembic, edge_tts, httpx, miniaudio, nonebot, openai, opentelemetry.sdk, playwright, prometheus_client, psycopg, psycopg_pool, pygments, pysilk, sqlalchemy'
         ${virtualenv}/bin/python -c 'import ast, pathlib; [ast.parse(path.read_text(encoding="utf-8"), filename=str(path)) for path in pathlib.Path("src").rglob("*.py")]'
         touch "$out"
       '';

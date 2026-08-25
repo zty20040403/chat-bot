@@ -11,3 +11,7 @@ SQLAlchemy>=2.0.0,<3.0.0
 alembic>=1.14.0,<2.0.0
 playwright>=1.50.0,<2.0.0
 Pygments>=2.18.0,<3.0.0
+prometheus-client>=0.22.0,<1.0.0
+opentelemetry-api>=1.36.0,<2.0.0
+opentelemetry-sdk>=1.36.0,<2.0.0
+opentelemetry-exporter-otlp-proto-http>=1.36.0,<2.0.0

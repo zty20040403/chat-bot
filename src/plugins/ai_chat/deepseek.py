@@ -14,6 +14,7 @@ from .ai_tools import ToolChoice, ToolDefinition
 from .config import settings
 from .llm_gateway import LLMConfigError, LLMGateway
 from .model_catalog import ModelCatalog, ModelProfile
+from .observability import current_trace_id, telemetry
 from .tool_policy import ToolCatalog
 
 ChatMessage = dict[str, Any]
@@ -49,17 +50,21 @@ class DeepSeekTrace:
     output_tokens: int = 0
     total_tokens: int = 0
     model_routes: list[dict[str, str]] = field(default_factory=list)
+    trace_id: str = field(default_factory=current_trace_id)
     created_at: int = field(default_factory=lambda: int(time.time()))
 
     def add_usage(self, response: Any) -> None:
         usage = _model_dump(getattr(response, "usage", None))
-        self.input_tokens += _safe_usage_int(
+        input_tokens = _safe_usage_int(
             usage.get("prompt_tokens") or usage.get("input_tokens")
         )
-        self.output_tokens += _safe_usage_int(
+        output_tokens = _safe_usage_int(
             usage.get("completion_tokens") or usage.get("output_tokens")
         )
+        self.input_tokens += input_tokens
+        self.output_tokens += output_tokens
         self.total_tokens += _safe_usage_int(usage.get("total_tokens"))
+        telemetry.observe_tokens(self.profile, input_tokens, output_tokens)
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -68,6 +73,7 @@ class DeepSeekTrace:
             "model": self.model,
             "profile": self.profile,
             "created_at": self.created_at,
+            "trace_id": self.trace_id,
             "usage": {
                 "input_tokens": self.input_tokens,
                 "output_tokens": self.output_tokens,
