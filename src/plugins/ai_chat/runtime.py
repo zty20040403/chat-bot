@@ -4,7 +4,7 @@ import asyncio
 import sqlite3
 import time
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Protocol
 
@@ -633,6 +633,13 @@ def build_app_context(
             warning=logger.warning,
         )
 
+    sandbox_manager = DockerSandboxManager(
+        max_per_owner=settings.sandbox_max_per_user,
+        max_total=settings.sandbox_max_total,
+        default_timeout_seconds=settings.sandbox_timeout_seconds,
+        max_file_bytes=settings.sandbox_max_file_bytes,
+    )
+
     job_store: DurableJobStore | None = None
     job_worker: DurableJobWorker | None = None
     if settings.durable_jobs_enabled:
@@ -656,6 +663,45 @@ def build_app_context(
                     return {"queued": queued}
 
                 job_worker.register("media.index_stickers", index_stickers)
+
+            async def execute_sandbox_job(job):
+                payload = job.payload
+                result = await sandbox_manager.exec(
+                    str(payload.get("owner") or ""),
+                    str(payload.get("sandbox_id") or ""),
+                    str(payload.get("command") or ""),
+                    int(payload.get("timeout_seconds") or 300),
+                )
+                if result.returncode != 0:
+                    raise RuntimeError(
+                        f"sandbox command exited with {result.returncode}: "
+                        f"{result.stderr[-1000:]}"
+                    )
+                return {
+                    "returncode": result.returncode,
+                    "stdout": result.stdout,
+                    "stderr": result.stderr,
+                    "observed_manifest": (
+                        asdict(result.manifest)
+                        if result.manifest is not None
+                        else None
+                    ),
+                    "sandbox_id": str(payload.get("sandbox_id") or ""),
+                }
+
+            async def compensate_sandbox_job(job, _reason):
+                payload = job.payload
+                await sandbox_manager.destroy(
+                    str(payload.get("owner") or ""),
+                    str(payload.get("sandbox_id") or ""),
+                )
+
+            job_worker.register(
+                "agent.sandbox_exec",
+                execute_sandbox_job,
+                timeout_seconds=330,
+                compensator=compensate_sandbox_job,
+            )
             if job_store.recovered_jobs:
                 logger.warning(
                     f"Recovered {job_store.recovered_jobs} expired durable job lease(s)."
@@ -687,12 +733,7 @@ def build_app_context(
         skill_registry=SkillRegistry(project_root / "skills"),
         recent_images=RecentImageStore(settings.ocr_recent_image_seconds),
         recent_voices=RecentVoiceStore(settings.voice_recent_seconds),
-        sandbox_manager=DockerSandboxManager(
-            max_per_owner=settings.sandbox_max_per_user,
-            max_total=settings.sandbox_max_total,
-            default_timeout_seconds=settings.sandbox_timeout_seconds,
-            max_file_bytes=settings.sandbox_max_file_bytes,
-        ),
+        sandbox_manager=sandbox_manager,
         bridge_router=bridge_router,
         message_ledger=message_ledger,
         context_store=context_store,

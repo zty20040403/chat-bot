@@ -371,7 +371,17 @@ async def _record_turn_loop_event(
 ) -> None:
     if turn_journal is None:
         return
-    labels = tool_effect_labels(event.tool_name)
+    labels = event.side_effects or tool_effect_labels(event.tool_name)
+    metadata = {
+        "call_id": event.call_id,
+        "fingerprint": event.fingerprint,
+        "risk": event.risk,
+        "idempotency": event.idempotency,
+        "execution_mode": event.execution_mode,
+        "approval": event.approval,
+        "duration_ms": event.duration_ms,
+    }
+    metadata = {key: value for key, value in metadata.items() if value not in {"", 0}}
     if event.kind == "model_note":
         turn_journal.record_model_note(turn_id, event.sequence, event.note)
     elif event.kind == "tool_started":
@@ -381,6 +391,7 @@ async def _record_turn_loop_event(
             event.tool_name,
             event.arguments,
             labels,
+            metadata,
         )
     elif event.kind == "tool_rejected":
         turn_journal.record_tool_rejected(
@@ -390,8 +401,9 @@ async def _record_turn_loop_event(
             event.arguments,
             event.result,
             labels,
+            metadata,
         )
-    elif event.kind == "tool_finished":
+    elif event.kind in {"tool_finished", "tool_compensated"}:
         turn_journal.record_tool_finished(
             turn_id,
             event.sequence,
@@ -399,6 +411,7 @@ async def _record_turn_loop_event(
             event.state,  # type: ignore[arg-type]
             event.result,
             labels,
+            metadata,
         )
 
 

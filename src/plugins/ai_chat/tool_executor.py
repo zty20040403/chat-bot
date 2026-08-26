@@ -115,6 +115,7 @@ from .stickers import (
 from .turn_journal import (
     tool_catalog_fingerprint,
 )
+from .tool_policy import approval_from_user_text
 from .web_search import (
     SearchError,
     SearchResult,
@@ -182,6 +183,7 @@ async def _ask_ai(
             browser_manager=browser_manager,
             source_store=source_store,
             video_analyzer=video_analyzer,
+            job_store=job_store,
         )
         if agent_executor_enabled and isinstance(event, GroupMessageEvent)
         else None
@@ -1536,6 +1538,23 @@ async def _ask_ai(
             feedback_provider=feedback_provider,
             final_text_sink=final_stream_sink,
             final_stream_state=final_stream_state,
+            approval_checker=(
+                lambda _policy, name, arguments: approval_from_user_text(
+                    user_text,
+                    name,
+                    arguments,
+                )
+            ),
+            handoff_tool=(
+                agent_executor.handoff_tool
+                if agent_executor is not None
+                else None
+            ),
+            compensate_tool=(
+                agent_executor.compensate_tool
+                if agent_executor is not None
+                else None
+            ),
         )
     except DeepSeekConfigError:
         return f"模型配置 {selected_profile.name} 缺少可用的 API Key。"

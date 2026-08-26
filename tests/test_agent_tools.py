@@ -16,6 +16,7 @@ from src.plugins.ai_chat.agent_tools import AgentToolExecutor
 from src.plugins.ai_chat.conversation_scope import ConversationScope
 from src.plugins.ai_chat.ledger import MessageLedger
 from src.plugins.ai_chat.message_ir import ForwardNode, MessageBody
+from src.plugins.ai_chat.storage.jobs import DurableJobStore
 
 
 class FakeBot:
@@ -134,6 +135,13 @@ class FakeSandboxManager:
     async def destroy(self, owner: str, sandbox_id: str) -> None:
         del owner
         self.destroyed.append(sandbox_id)
+
+    async def list(self, owner: str) -> list[dict[str, str]]:
+        del owner
+        return [
+            {"sandbox_id": sandbox_id, "status": "running"}
+            for sandbox_id in {"s123abc", *self.created}
+        ]
 
     async def write_file(
         self,
@@ -327,6 +335,41 @@ class AgentToolExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(item["ok"] for item in results))
         self.assertEqual(len(self.bot.sent_messages), 10)
         self.assertEqual(results[0]["message_handle"], "msg#2")
+
+    async def test_background_sandbox_exec_is_persistently_handed_off(self) -> None:
+        store = DurableJobStore(":memory:")
+        self.addCleanup(store.close)
+        self.executor.job_store = store
+        self.executor._task_sandbox_ids.add("s123abc")
+
+        result = json.loads(
+            await self.executor.handoff_tool(
+                "sandbox_exec",
+                {
+                    "sandbox_id": "s123abc",
+                    "command": "python -m unittest",
+                    "timeout_seconds": 120,
+                    "background": True,
+                },
+                "fingerprint123",
+            )
+            or "{}"
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["job_handle"], "job#1")
+        self.assertNotIn("s123abc", self.executor._task_sandbox_ids)
+        stored = store.get(1)
+        self.assertEqual(stored.kind, "agent.sandbox_exec")  # type: ignore[union-attr]
+        self.assertEqual(stored.max_attempts, 3)  # type: ignore[union-attr]
+        status = json.loads(
+            await self.executor.execute(
+                "job_status",
+                {"job_handle": "job#1"},
+            )
+            or "{}"
+        )
+        self.assertEqual(status["status"], "pending")
 
     async def test_message_tools_fail_closed_without_canonical_ledger(self) -> None:
         degraded = AgentToolExecutor(

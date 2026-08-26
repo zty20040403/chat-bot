@@ -21,6 +21,8 @@ SANDBOX_DESTROY_TOOL_NAME = "sandbox_destroy"
 SANDBOX_EXEC_TOOL_NAME = "sandbox_exec"
 SANDBOX_WRITE_FILE_TOOL_NAME = "sandbox_write_file"
 SANDBOX_READ_FILE_TOOL_NAME = "sandbox_read_file"
+JOB_STATUS_TOOL_NAME = "job_status"
+JOB_CANCEL_TOOL_NAME = "job_cancel"
 SEND_FILE_FROM_SANDBOX_TOOL_NAME = "send_file_from_sandbox"
 SEND_IMAGE_FROM_SANDBOX_TOOL_NAME = "send_image_from_sandbox"
 LIST_RECENT_FILES_TOOL_NAME = "list_recent_files"
@@ -361,7 +363,8 @@ SANDBOX_EXEC_TOOL: ToolDefinition = {
         "name": SANDBOX_EXEC_TOOL_NAME,
         "description": (
             "在指定沙盒的 /workspace 中执行 shell 命令，适合安装依赖、构建、测试、"
-            "运行程序和打包文件。不要用于读写宿主机。"
+            "运行程序和打包文件。不要用于读写宿主机。预计超过一次对话等待时间时，"
+            "设置 background=true 交给可恢复的持久任务队列。"
         ),
         "parameters": {
             "type": "object",
@@ -373,8 +376,53 @@ SANDBOX_EXEC_TOOL: ToolDefinition = {
                     "minimum": 1,
                     "maximum": 300,
                 },
+                "background": {
+                    "type": "boolean",
+                    "description": "是否交给重启可恢复的后台任务执行。",
+                },
             },
             "required": ["sandbox_id", "command"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+JOB_STATUS_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": JOB_STATUS_TOOL_NAME,
+        "description": "查看当前会话中持久后台任务的状态和结果。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "job_handle": {
+                    "type": "string",
+                    "pattern": r"^job#[1-9][0-9]*$",
+                }
+            },
+            "required": ["job_handle"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+JOB_CANCEL_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": JOB_CANCEL_TOOL_NAME,
+        "description": (
+            "取消当前会话的持久后台任务。这是危险操作，只有用户当前消息明确要求"
+            "取消对应任务时宿主才会批准。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "job_handle": {
+                    "type": "string",
+                    "pattern": r"^job#[1-9][0-9]*$",
+                }
+            },
+            "required": ["job_handle"],
             "additionalProperties": False,
         },
     },
@@ -1096,6 +1144,8 @@ SANDBOX_TOOLS = [
     SEND_IMAGE_FROM_SANDBOX_TOOL,
     LIST_RECENT_FILES_TOOL,
     IMPORT_FILE_TO_SANDBOX_TOOL,
+    JOB_STATUS_TOOL,
+    JOB_CANCEL_TOOL,
 ]
 
 CONVERSATION_TOOLS = [

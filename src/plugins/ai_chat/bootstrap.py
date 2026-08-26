@@ -66,6 +66,7 @@ def register_http_surfaces(
                 usage_store=context.usage_store,
                 running_tasks=context.running_tasks,
                 job_store=context.job_store,
+                job_worker=context.job_worker,
                 bridge_router=context.bridge_router,
                 bridge_state=context.mirror_state,
                 browser_manager=context.browser_manager,

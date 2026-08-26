@@ -31,6 +31,10 @@ ToolState = Literal[
     "failed",
     "committed",
     "outcome-unknown",
+    "timed-out",
+    "cancelled",
+    "compensated",
+    "handed-off",
 ]
 TURN_SCHEMA_VERSION = 3
 SEND_LOOP_SEQUENCE_BASE = 1_000_000
@@ -420,6 +424,7 @@ class TurnJournal:
         tool_name: str,
         arguments: dict[str, Any],
         effect_labels: list[str] | tuple[str, ...],
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         self._insert_event(
             turn_id=turn_id,
@@ -428,6 +433,7 @@ class TurnJournal:
             state="started",
             tool_name=tool_name,
             input_json=_safe_json(arguments, self.event_max_chars),
+            detail=_safe_json(metadata or {}, min(self.event_max_chars, 2000)),
             effect_labels=effect_labels,
             increment_tool_count=True,
         )
@@ -440,6 +446,7 @@ class TurnJournal:
         state: ToolState,
         result: str,
         effect_labels: list[str] | tuple[str, ...],
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         if state == "started":
             raise ValueError("finished tool event cannot use started state")
@@ -450,6 +457,7 @@ class TurnJournal:
             state=state,
             tool_name=tool_name,
             result_json=_safe_result(result, self.event_max_chars),
+            detail=_safe_json(metadata or {}, min(self.event_max_chars, 2000)),
             effect_labels=effect_labels,
         )
 
@@ -461,6 +469,7 @@ class TurnJournal:
         arguments: dict[str, Any],
         result: str,
         effect_labels: list[str] | tuple[str, ...],
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         self._insert_event(
             turn_id=turn_id,
@@ -470,6 +479,7 @@ class TurnJournal:
             tool_name=tool_name,
             input_json=_safe_json(arguments, self.event_max_chars),
             result_json=_safe_result(result, self.event_max_chars),
+            detail=_safe_json(metadata or {}, min(self.event_max_chars, 2000)),
             effect_labels=effect_labels,
             increment_tool_count=True,
         )
@@ -770,8 +780,10 @@ class TurnJournal:
             if event.state == "started":
                 arguments = _summarize_json(event.input_json, 600)
                 labels = ",".join(event.effect_labels) or "unspecified"
+                metadata = _summarize_json(event.detail, 400) if event.detail else ""
                 lines.append(
                     f"- {event.node_id} START {event.tool_name}({arguments}) [{labels}]"
+                    + (f" {metadata}" if metadata and metadata != "{}" else "")
                 )
             elif event.state == "rejected":
                 arguments = _summarize_json(event.input_json, 600)
@@ -788,6 +800,33 @@ class TurnJournal:
             lines.append(f"最终回复: {turn.final_text}")
         rendered = "\n".join(lines)
         return rendered[: max(int(max_chars), 1000)]
+
+    def replay_steps(
+        self,
+        scope: ConversationScope,
+        turn_ordinal: int,
+    ) -> tuple[dict[str, Any], ...]:
+        """Return an audit replay; it never re-executes recorded side effects."""
+        turn = self.get_visible_turn(scope, turn_ordinal)
+        if turn is None:
+            return ()
+        steps: list[dict[str, Any]] = []
+        for event in self.events_for_turn(turn.turn_id):
+            steps.append(
+                {
+                    "node_id": event.node_id,
+                    "sequence": event.loop_sequence,
+                    "kind": event.event_kind,
+                    "state": event.state,
+                    "tool_name": event.tool_name,
+                    "arguments": _json_object(event.input_json),
+                    "result": _json_object(event.result_json),
+                    "metadata": _json_object(event.detail),
+                    "effect_labels": list(event.effect_labels),
+                    "occurred_at": event.occurred_at,
+                }
+            )
+        return tuple(steps)
 
     def link_send(
         self,
@@ -1602,8 +1641,10 @@ class TurnJournal:
 
 
 def tool_catalog_fingerprint(tools: list[dict[str, Any]]) -> str:
+    from .tool_policy import policy_manifest_for_tools
+
     encoded = json.dumps(
-        tools,
+        {"tools": tools, "policies": policy_manifest_for_tools(tools)},
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -1613,52 +1654,9 @@ def tool_catalog_fingerprint(tools: list[dict[str, Any]]) -> str:
 
 
 def tool_effect_labels(tool_name: str) -> tuple[str, ...]:
-    if tool_name in {
-        "web_search",
-        "read_image_text",
-        "transcribe_voice",
-        "get_message_by_id",
-        "search_messages",
-        "list_recent_files",
-        "sandbox_list",
-        "sandbox_read_file",
-        "memory_list",
-        "context_expand",
-        "context_search",
-        "inspect_source",
-        "use_skill",
-        "group_members",
-        "reminder_list",
-    }:
-        return ("read",)
-    if tool_name in {
-        "memory_add",
-        "memory_remove",
-        "pin_message",
-        "unpin_message",
-        "reminder_set",
-        "reminder_cancel",
-    }:
-        return ("write:memory",)
-    if tool_name in {
-        "sandbox_create",
-        "sandbox_destroy",
-        "sandbox_exec",
-        "sandbox_write_file",
-        "import_file_to_sandbox",
-    }:
-        return ("write:sandbox",)
-    if tool_name in {
-        "send_file_from_sandbox",
-        "send_image_from_sandbox",
-        "say",
-        "send_sticker",
-        "send_qq_face",
-        "reply_with_voice",
-        "reply_send",
-    }:
-        return ("send:conversation",)
-    return ("unspecified",)
+    from .tool_policy import policy_for_tool
+
+    return policy_for_tool(tool_name).side_effects
 
 
 def _safe_json(value: Any, max_chars: int) -> str:
@@ -1678,6 +1676,14 @@ def _json_list(value: Any) -> list[Any]:
     except (json.JSONDecodeError, TypeError, ValueError):
         return []
     return parsed if isinstance(parsed, list) else []
+
+
+def _json_object(value: Any) -> dict[str, Any]:
+    try:
+        parsed = json.loads(str(value or "{}"))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {"value": parsed}
 
 
 def _safe_result(value: str, max_chars: int) -> str:

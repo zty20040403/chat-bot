@@ -6,7 +6,11 @@ import nonebot
 
 nonebot.init()
 
-from src.plugins.ai_chat.tool_policy import ToolCatalog
+from src.plugins.ai_chat.tool_policy import (
+    ToolCatalog,
+    approval_from_user_text,
+    policy_for_tool,
+)
 
 
 class ToolPolicyTests(unittest.TestCase):
@@ -76,6 +80,26 @@ class ToolPolicyTests(unittest.TestCase):
         )
         self.assertFalse(result.ok)
         self.assertIn("格式", result.message)
+
+    def test_host_policy_cannot_be_overridden_by_model_schema(self) -> None:
+        policy = policy_for_tool("sandbox_destroy")
+        self.assertEqual(policy.risk, "critical")
+        self.assertEqual(policy.approval, "explicit")
+        self.assertIn("destructive", policy.side_effects)
+
+    def test_explicit_approval_must_name_action_and_target(self) -> None:
+        denied = approval_from_user_text(
+            "帮我看看现在的沙盒",
+            "sandbox_destroy",
+            {"sandbox_id": "s123abc"},
+        )
+        allowed = approval_from_user_text(
+            "销毁沙盒 s123abc",
+            "sandbox_destroy",
+            {"sandbox_id": "s123abc"},
+        )
+        self.assertFalse(denied.allowed)
+        self.assertTrue(allowed.allowed)
 
 
 if __name__ == "__main__":

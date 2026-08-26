@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import inspect
 import json
 import logging
 import re
@@ -15,7 +18,7 @@ from .config import settings
 from .llm_gateway import LLMConfigError, LLMGateway
 from .model_catalog import ModelCatalog, ModelProfile
 from .observability import current_trace_id, telemetry
-from .tool_policy import ToolCatalog
+from .tool_policy import ToolApproval, ToolCatalog, ToolPolicy, policy_for_tool
 
 ChatMessage = dict[str, Any]
 ToolExecutor = Callable[[str, dict[str, Any]], Awaitable[str]]
@@ -26,6 +29,7 @@ LoopEventKind = Literal[
     "tool_started",
     "tool_finished",
     "tool_rejected",
+    "tool_compensated",
 ]
 
 
@@ -38,6 +42,14 @@ class AgentLoopEvent:
     result: str = ""
     state: str = ""
     note: str = ""
+    call_id: str = ""
+    fingerprint: str = ""
+    risk: str = ""
+    idempotency: str = ""
+    side_effects: tuple[str, ...] = ()
+    execution_mode: str = ""
+    approval: str = ""
+    duration_ms: int = 0
 
 
 @dataclass
@@ -91,6 +103,16 @@ class FinalStreamState:
 
 
 LoopEventSink = Callable[[AgentLoopEvent], Awaitable[None]]
+ApprovalChecker = Callable[
+    [ToolPolicy, str, dict[str, Any]],
+    ToolApproval | Awaitable[ToolApproval],
+]
+ToolHandoff = Callable[
+    [str, dict[str, Any], str], Awaitable[str | None]
+]
+ToolCompensator = Callable[
+    [str, dict[str, Any], str], Awaitable[str | None]
+]
 
 _logger = logging.getLogger(__name__)
 _model_catalog: ModelCatalog | None = None
@@ -457,6 +479,9 @@ async def ask_deepseek_with_tools(
     feedback_provider: FeedbackProvider | None = None,
     final_text_sink: FinalTextSink | None = None,
     final_stream_state: FinalStreamState | None = None,
+    approval_checker: ApprovalChecker | None = None,
+    handoff_tool: ToolHandoff | None = None,
+    compensate_tool: ToolCompensator | None = None,
 ) -> str:
     _last_completion_profile.set(None)
     selected_profile = _resolve_profile(profile, model)
@@ -494,6 +519,8 @@ async def ask_deepseek_with_tools(
     total_tool_calls = 0
     catalog = ToolCatalog(tools)
     stop_reason = "工具调用轮次已达到系统上限。"
+    fingerprint_history: list[str] = []
+    fingerprint_counts: dict[str, int] = {}
 
     while max_tool_rounds is None or tool_round < max_tool_rounds:
         tool_round += 1
@@ -555,8 +582,16 @@ async def ask_deepseek_with_tools(
         for call in tool_calls[:max_calls]:
             function = getattr(call, "function", None)
             name = getattr(function, "name", "")
+            call_id = str(getattr(call, "id", "") or "")
             arguments, parse_error = _parse_tool_arguments_checked(
                 getattr(function, "arguments", "")
+            )
+            policy = catalog.policy(name)
+            fingerprint = _tool_call_fingerprint(name, arguments)
+            event_fields = _policy_event_fields(
+                policy,
+                call_id=call_id,
+                fingerprint=fingerprint,
             )
             loop_sequence += 1
             tool_sequence = loop_sequence
@@ -572,8 +607,29 @@ async def ask_deepseek_with_tools(
                 stop_reason = validation_error
             elif not validation.ok:
                 validation_error = validation.message
+            elif _is_repeated_tool_call(
+                fingerprint,
+                policy,
+                fingerprint_history,
+                fingerprint_counts,
+            ):
+                validation_error = (
+                    "检测到重复或循环工具调用，已阻止再次执行，避免重复副作用。"
+                )
+                budget_exhausted = True
+                stop_reason = validation_error
             else:
                 validation_error = ""
+            approval = ToolApproval(True, source="policy")
+            if not validation_error and policy.approval == "explicit":
+                approval = await _check_tool_approval(
+                    approval_checker,
+                    policy,
+                    name,
+                    arguments,
+                )
+                if not approval.allowed:
+                    validation_error = approval.reason or "危险操作尚未获得用户批准。"
             if validation_error:
                 rejected_result = json.dumps(
                     {"ok": False, "error": validation_error},
@@ -588,6 +644,8 @@ async def ask_deepseek_with_tools(
                         arguments=arguments,
                         result=rejected_result,
                         state="rejected",
+                        approval=approval.source,
+                        **event_fields,
                     ),
                 )
                 tool_message = {
@@ -599,6 +657,10 @@ async def ask_deepseek_with_tools(
                 if trace is not None:
                     trace.messages.append(dict(tool_message))
                 continue
+            fingerprint_history.append(fingerprint)
+            fingerprint_counts[fingerprint] = (
+                fingerprint_counts.get(fingerprint, 0) + 1
+            )
             await _emit_loop_event(
                 event_sink,
                 AgentLoopEvent(
@@ -607,15 +669,123 @@ async def ask_deepseek_with_tools(
                     tool_name=name,
                     arguments=arguments,
                     state="started",
+                    approval=approval.source,
+                    **event_fields,
                 ),
             )
+            started_at = time.monotonic()
+            completion_state = ""
             try:
-                tool_result = await execute_tool(name, arguments)
+                if (
+                    policy.execution_mode in {"durable-eligible", "durable-required"}
+                    and (
+                        policy.execution_mode == "durable-required"
+                        or arguments.get("background") is True
+                    )
+                ):
+                    if handoff_tool is None:
+                        tool_result = json.dumps(
+                            {"ok": False, "error": "持久任务执行器暂时不可用。"},
+                            ensure_ascii=False,
+                        )
+                        completion_state = "failed"
+                    else:
+                        tool_result = await asyncio.wait_for(
+                            handoff_tool(name, arguments, fingerprint),
+                            timeout=min(policy.timeout_seconds, 30.0),
+                        )
+                        completion_state = (
+                            "handed-off"
+                            if _tool_result_succeeded(tool_result)
+                            else "failed"
+                        )
+                else:
+                    tool_result = await asyncio.wait_for(
+                        execute_tool(name, arguments),
+                        timeout=policy.timeout_seconds,
+                    )
+            except TimeoutError:
+                tool_result = json.dumps(
+                    {
+                        "ok": False,
+                        "error": f"工具执行超过 {policy.timeout_seconds:g} 秒，已停止等待。",
+                    },
+                    ensure_ascii=False,
+                )
+                completion_state = (
+                    "outcome-unknown"
+                    if any(label.startswith("send:") for label in policy.side_effects)
+                    else "timed-out"
+                )
+                compensation_result = await _run_tool_compensation(
+                    compensate_tool,
+                    policy,
+                    name,
+                    arguments,
+                    "timeout",
+                )
+                if compensation_result is not None:
+                    loop_sequence += 1
+                    await _emit_loop_event(
+                        event_sink,
+                        AgentLoopEvent(
+                            kind="tool_compensated",
+                            sequence=loop_sequence,
+                            tool_name=name,
+                            arguments=arguments,
+                            result=compensation_result,
+                            state="compensated",
+                            approval=approval.source,
+                            **event_fields,
+                        ),
+                    )
+            except asyncio.CancelledError:
+                cancelled_result = json.dumps(
+                    {"ok": False, "error": "任务已由用户或系统取消。"},
+                    ensure_ascii=False,
+                )
+                await _emit_loop_event(
+                    event_sink,
+                    AgentLoopEvent(
+                        kind="tool_finished",
+                        sequence=tool_sequence,
+                        tool_name=name,
+                        result=cancelled_result,
+                        state="cancelled",
+                        duration_ms=max(int((time.monotonic() - started_at) * 1000), 0),
+                        approval=approval.source,
+                        **event_fields,
+                    ),
+                )
+                compensation_result = await _run_tool_compensation(
+                    compensate_tool,
+                    policy,
+                    name,
+                    arguments,
+                    "cancelled",
+                )
+                if compensation_result is not None:
+                    loop_sequence += 1
+                    await _emit_loop_event(
+                        event_sink,
+                        AgentLoopEvent(
+                            kind="tool_compensated",
+                            sequence=loop_sequence,
+                            tool_name=name,
+                            arguments=arguments,
+                            result=compensation_result,
+                            state="compensated",
+                            approval=approval.source,
+                            **event_fields,
+                        ),
+                    )
+                raise
             except Exception:
                 tool_result = json.dumps(
                     {"ok": False, "error": "工具执行时发生内部错误。"},
                     ensure_ascii=False,
                 )
+                completion_state = "failed"
             remaining_context = max(
                 settings.tool_max_context_chars - tool_context_chars,
                 0,
@@ -627,7 +797,7 @@ async def ask_deepseek_with_tools(
             tool_context_chars += len(tool_result)
             tool_message = {
                 "role": "tool",
-                "tool_call_id": getattr(call, "id", ""),
+                "tool_call_id": call_id,
                 "content": tool_result,
             }
             messages.append(tool_message)
@@ -640,7 +810,13 @@ async def ask_deepseek_with_tools(
                     sequence=tool_sequence,
                     tool_name=name,
                     result=tool_result,
-                    state=_tool_completion_state(name, tool_result),
+                    state=(
+                        completion_state
+                        or _tool_completion_state(name, tool_result)
+                    ),
+                    duration_ms=max(int((time.monotonic() - started_at) * 1000), 0),
+                    approval=approval.source,
+                    **event_fields,
                 ),
             )
             if tool_context_chars >= settings.tool_max_context_chars:
@@ -920,28 +1096,104 @@ def _feedback_message(notes: list[str]) -> ChatMessage:
 
 
 def _tool_completion_state(tool_name: str, result: str) -> str:
-    try:
-        payload = json.loads(result)
-    except (TypeError, json.JSONDecodeError):
-        payload = None
-    succeeded = not (
-        isinstance(payload, dict) and payload.get("ok") is False
-    )
-    if not succeeded:
+    if not _tool_result_succeeded(result):
         return "failed"
-    if tool_name in {
-        "send_file_from_sandbox",
-        "send_image_from_sandbox",
-        "say",
-        "memory_add",
-        "memory_remove",
-        "pin_message",
-        "unpin_message",
-        "reminder_set",
-        "reminder_cancel",
-    }:
+    if any(
+        label.startswith("send:") or label == "write:memory"
+        for label in policy_for_tool(tool_name).side_effects
+    ):
         return "committed"
     return "succeeded"
+
+
+def _tool_result_succeeded(result: object) -> bool:
+    try:
+        payload = json.loads(str(result))
+    except (TypeError, json.JSONDecodeError):
+        payload = None
+    return not (isinstance(payload, dict) and payload.get("ok") is False)
+
+
+def _tool_call_fingerprint(name: str, arguments: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        {"name": name, "arguments": arguments},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:20]
+
+
+def _policy_event_fields(
+    policy: ToolPolicy,
+    *,
+    call_id: str,
+    fingerprint: str,
+) -> dict[str, Any]:
+    return {
+        "call_id": call_id,
+        "fingerprint": fingerprint,
+        "risk": policy.risk,
+        "idempotency": policy.idempotency,
+        "side_effects": policy.side_effects,
+        "execution_mode": policy.execution_mode,
+    }
+
+
+def _is_repeated_tool_call(
+    fingerprint: str,
+    policy: ToolPolicy,
+    history: list[str],
+    counts: dict[str, int],
+) -> bool:
+    count = counts.get(fingerprint, 0)
+    if count >= policy.max_identical_calls:
+        return True
+    if policy.idempotency == "non-idempotent" and count > 0:
+        return True
+    return (
+        len(history) >= 3
+        and history[-3] == history[-1]
+        and history[-2] == fingerprint
+        and history[-1] != fingerprint
+    )
+
+
+async def _check_tool_approval(
+    checker: ApprovalChecker | None,
+    policy: ToolPolicy,
+    name: str,
+    arguments: dict[str, Any],
+) -> ToolApproval:
+    if checker is None:
+        return ToolApproval(
+            False,
+            source="missing-approval-checker",
+            reason="危险操作需要用户明确批准，但当前没有可用的批准校验器。",
+        )
+    decision = checker(policy, name, arguments)
+    if inspect.isawaitable(decision):
+        decision = await decision
+    return decision
+
+
+async def _run_tool_compensation(
+    compensator: ToolCompensator | None,
+    policy: ToolPolicy,
+    name: str,
+    arguments: dict[str, Any],
+    reason: str,
+) -> str | None:
+    if compensator is None or policy.compensation == "none":
+        return None
+    try:
+        return await asyncio.shield(compensator(name, arguments, reason))
+    except Exception as exc:
+        return json.dumps(
+            {"ok": False, "error": f"补偿操作失败：{type(exc).__name__}"},
+            ensure_ascii=False,
+        )
 
 
 def _safe_usage_int(value: Any) -> int:

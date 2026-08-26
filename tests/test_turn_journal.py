@@ -45,6 +45,11 @@ class TurnJournalTests(unittest.TestCase):
                 "authorization": "Bearer hidden-credential",
             },
             ("write:sandbox",),
+            {
+                "fingerprint": "abc123",
+                "risk": "high",
+                "idempotency": "non-idempotent",
+            },
         )
         self.journal.record_tool_finished(
             turn.turn_id,
@@ -68,6 +73,11 @@ class TurnJournalTests(unittest.TestCase):
         self.assertNotIn("do-not-store", rendered)
         self.assertNotIn("hidden-credential", rendered)
         self.assertIn("t#1", self.journal.render_recent_turns(self.group_a))
+        replay = self.journal.replay_steps(self.group_a, turn.turn_ordinal)
+        self.assertEqual(replay[1]["tool_name"], "sandbox_exec")
+        self.assertEqual(replay[1]["metadata"]["fingerprint"], "abc123")
+        self.assertEqual(replay[1]["arguments"]["password"], "[REDACTED]")
+        self.assertEqual(self.journal.replay_steps(self.group_b, 1), ())
 
     def test_chat_only_turn_is_not_in_recent_worked_lines(self) -> None:
         turn = self.start(self.group_a, "hello")

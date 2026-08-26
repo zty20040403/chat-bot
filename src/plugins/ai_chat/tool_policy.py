@@ -2,7 +2,306 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
+
+
+ToolRisk = Literal["low", "medium", "high", "critical"]
+ToolIdempotency = Literal["pure", "idempotent", "keyed", "non-idempotent"]
+ToolApprovalMode = Literal["never", "explicit"]
+ToolExecutionMode = Literal["inline", "durable-eligible", "durable-required"]
+ToolCompensation = Literal[
+    "none",
+    "cancel-process",
+    "close-browser",
+    "cleanup-created-resource",
+]
+
+
+@dataclass(frozen=True)
+class ToolPolicy:
+    """Host-owned execution contract; model output cannot override it."""
+
+    risk: ToolRisk = "medium"
+    idempotency: ToolIdempotency = "non-idempotent"
+    side_effects: tuple[str, ...] = ("unspecified",)
+    timeout_seconds: float = 30.0
+    approval: ToolApprovalMode = "never"
+    execution_mode: ToolExecutionMode = "inline"
+    compensation: ToolCompensation = "none"
+    max_identical_calls: int = 2
+
+    def as_manifest(self) -> dict[str, Any]:
+        return {
+            "risk": self.risk,
+            "idempotency": self.idempotency,
+            "side_effects": list(self.side_effects),
+            "timeout_seconds": self.timeout_seconds,
+            "approval": self.approval,
+            "execution_mode": self.execution_mode,
+            "compensation": self.compensation,
+            "max_identical_calls": self.max_identical_calls,
+        }
+
+
+@dataclass(frozen=True)
+class ToolApproval:
+    allowed: bool
+    source: str = ""
+    reason: str = ""
+
+
+_READ_TOOLS = {
+    "web_search",
+    "read_image_text",
+    "view_image",
+    "find_images",
+    "find_stickers",
+    "transcribe_voice",
+    "get_message_by_id",
+    "search_messages",
+    "sandbox_list",
+    "sandbox_read_file",
+    "list_recent_files",
+    "memory_list",
+    "context_expand",
+    "context_search",
+    "inspect_source",
+    "use_skill",
+    "group_members",
+    "reminder_list",
+    "view_forward",
+    "view_bilibili",
+    "inspect_shared_content",
+    "get_shared_content",
+    "browser_snapshot",
+    "job_status",
+}
+
+_SEND_TOOLS = {
+    "send_file_from_sandbox",
+    "send_image_from_sandbox",
+    "say",
+    "send_sticker",
+    "send_qq_face",
+    "reply_with_voice",
+    "reply_send",
+}
+
+_MEMORY_WRITE_TOOLS = {
+    "memory_add",
+    "memory_remove",
+    "pin_message",
+    "unpin_message",
+    "reminder_set",
+    "reminder_cancel",
+}
+
+_SANDBOX_WRITE_TOOLS = {
+    "sandbox_create",
+    "sandbox_destroy",
+    "sandbox_exec",
+    "sandbox_write_file",
+    "import_file_to_sandbox",
+}
+
+_BROWSER_WRITE_TOOLS = {
+    "browser_navigate",
+    "browser_click",
+    "browser_type",
+    "browser_press_key",
+    "browser_wait_for",
+    "browser_scroll",
+    "browser_close",
+    "browser_clear",
+}
+
+
+def _policy_registry() -> dict[str, ToolPolicy]:
+    policies = {
+        name: ToolPolicy(
+            risk="low",
+            idempotency="pure",
+            side_effects=("read",),
+            timeout_seconds=45.0,
+            max_identical_calls=2,
+        )
+        for name in _READ_TOOLS
+    }
+    policies.update(
+        {
+            name: ToolPolicy(
+                risk="high",
+                idempotency="non-idempotent",
+                side_effects=("send:conversation",),
+                timeout_seconds=90.0,
+                max_identical_calls=1,
+            )
+            for name in _SEND_TOOLS
+        }
+    )
+    policies.update(
+        {
+            name: ToolPolicy(
+                risk="medium",
+                idempotency="non-idempotent",
+                side_effects=("write:memory",),
+                timeout_seconds=30.0,
+                max_identical_calls=1,
+            )
+            for name in _MEMORY_WRITE_TOOLS
+        }
+    )
+    policies.update(
+        {
+            name: ToolPolicy(
+                risk="medium",
+                idempotency="non-idempotent",
+                side_effects=("write:sandbox",),
+                timeout_seconds=180.0,
+                max_identical_calls=1,
+            )
+            for name in _SANDBOX_WRITE_TOOLS
+        }
+    )
+    policies.update(
+        {
+            name: ToolPolicy(
+                risk="medium",
+                idempotency="non-idempotent",
+                side_effects=("write:browser",),
+                timeout_seconds=45.0,
+                compensation="close-browser",
+                max_identical_calls=1,
+            )
+            for name in _BROWSER_WRITE_TOOLS
+        }
+    )
+    policies["sandbox_exec"] = ToolPolicy(
+        risk="high",
+        idempotency="non-idempotent",
+        side_effects=("write:sandbox", "execute:code"),
+        timeout_seconds=310.0,
+        execution_mode="durable-eligible",
+        compensation="cancel-process",
+        max_identical_calls=1,
+    )
+    policies["inspect_shared_content"] = ToolPolicy(
+        risk="low",
+        idempotency="pure",
+        side_effects=("read", "download:remote-media"),
+        timeout_seconds=3900.0,
+        max_identical_calls=1,
+    )
+    policies["sandbox_create"] = ToolPolicy(
+        risk="medium",
+        idempotency="non-idempotent",
+        side_effects=("write:sandbox", "allocate:resource"),
+        timeout_seconds=310.0,
+        compensation="cleanup-created-resource",
+        max_identical_calls=1,
+    )
+    policies["sandbox_destroy"] = ToolPolicy(
+        risk="critical",
+        idempotency="idempotent",
+        side_effects=("write:sandbox", "destructive"),
+        timeout_seconds=60.0,
+        approval="explicit",
+        max_identical_calls=1,
+    )
+    policies["browser_clear"] = ToolPolicy(
+        risk="critical",
+        idempotency="idempotent",
+        side_effects=("write:browser", "destructive"),
+        timeout_seconds=60.0,
+        approval="explicit",
+        max_identical_calls=1,
+    )
+    policies["job_cancel"] = ToolPolicy(
+        risk="critical",
+        idempotency="idempotent",
+        side_effects=("write:job", "destructive"),
+        timeout_seconds=20.0,
+        approval="explicit",
+        max_identical_calls=1,
+    )
+    for name in {"memory_remove", "unpin_message", "reminder_cancel"}:
+        previous = policies[name]
+        policies[name] = ToolPolicy(
+            risk="high",
+            idempotency="idempotent",
+            side_effects=previous.side_effects + ("destructive",),
+            timeout_seconds=previous.timeout_seconds,
+            approval="explicit",
+            max_identical_calls=1,
+        )
+    return policies
+
+
+TOOL_POLICIES = _policy_registry()
+DEFAULT_TOOL_POLICY = ToolPolicy()
+
+
+def policy_for_tool(name: str) -> ToolPolicy:
+    return TOOL_POLICIES.get(name, DEFAULT_TOOL_POLICY)
+
+
+def policy_manifest_for_tools(tools: list[dict[str, Any]]) -> dict[str, Any]:
+    names = []
+    for tool in tools:
+        function = tool.get("function")
+        if isinstance(function, dict) and isinstance(function.get("name"), str):
+            names.append(str(function["name"]))
+    return {
+        name: policy_for_tool(name).as_manifest()
+        for name in sorted(set(names))
+    }
+
+
+_EXPLICIT_APPROVAL_TERMS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "sandbox_destroy": (("销毁", "删除", "清理", "destroy"), ("沙盒", "sandbox")),
+    "browser_clear": (("清空", "重置", "删除", "clear"), ("浏览器", "cookie", "缓存", "profile")),
+    "job_cancel": (("取消", "停止", "终止", "cancel"), ("任务", "job", "后台")),
+    "memory_remove": (("删除", "忘掉", "移除", "remove"), ("记忆", "memory")),
+    "unpin_message": (("取消固定", "取消置顶", "unpin"), ("消息", "msg", "固定", "置顶")),
+    "reminder_cancel": (("取消", "删除", "cancel"), ("提醒", "reminder")),
+}
+
+
+def approval_from_user_text(
+    user_text: str,
+    tool_name: str,
+    arguments: dict[str, Any],
+) -> ToolApproval:
+    policy = policy_for_tool(tool_name)
+    if policy.approval == "never":
+        return ToolApproval(True, source="policy", reason="无需额外批准。")
+    normalized = " ".join(str(user_text).casefold().split())
+    action_terms, target_terms = _EXPLICIT_APPROVAL_TERMS.get(
+        tool_name,
+        (("确认", "批准", "同意", "approve"), (tool_name.casefold(),)),
+    )
+    argument_targets = tuple(
+        str(value).casefold()
+        for value in arguments.values()
+        if isinstance(value, (str, int)) and str(value).strip()
+    )
+    target_is_explicit = any(term in normalized for term in target_terms) or any(
+        target in normalized for target in argument_targets
+    )
+    if any(term in normalized for term in action_terms) and target_is_explicit:
+        return ToolApproval(
+            True,
+            source="current-user-message",
+            reason="当前用户消息明确要求执行该危险操作。",
+        )
+    return ToolApproval(
+        False,
+        source="current-user-message",
+        reason=(
+            f"{tool_name} 属于高风险操作。请在当前消息中明确写出要执行的动作和对象，"
+            "宿主确认是用户本人提出后才会执行。"
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -30,6 +329,9 @@ class ToolCatalog:
 
     def contains(self, name: str) -> bool:
         return name in self._functions
+
+    def policy(self, name: str) -> ToolPolicy:
+        return policy_for_tool(name)
 
     def validate(
         self,

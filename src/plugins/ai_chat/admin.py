@@ -15,6 +15,7 @@ from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 from .admin_dashboard import ADMIN_FAVICON_SVG, dashboard_html
+from .conversation_scope import ConversationScope
 
 
 ADMIN_EVENT_STREAM_LEASE_SECONDS = 10
@@ -28,6 +29,7 @@ class AdminServices:
     usage_store: Any = None
     running_tasks: Any = None
     job_store: Any = None
+    job_worker: Any = None
     bridge_router: Any = None
     bridge_state: Any = None
     browser_manager: Any = None
@@ -402,8 +404,12 @@ def register_admin(
     ) -> dict[str, object]:
         authorize(authorization)
         changed = bool(
-            services.job_store is not None
-            and services.job_store.cancel(job_id)
+            services.job_worker.cancel(job_id)
+            if services.job_worker is not None
+            else (
+                services.job_store is not None
+                and services.job_store.cancel(job_id)
+            )
         )
         if not changed:
             raise HTTPException(status_code=404, detail="job is not cancellable")
@@ -730,6 +736,38 @@ def register_admin(
                 "error": str(exc)[:500],
             }
         return {"items": items, "configured": True, "available": True}
+
+    @router.get(
+        "/api/turn-replay/{scope_kind}/{scope_native_id}/{turn_ordinal}"
+    )
+    def turn_replay(
+        scope_kind: str,
+        scope_native_id: str,
+        turn_ordinal: int,
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
+        authorize(authorization)
+        if services.turn_journal is None:
+            raise HTTPException(status_code=503, detail="回合日志不可用")
+        if scope_kind not in {"group", "private"} or turn_ordinal <= 0:
+            raise HTTPException(status_code=422, detail="回放范围或回合号无效")
+        try:
+            scope = ConversationScope(
+                "onebot-v11",
+                scope_kind,  # type: ignore[arg-type]
+                scope_native_id,
+            )
+            steps = services.turn_journal.replay_steps(scope, turn_ordinal)
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)[:500]) from None
+        if not steps:
+            raise HTTPException(status_code=404, detail="当前范围看不到这个回合")
+        return {
+            "scope_key": scope.key,
+            "turn_handle": f"t#{turn_ordinal}",
+            "mode": "audit-only",
+            "steps": list(steps),
+        }
 
     @router.get("/api/observability")
     async def observability(

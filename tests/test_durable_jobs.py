@@ -139,3 +139,55 @@ class DurableJobWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(store.stats()["succeeded"], 1)
         self.assertFalse(logger.errors)
         store.close()
+
+    async def test_running_job_can_be_cancelled_and_compensated(self) -> None:
+        store = DurableJobStore(":memory:", lease_seconds=10)
+        logger = RecordingLogger()
+        worker = DurableJobWorker(
+            store,
+            logger=logger,
+            concurrency=1,
+            worker_id="test-worker",
+        )
+        started = asyncio.Event()
+        compensated: list[str] = []
+
+        async def handle(_job):
+            started.set()
+            await asyncio.Event().wait()
+
+        async def compensate(_job, reason):
+            compensated.append(reason)
+
+        worker.register("test.long", handle, compensator=compensate)
+        job, _ = store.enqueue(kind="test.long", idempotency_key="long")
+        running = asyncio.create_task(worker.run_once())
+        await started.wait()
+        self.assertTrue(worker.cancel(job.job_id))
+        await running
+
+        self.assertEqual(store.get(job.job_id).status, "cancelled")
+        self.assertEqual(compensated, ["cancelled"])
+        store.close()
+
+    async def test_job_timeout_is_terminal_and_compensated(self) -> None:
+        store = DurableJobStore(":memory:")
+        logger = RecordingLogger()
+        worker = DurableJobWorker(store, logger=logger, worker_id="test-worker")
+        compensated: list[str] = []
+
+        async def handle(_job):
+            await asyncio.sleep(1)
+
+        worker.register(
+            "test.timeout",
+            handle,
+            timeout_seconds=0.01,
+            compensator=lambda _job, reason: compensated.append(reason),
+        )
+        job, _ = store.enqueue(kind="test.timeout", idempotency_key="timeout")
+        await worker.run_once()
+
+        self.assertEqual(store.get(job.job_id).status, "failed")
+        self.assertEqual(compensated, ["timeout"])
+        store.close()

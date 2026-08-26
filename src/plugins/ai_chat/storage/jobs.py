@@ -308,11 +308,19 @@ class DurableJobStore:
                 UPDATE durable_jobs
                 SET status = 'cancelled', lease_owner = '', lease_until = NULL,
                     updated_at = ?, finished_at = ?
-                WHERE job_id = ? AND status IN ('pending', 'failed')
+                WHERE job_id = ? AND status IN ('pending', 'running', 'failed')
                 """,
                 (timestamp, timestamp, int(job_id)),
             )
             return cursor.rowcount == 1
+
+    def get(self, job_id: int) -> DurableJob | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM durable_jobs WHERE job_id = ?",
+                (int(job_id),),
+            ).fetchone()
+        return self._row(row) if row is not None else None
 
     def requeue(self, job_id: int, *, now: int | None = None) -> bool:
         timestamp = int(time.time() if now is None else now)

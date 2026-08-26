@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.6.2-22c55e?style=for-the-badge">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.7.0-22c55e?style=for-the-badge">
   <img alt="Python" src="https://img.shields.io/badge/Python-3.12-3776ab?style=for-the-badge&amp;logo=python&amp;logoColor=white">
   <img alt="NoneBot2" src="https://img.shields.io/badge/NoneBot2-OneBot_V11-ea5252?style=for-the-badge">
   <img alt="PostgreSQL" src="https://img.shields.io/badge/PostgreSQL-Durable-4169e1?style=for-the-badge&amp;logo=postgresql&amp;logoColor=white">
@@ -38,7 +38,7 @@ Kennethbot 通过 NapCatQQ 接收 OneBot V11 事件，使用 NoneBot2 处理消�
     <td width="50%"><strong>上下文与记忆</strong><br>理解引用、@、发送者和最近话题；群聊、私聊、个人记忆严格隔离。</td>
   </tr>
   <tr>
-    <td><strong>Agent 工具调用</strong><br>搜索、历史消息、提醒、群文件、浏览器与受控源码自省都由模型按需调用。</td>
+    <td><strong>可靠 Agent 内核</strong><br>工具风险、显式批准、幂等去重、硬超时、取消补偿、持久接管与逐步审计回放。</td>
     <td><strong>图片、表情与语音</strong><br>临时识图、全局安全表情库、QQ 语音转写与腾讯 SILK 语音回复。</td>
   </tr>
   <tr>
@@ -46,7 +46,7 @@ Kennethbot 通过 NapCatQQ 接收 OneBot V11 事件，使用 NoneBot2 处理消�
     <td><strong>代码沙箱</strong><br>在临时 Docker 容器中创建项目、安装依赖、测试、打包并把产物发回 QQ。</td>
   </tr>
   <tr>
-    <td><strong>Durable Runtime</strong><br>PostgreSQL 保存消息、回合、工具效果、Outbox、提醒和媒体元数据。</td>
+    <td><strong>Durable Runtime</strong><br>PostgreSQL 保存消息、回合、工具效果、Outbox、提醒、持久任务和媒体元数据。</td>
     <td><strong>生产部署</strong><br>实时管理控制台、Nix Flake、NixOS module、systemd Worker 与数据库迁移。</td>
   </tr>
 </table>
@@ -85,7 +85,9 @@ flowchart LR
 ```
 
 模型不会直接操作 NapCat 或数据库。消息先转换成统一的 Message IR，Agent 只能调用宿主
-明确提供且经过 JSON Schema 校验的工具，最终输出再由宿主降级为 OneBot 消息段并发送。
+明确提供且经过 JSON Schema 与风险策略校验的工具；危险动作必须来自用户当前消息的明确
+授权，非幂等调用会去重，长命令可交给租约队列跨重启执行。最终输出再由宿主降级为
+OneBot 消息段并发送。
 
 ## 技术栈
 

@@ -31,6 +31,8 @@ from .ai_tools import (
     GET_MESSAGE_BY_ID_TOOL_NAME,
     IMPORT_FILE_TO_SANDBOX_TOOL_NAME,
     INSPECT_SHARED_CONTENT_TOOL_NAME,
+    JOB_CANCEL_TOOL_NAME,
+    JOB_STATUS_TOOL_NAME,
     LIST_RECENT_FILES_TOOL_NAME,
     SANDBOX_CREATE_TOOL_NAME,
     SANDBOX_DESTROY_TOOL_NAME,
@@ -59,6 +61,7 @@ from .onebot_codec import (
 )
 from .onebot_model_output import OneBotModelOutputResolver
 from .sandbox import DockerSandboxManager, SandboxError
+from .storage.jobs import DurableJobStore
 from .turn_journal import TurnJournal
 from .video_analysis import DeepVideoAnalysisError, DeepVideoAnalyzer
 
@@ -72,8 +75,10 @@ AGENT_TOOL_PROMPT = (
     "有新的实际进展时可以持续汇报，但不要重复发送没有信息量的内容。"
     "先创建合适运行环境的沙盒，再写入或导入文件、执行构建和测试；"
     "需要交付时，用 send_file_from_sandbox 或 send_image_from_sandbox 发到当前群。"
-    "本次任务创建的沙盒会在最终回复前由宿主统一销毁；"
-    "因此必须先发送需要保留的文件或图片，不要把沙盒当成跨任务存储。"
+    "本次任务创建的普通沙盒会在最终回复前由宿主统一销毁；"
+    "因此必须先发送需要保留的文件或图片。只有 sandbox_exec 明确使用 "
+    "background=true 时，沙盒才由持久队列接管并跨重启保留；"
+    "用 job_status 查看结果，取走产物后再明确请求销毁沙盒。"
     "只有工具结果明确成功时才能说任务已完成。"
     "沙盒是临时开发环境，不等于公网部署；需要云平台账号或密钥时，"
     "先完成可运行项目和打包，再说明仍需用户提供外部部署条件。"
@@ -174,6 +179,7 @@ class AgentToolExecutor:
         browser_manager: BrowserManager | None = None,
         source_store: ContentSourceStore | None = None,
         video_analyzer: DeepVideoAnalyzer | None = None,
+        job_store: DurableJobStore | None = None,
     ) -> None:
         self.bot = bot
         self.event = event
@@ -187,6 +193,7 @@ class AgentToolExecutor:
         self.browser_manager = browser_manager
         self.source_store = source_store
         self.video_analyzer = video_analyzer
+        self.job_store = job_store
         self._task_sandbox_ids: set[str] = set()
         self.output_resolver = OneBotModelOutputResolver(
             bot,
@@ -263,6 +270,8 @@ class AgentToolExecutor:
             BROWSER_SCROLL_TOOL_NAME: self._browser_scroll,
             BROWSER_CLOSE_TOOL_NAME: self._browser_close,
             BROWSER_CLEAR_TOOL_NAME: self._browser_clear,
+            JOB_STATUS_TOOL_NAME: self._job_status,
+            JOB_CANCEL_TOOL_NAME: self._job_cancel,
         }
         handler = handlers.get(name)
         if handler is None:
@@ -293,6 +302,131 @@ class AgentToolExecutor:
         ) as exc:
             logger.warning(f"Agent tool {name} failed: {exc}")
             return _json_result(ok=False, error="工具执行失败。")
+
+    async def handoff_tool(
+        self,
+        name: str,
+        arguments: dict[str, object],
+        fingerprint: str,
+    ) -> str | None:
+        if name != SANDBOX_EXEC_TOOL_NAME:
+            return _json_result(ok=False, error="这个工具不支持持久任务接管。")
+        if self.job_store is None:
+            return _json_result(ok=False, error="持久任务队列没有开启。")
+        sandbox_id = str(arguments.get("sandbox_id") or "").strip()
+        command = str(arguments.get("command") or "").strip()
+        if not sandbox_id or not command:
+            return _json_result(ok=False, error="后台命令参数不完整。")
+        owned = await self.sandbox_manager.list(self.owner)
+        if not any(item.get("sandbox_id") == sandbox_id for item in owned):
+            return _json_result(ok=False, error="当前会话没有这个沙盒。")
+        timeout = min(max(int(arguments.get("timeout_seconds") or 300), 1), 300)
+        owner_digest = hashlib.sha256(self.owner.encode("utf-8")).hexdigest()[:12]
+        job, created = await asyncio.to_thread(
+            self.job_store.enqueue,
+            kind="agent.sandbox_exec",
+            idempotency_key=f"agent.sandbox_exec:{owner_digest}:{fingerprint}",
+            scope_key=self.owner,
+            payload={
+                "owner": self.owner,
+                "sandbox_id": sandbox_id,
+                "command": command,
+                "timeout_seconds": timeout,
+            },
+            max_attempts=3,
+        )
+        self._task_sandbox_ids.discard(sandbox_id)
+        return _json_result(
+            ok=True,
+            accepted=True,
+            created=created,
+            job_handle=job.handle,
+            status=job.status,
+            sandbox_id=sandbox_id,
+            message=(
+                "任务已由持久队列接管，机器人重启后也会继续；"
+                "完成后沙盒会保留，便于后续读取和发送产物。"
+            ),
+            delivery_semantics="at-least-once with idempotent enqueue",
+        )
+
+    async def compensate_tool(
+        self,
+        name: str,
+        arguments: dict[str, object],
+        reason: str,
+    ) -> str | None:
+        if name == SANDBOX_EXEC_TOOL_NAME:
+            return _json_result(
+                ok=True,
+                action="cancel-process",
+                reason=reason,
+                message="沙盒执行器已收到取消信号并终止子进程。",
+            )
+        if name == SANDBOX_CREATE_TOOL_NAME:
+            cleanup = await self.cleanup_task_sandboxes()
+            return _json_result(ok=not cleanup["failed"], **cleanup)
+        if name in {
+            BROWSER_NAVIGATE_TOOL_NAME,
+            BROWSER_CLICK_TOOL_NAME,
+            BROWSER_TYPE_TOOL_NAME,
+            BROWSER_PRESS_KEY_TOOL_NAME,
+        } and self.browser_manager is not None:
+            closed = await self.browser_manager.close_session(self.owner)
+            return _json_result(
+                ok=True,
+                action="close-browser",
+                closed=closed,
+                reason=reason,
+            )
+        return None
+
+    async def _job_status(self, arguments: dict[str, object]) -> str:
+        if self.job_store is None:
+            return _json_result(ok=False, error="持久任务队列没有开启。")
+        job_id = self._parse_job_handle(arguments.get("job_handle"))
+        if job_id is None:
+            return _json_result(ok=False, error="job_handle 格式无效。")
+        job = await asyncio.to_thread(self.job_store.get, job_id)
+        if job is None or job.scope_key != self.owner:
+            return _json_result(ok=False, error="当前会话看不到这个持久任务。")
+        return _json_result(
+            ok=True,
+            job_handle=job.handle,
+            kind=job.kind,
+            status=job.status,
+            attempts=job.attempts,
+            result=job.result,
+            last_error=job.last_error,
+            updated_at=job.updated_at,
+        )
+
+    async def _job_cancel(self, arguments: dict[str, object]) -> str:
+        if self.job_store is None:
+            return _json_result(ok=False, error="持久任务队列没有开启。")
+        job_id = self._parse_job_handle(arguments.get("job_handle"))
+        if job_id is None:
+            return _json_result(ok=False, error="job_handle 格式无效。")
+        job = await asyncio.to_thread(self.job_store.get, job_id)
+        if job is None or job.scope_key != self.owner:
+            return _json_result(ok=False, error="当前会话看不到这个持久任务。")
+        changed = await asyncio.to_thread(self.job_store.cancel, job_id)
+        return _json_result(
+            ok=changed,
+            job_handle=job.handle,
+            status="cancelled" if changed else job.status,
+            message=("已请求取消持久任务。" if changed else "这个任务当前不能取消。"),
+        )
+
+    @staticmethod
+    def _parse_job_handle(value: object) -> int | None:
+        if not isinstance(value, str) or not value.startswith("job#"):
+            return None
+        try:
+            job_id = int(value.removeprefix("job#"))
+        except ValueError:
+            return None
+        return job_id if job_id > 0 else None
 
     async def _get_message_by_id(
         self,
