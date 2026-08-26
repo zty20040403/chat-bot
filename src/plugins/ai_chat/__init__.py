@@ -217,7 +217,7 @@ from . import onebot_delivery as _onebot_delivery
 SEND_RETRY_DELAY_SECONDS = 2.0
 SEND_RETRY_MAX_CHARS = 800
 TURN_PROMPT_VERSION = "qqbot-turn-v11"
-BOT_VERSION = "0.7.0"
+BOT_VERSION = "0.7.1"
 EMPTY_MENTION_FOLLOW_UP = "你觉得呢"
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 proactive_check_gate = ProactiveCheckGate()
@@ -387,12 +387,19 @@ onebot_ingest_adapter = OneBotIngestAdapter(
 
 @driver.on_startup
 async def start_background_tasks() -> None:
-    if job_store is not None and media_library is not None:
+    if (
+        job_store is not None
+        and media_library is not None
+        and semantic_recall is not None
+    ):
         try:
             _job, created = await asyncio.to_thread(
                 job_store.enqueue,
                 kind="media.index_stickers",
-                idempotency_key="media.index_stickers:v1",
+                idempotency_key=(
+                    "media.index_stickers:"
+                    f"{settings.embedding_model}:{settings.embedding_dimensions}"
+                ),
                 scope_key="system",
             )
             if created:

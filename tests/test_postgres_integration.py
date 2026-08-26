@@ -439,10 +439,10 @@ class PostgresIntegrationTests(unittest.TestCase):
             )
             vector_backend = PgVectorBackend(
                 TEST_DSN,
-                dimensions=1536,
+                dimensions=1024,
                 schema=TEST_SCHEMA,
             )
-            vector = [0.0] * 1536
+            vector = [0.0] * 1024
             vector[0] = 1.0
             vector_backend.upsert(document, vector, model="integration-model")
             hits = vector_backend.search(

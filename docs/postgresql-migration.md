@@ -113,5 +113,5 @@ Alembic revision、业务表数量和关键表可读性，再写入 `restore-che
 `archive_command`，避免 Tank 离线反过来填满 h610 的 `pg_wal`。相关目标配置和
 演练完成前，生产能力应准确标记为“主从 + 已验证逻辑恢复”，而不是“完整 PITR”。
 
-当前向量列固定为 `vector(1536)`；若以后更换为其他维度的 embedding 模型，必须新增
+当前向量列固定为 `vector(1024)`，与 BGE-M3 的输出维度一致；若以后更换为其他维度的 embedding 模型，必须新增
 Alembic migration 修改列类型，不能只改 `AI_EMBEDDING_DIMENSIONS`。

@@ -663,7 +663,7 @@ class Settings:
             postgres_dsn=os.getenv("AI_POSTGRES_DSN", "").strip(),
             embedding_base_url=os.getenv(
                 "AI_EMBEDDING_BASE_URL",
-                "https://api.openai.com/v1",
+                "http://127.0.0.1:11434/v1",
             ).strip(),
             embedding_api_key=os.getenv(
                 "AI_EMBEDDING_API_KEY",
@@ -671,10 +671,10 @@ class Settings:
             ).strip(),
             embedding_model=os.getenv(
                 "AI_EMBEDDING_MODEL",
-                "text-embedding-3-small",
+                "bge-m3",
             ).strip(),
             embedding_dimensions=min(
-                max(_get_int("AI_EMBEDDING_DIMENSIONS", 1536), 8),
+                max(_get_int("AI_EMBEDDING_DIMENSIONS", 1024), 8),
                 8192,
             ),
             embedding_timeout_seconds=max(

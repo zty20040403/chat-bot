@@ -176,15 +176,17 @@ docker run -d --name qqbot-pgvector \
 ```text
 AI_SEMANTIC_ENABLED=true
 AI_POSTGRES_DSN=postgresql://qq_bot:强密码@100.64.0.4:5432/qq_bot
-AI_EMBEDDING_BASE_URL=https://api.openai.com/v1
-AI_EMBEDDING_API_KEY=你的 embedding key
-AI_EMBEDDING_MODEL=text-embedding-3-small
-AI_EMBEDDING_DIMENSIONS=1536
+AI_EMBEDDING_BASE_URL=http://127.0.0.1:11434/v1
+AI_EMBEDDING_API_KEY=ollama-local
+AI_EMBEDDING_MODEL=bge-m3
+AI_EMBEDDING_DIMENSIONS=1024
 AI_SEMANTIC_INDEX_SECONDS=60
 AI_SEMANTIC_BATCH_SIZE=32
 ```
 
-DeepSeek Chat API 本身不等于 embedding API，不能直接把聊天模型名填在这里。维度必须
+DeepSeek Chat API 本身不等于 embedding API，不能直接把聊天模型名填在这里。示例使用
+本机 Ollama 的 OpenAI-compatible embedding 接口；`ollama-local` 只是启用客户端所需的
+非敏感占位值。维度必须
 与 embedding 服务实际返回一致。向量表带 Scope、来源句柄和 HNSW cosine 索引；
 原始消息以 PostgreSQL `messages` 账本为准，删掉向量表后可以重新生成。
 
