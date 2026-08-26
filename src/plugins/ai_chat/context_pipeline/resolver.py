@@ -5,6 +5,7 @@ from datetime import datetime
 
 from ..conversation_scope import ConversationScope
 from ..ledger import CanonicalMessage, MessageLedger
+from .graph import MessageReferenceGraph
 from .models import ContextCandidate, TurnContextPlan
 
 
@@ -53,6 +54,11 @@ _LOW_INFORMATION = re.compile(
     r"^(?:哈+|呵+|啊+|哦+|嗯+|草+|笑死|确实|好吧|行吧|可以|收到|[?？!！。.，,~～…]+)$",
     re.IGNORECASE,
 )
+_DEICTIC_FOLLOW_UP = re.compile(
+    r"^(?:这个|那个|这|那|它|他|她|上面|前面)(?:呢|怎么样|怎么说|咋样|"
+    r"是什么|啥意思)?[？?]?$",
+    re.IGNORECASE,
+)
 
 
 class ReferenceResolver:
@@ -85,6 +91,10 @@ class ReferenceResolver:
             and message.message_kind != "command"
             and bool(message.prompt_text.strip())
         ]
+        graph_messages = [*recent]
+        if current is not None:
+            graph_messages.append(current)
+        graph = MessageReferenceGraph(graph_messages)
         explicit_target = (
             ledger.get_in_scope(scope, current.reply_to_canonical_message_id)
             if current is not None
@@ -92,10 +102,14 @@ class ReferenceResolver:
             else None
         )
         if explicit_target is not None:
-            related = self._related_ids(
-                recent,
+            related = graph.related_ids(
                 explicit_target.canonical_message_id,
                 current_message_id,
+                limit=self.related_limit,
+            )
+            topic_id = graph.root(explicit_target.canonical_message_id)
+            topic_message_ids = tuple(
+                dict.fromkeys((topic_id, explicit_target.canonical_message_id, *related))
             )
             rendered = self._render(
                 explicit_target,
@@ -115,9 +129,17 @@ class ReferenceResolver:
                         explicit_target.canonical_message_id,
                         100.0,
                         ("explicit_reply", "same_scope"),
+                        relation_score=1.0,
+                        recency_score=1.0,
                     ),
                 ),
                 rendered_context=rendered,
+                topic_id=topic_id,
+                topic_message_ids=topic_message_ids,
+                topic_query=graph.topic_query(
+                    explicit_target.canonical_message_id,
+                    related,
+                ),
             )
 
         if prefer_latest and recent:
@@ -129,11 +151,12 @@ class ReferenceResolver:
                 ),
                 recent[-1],
             )
-            related = self._related_ids(
-                recent,
+            related = graph.related_ids(
                 focus.canonical_message_id,
                 current_message_id,
+                limit=self.related_limit,
             )
+            topic_id = graph.root(focus.canonical_message_id)
             return TurnContextPlan(
                 scope_key=scope.key,
                 current_message_id=current_message_id,
@@ -147,12 +170,22 @@ class ReferenceResolver:
                         focus.canonical_message_id,
                         95.0,
                         ("empty_mention_latest", "same_scope"),
+                        relation_score=0.95,
+                        recency_score=1.0,
                     ),
                 ),
                 rendered_context=self._render(
                     focus,
                     self._messages_by_ids(recent, related),
                     ambiguous=False,
+                ),
+                topic_id=topic_id,
+                topic_message_ids=tuple(
+                    dict.fromkeys((topic_id, focus.canonical_message_id, *related))
+                ),
+                topic_query=graph.topic_query(
+                    focus.canonical_message_id,
+                    related,
                 ),
             )
 
@@ -168,18 +201,31 @@ class ReferenceResolver:
                 related_message_ids=(),
                 candidates=(),
                 rendered_context="",
+                topic_query=" ".join(current_text.split()).strip(),
             )
 
         timestamp = int(now if now is not None else current.occurred_at if current else 0)
         query_terms = self._query_terms(current_text)
+        deictic_follow_up = bool(
+            _DEICTIC_FOLLOW_UP.fullmatch(" ".join(current_text.split()).strip())
+        )
         scored: list[tuple[CanonicalMessage, ContextCandidate]] = []
         for distance, message in enumerate(reversed(recent)):
-            score, reasons = self._score(
+            score, reasons, components = self._score(
                 message,
                 distance=distance,
                 now=timestamp,
                 current_native_user_id=str(current_native_user_id),
                 query_terms=query_terms,
+                deictic_follow_up=deictic_follow_up,
+                reply_count=len(graph.children.get(message.canonical_message_id, ())),
+                topic_support_count=len(
+                    graph.related_ids(
+                        message.canonical_message_id,
+                        current_message_id,
+                        limit=3,
+                    )
+                ),
             )
             if score <= 0:
                 continue
@@ -190,6 +236,9 @@ class ReferenceResolver:
                         message_id=message.canonical_message_id,
                         score=round(score, 2),
                         reason_codes=tuple(reasons),
+                        lexical_score=components["lexical"],
+                        relation_score=components["relation"],
+                        recency_score=components["recency"],
                     ),
                 )
             )
@@ -216,6 +265,7 @@ class ReferenceResolver:
                 rendered_context=(
                     "[追问指向不明确] 如果近期消息仍不足以确认对象，先简短问清楚。"
                 ),
+                topic_query=" ".join(current_text.split()).strip(),
             )
 
         margin = top[1].score - (runner_up[1].score if runner_up else 0.0)
@@ -231,11 +281,12 @@ class ReferenceResolver:
         if ambiguous:
             confidence = min(confidence, 0.59)
         focus = top[0]
-        related = self._related_ids(
-            recent,
+        related = graph.related_ids(
             focus.canonical_message_id,
             current_message_id,
+            limit=self.related_limit,
         )
+        topic_id = graph.root(focus.canonical_message_id)
         reasons = tuple(dict.fromkeys((*top[1].reason_codes, "same_scope")))
         rendered = self._render(
             focus,
@@ -252,6 +303,14 @@ class ReferenceResolver:
             related_message_ids=related,
             candidates=tuple(item[1] for item in scored[:5]),
             rendered_context=rendered,
+            topic_id=topic_id,
+            topic_message_ids=tuple(
+                dict.fromkeys((topic_id, focus.canonical_message_id, *related))
+            ),
+            topic_query=graph.topic_query(
+                focus.canonical_message_id,
+                related,
+            ),
         )
 
     @classmethod
@@ -273,7 +332,10 @@ class ReferenceResolver:
         now: int,
         current_native_user_id: str,
         query_terms: tuple[str, ...],
-    ) -> tuple[float, list[str]]:
+        deictic_follow_up: bool,
+        reply_count: int,
+        topic_support_count: int,
+    ) -> tuple[float, list[str], dict[str, float]]:
         text = " ".join(message.prompt_text.split()).strip()
         score = max(42.0 - distance * 6.0, 4.0)
         reasons = ["recent_message"]
@@ -306,7 +368,36 @@ class ReferenceResolver:
         if message.reply_to_canonical_message_id is not None:
             score += 3
             reasons.append("reply_chain")
-        return max(score, 0.0), reasons
+        if reply_count:
+            score += min(reply_count * 4, 12)
+            reasons.append("has_reply_descendants")
+        if topic_support_count:
+            score += min(topic_support_count * 14, 28)
+            reasons.append("established_topic")
+        if deictic_follow_up:
+            if distance == 0:
+                score += 34
+                reasons.append("deictic_latest")
+            else:
+                score -= min(distance * 4, 16)
+        lexical = min(overlap / max(len(query_terms), 1), 1.0)
+        relation = min(
+            (0.45 if cls._is_question(text) else 0.15)
+            + (0.2 if message.reply_to_canonical_message_id is not None else 0.0)
+            + min(reply_count * 0.15, 0.3)
+            + min(topic_support_count * 0.15, 0.3)
+            + (0.35 if deictic_follow_up and distance == 0 else 0.0),
+            1.0,
+        )
+        recency = 1.0 if age <= 300 else 0.7 if age <= 1800 else max(
+            1.0 - distance / 10.0,
+            0.0,
+        )
+        return max(score, 0.0), reasons, {
+            "lexical": round(lexical, 4),
+            "relation": round(relation, 4),
+            "recency": round(recency, 4),
+        }
 
     @staticmethod
     def _is_question(text: str) -> bool:
@@ -334,26 +425,6 @@ class ReferenceResolver:
     def _term_overlap(terms: tuple[str, ...], text: str) -> int:
         normalized = re.sub(r"[\W_]+", "", text.casefold())
         return sum(1 for term in terms if term in normalized)
-
-    def _related_ids(
-        self,
-        recent: list[CanonicalMessage],
-        focus_message_id: int,
-        current_message_id: int,
-    ) -> tuple[int, ...]:
-        after_focus = [
-            message.canonical_message_id
-            for message in recent
-            if focus_message_id < message.canonical_message_id < current_message_id
-        ]
-        reply_links = [
-            message.canonical_message_id
-            for message in recent
-            if message.reply_to_canonical_message_id == focus_message_id
-        ]
-        return tuple(
-            dict.fromkeys((*after_focus[-self.related_limit :], *reply_links))
-        )[-self.related_limit :]
 
     @staticmethod
     def _messages_by_ids(

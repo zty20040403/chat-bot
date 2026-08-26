@@ -74,7 +74,13 @@ from .context_policy import (
     proactive_context_policy,
 )
 from .context_store import CaptureCandidate
-from .context_pipeline import ReferenceResolver, TurnContextPlan
+from .context_pipeline import (
+    ReferenceResolver,
+    TurnContextPlan,
+    build_hybrid_recall,
+    fit_token_budget,
+)
+from .context_pipeline.ranking import combine_budgeted_sections
 from .conversation_scope import ConversationScope
 from .deepseek import (
     AgentLoopEvent,
@@ -210,7 +216,7 @@ from . import onebot_delivery as _onebot_delivery
 SEND_RETRY_DELAY_SECONDS = 2.0
 SEND_RETRY_MAX_CHARS = 800
 TURN_PROMPT_VERSION = "qqbot-turn-v10"
-BOT_VERSION = "0.6.1"
+BOT_VERSION = "0.6.2"
 EMPTY_MENTION_FOLLOW_UP = "你觉得呢"
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 proactive_check_gate = ProactiveCheckGate()

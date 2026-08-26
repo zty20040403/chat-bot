@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.6.1-22c55e?style=for-the-badge">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.6.2-22c55e?style=for-the-badge">
   <img alt="Python" src="https://img.shields.io/badge/Python-3.12-3776ab?style=for-the-badge&amp;logo=python&amp;logoColor=white">
   <img alt="NoneBot2" src="https://img.shields.io/badge/NoneBot2-OneBot_V11-ea5252?style=for-the-badge">
   <img alt="PostgreSQL" src="https://img.shields.io/badge/PostgreSQL-Durable-4169e1?style=for-the-badge&amp;logo=postgresql&amp;logoColor=white">
@@ -136,7 +136,7 @@ bot/
         ├── workers/             # 可恢复后台任务执行器
         ├── deepseek.py          # Agent Loop 兼容实现
         ├── llm_gateway.py       # 多协议模型网关
-        ├── context_pipeline/    # 上下文规划与证据选择
+        ├── context_pipeline/    # 引用图、话题识别、混合召回与 Token 预算
         ├── turn_journal.py      # 持久回合、工具事件和连续任务
         ├── delivery.py          # 幂等消息投递 Outbox
         ├── media_library.py     # 永久表情库

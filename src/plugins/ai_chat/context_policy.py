@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-from .context_pipeline import TurnContextPlan
+from .context_pipeline import ContextTokenBudget, TurnContextPlan
 
 
 ContextMode = Literal["minimal", "focused", "expanded"]
@@ -43,6 +43,13 @@ class ContextPolicy:
     pin_max_chars: int = 0
     memory_max_entries_per_scope: int = 4
     memory_max_chars: int = 1200
+    token_budget: ContextTokenBudget = ContextTokenBudget(
+        focus=0,
+        timeline=0,
+        group_memory=0,
+        user_memory=0,
+        semantic=0,
+    )
 
 
 def choose_context_policy(
@@ -66,6 +73,13 @@ def choose_context_policy(
             include_group_memory=False,
             include_user_memory=True,
             fallback_user_memory=user_memory_reference,
+            token_budget=ContextTokenBudget(
+                focus=0,
+                timeline=0,
+                group_memory=0,
+                user_memory=500,
+                semantic=400,
+            ),
         )
 
     has_focus = plan is not None and plan.focus_message_id is not None
@@ -94,6 +108,31 @@ def choose_context_policy(
         max_chars=1800 if mode == "expanded" else 900 if mode == "minimal" else 0,
         roster_limit=12,
         pin_max_chars=800,
+        token_budget=(
+            ContextTokenBudget(
+                focus=760,
+                timeline=260,
+                group_memory=220,
+                user_memory=180,
+                semantic=380,
+            )
+            if mode == "focused"
+            else ContextTokenBudget(
+                focus=500,
+                timeline=900,
+                group_memory=300,
+                user_memory=260,
+                semantic=500,
+            )
+            if mode == "expanded"
+            else ContextTokenBudget(
+                focus=0,
+                timeline=500,
+                group_memory=220,
+                user_memory=180,
+                semantic=300,
+            )
+        ),
     )
 
 
@@ -107,4 +146,11 @@ def proactive_context_policy() -> ContextPolicy:
         include_user_memory=False,
         max_messages=8,
         max_chars=1200,
+        token_budget=ContextTokenBudget(
+            focus=0,
+            timeline=800,
+            group_memory=0,
+            user_memory=0,
+            semantic=0,
+        ),
     )

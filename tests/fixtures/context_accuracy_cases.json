@@ -1,0 +1,70 @@
+[
+  {
+    "name": "database_latency_follow_up",
+    "messages": [
+      {"id": 1, "user": 7, "sender": "Alice", "text": "换到 tank 数据库后机器人明显变慢，是不是远程数据库延迟？"},
+      {"id": 2, "user": 8, "sender": "Bob", "text": "数据库还是优先放 h610，tank 做归档比较合理"},
+      {"id": 3, "user": 6, "sender": "Carol", "text": "今晚吃什么"}
+    ],
+    "current": {"id": 4, "user": 9, "sender": "Kenneth", "text": "你觉得呢"},
+    "expected_focus": 1,
+    "required": ["tank 数据库", "h610"],
+    "forbidden": ["今晚吃什么"]
+  },
+  {
+    "name": "deictic_points_to_latest_share",
+    "messages": [
+      {"id": 1, "user": 7, "sender": "Alice", "text": "PostgreSQL 和 SQLite 哪个更好？"},
+      {"id": 2, "user": 8, "sender": "Bob", "text": "[卡片:B站视频 ROG 枪神 10 Plus 评测]"}
+    ],
+    "current": {"id": 3, "user": 9, "sender": "Kenneth", "text": "这个怎么样"},
+    "expected_focus": 2,
+    "required": ["ROG 枪神"],
+    "forbidden": ["PostgreSQL"]
+  },
+  {
+    "name": "latest_question_wins_between_topics",
+    "messages": [
+      {"id": 1, "user": 7, "sender": "Alice", "text": "今晚几点开会？"},
+      {"id": 2, "user": 8, "sender": "Bob", "text": "h610 的磁盘为什么快满了？"}
+    ],
+    "current": {"id": 3, "user": 9, "sender": "Kenneth", "text": "你觉得呢"},
+    "expected_focus": 2,
+    "required": ["h610"],
+    "forbidden": ["几点开会"]
+  },
+  {
+    "name": "explicit_reply_beats_recency",
+    "messages": [
+      {"id": 1, "user": 7, "sender": "Alice", "text": "NixOS rebuild 为什么会回滚别人的服务？"},
+      {"id": 2, "user": 8, "sender": "Bob", "text": "中午去哪里吃饭？"}
+    ],
+    "current": {"id": 3, "user": 9, "sender": "Kenneth", "text": "这个怎么解决", "reply_to": 1},
+    "expected_focus": 1,
+    "required": ["NixOS rebuild"],
+    "forbidden": ["中午去哪里"]
+  },
+  {
+    "name": "same_user_continuation",
+    "messages": [
+      {"id": 1, "user": 9, "sender": "Kenneth", "text": "Clash 和 Tailscale 同时开时内网页面进不去，应该怎么分流？"}
+    ],
+    "current": {"id": 2, "user": 9, "sender": "Kenneth", "text": "你觉得呢"},
+    "expected_focus": 1,
+    "required": ["Clash", "Tailscale"],
+    "forbidden": []
+  },
+  {
+    "name": "other_group_never_leaks",
+    "other_group_messages": [
+      {"id": 90, "user": 7, "sender": "Alice", "text": "另一个群的机密部署口令"}
+    ],
+    "messages": [
+      {"id": 1, "user": 8, "sender": "Bob", "text": "本群的机器人要不要开启沙盒？"}
+    ],
+    "current": {"id": 2, "user": 9, "sender": "Kenneth", "text": "你觉得呢"},
+    "expected_focus": 1,
+    "required": ["开启沙盒"],
+    "forbidden": ["机密部署口令"]
+  }
+]
