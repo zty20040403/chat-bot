@@ -15,6 +15,7 @@ from src.plugins.ai_chat.admin import AdminEventBroker, AdminServices, register_
 from src.plugins.ai_chat.delivery import DeliveryStore
 from src.plugins.ai_chat.model_catalog import ModelCatalog
 from src.plugins.ai_chat.quota import UsageStore
+from src.plugins.ai_chat.tool_policy import configure_tool_overrides
 
 
 class EmptyTasks:
@@ -364,6 +365,10 @@ class AdminTests(unittest.TestCase):
                     "/bot-admin/api/overview",
                     headers={"Authorization": "Bearer secret"},
                 )
+                v1_allowed = await client.get(
+                    "/bot-admin/api/v1/overview",
+                    headers={"Authorization": "Bearer secret"},
+                )
                 sandboxes = await client.get(
                     "/bot-admin/api/sandboxes",
                     headers={"Authorization": "Bearer secret"},
@@ -401,6 +406,7 @@ class AdminTests(unittest.TestCase):
                     favicon,
                     denied,
                     allowed,
+                    v1_allowed,
                     sandboxes,
                     stickers,
                     group_models,
@@ -416,6 +422,7 @@ class AdminTests(unittest.TestCase):
             favicon,
             denied,
             allowed,
+            v1_allowed,
             sandboxes,
             stickers,
             group_models,
@@ -426,14 +433,18 @@ class AdminTests(unittest.TestCase):
             observability,
         ) = asyncio.run(run())
         self.assertEqual(page.status_code, 200)
-        self.assertIn('data-view="observability"', page.text)
+        self.assertIn("window.__KENNETHBOT_ADMIN__", page.text)
+        self.assertIn('"apiBase":"/bot-admin/api/v1"', page.text)
+        self.assertIn('id="root"', page.text)
         self.assertEqual(favicon.status_code, 200)
         self.assertTrue(favicon.headers["content-type"].startswith("image/svg+xml"))
         self.assertIn("<svg", favicon.text)
         self.assertIn("#22c55e", favicon.text)
-        self.assertIn("QQ Bot", page.text)
+        self.assertIn("Kennethbot", page.text)
         self.assertEqual(denied.status_code, 401)
         self.assertEqual(allowed.status_code, 200)
+        self.assertEqual(v1_allowed.status_code, 200)
+        self.assertEqual(v1_allowed.json()["version"], "test")
         self.assertEqual(allowed.json()["version"], "test")
         self.assertEqual(
             allowed.json()["background_tasks"],
@@ -445,17 +456,8 @@ class AdminTests(unittest.TestCase):
         self.assertEqual(allowed.json()["models"]["default"], "main")
         self.assertTrue(allowed.json()["models"]["profiles"][0]["configured"])
         self.assertNotIn("never-return-this-secret", allowed.text)
-        self.assertIn("data-view=\"sandboxes\"", page.text)
-        self.assertIn("data-view=\"context-plans\"", page.text)
-        self.assertIn("data-view=\"databases\"", page.text)
-        self.assertIn("data-view=\"sources\"", page.text)
-        self.assertIn("class=\"sidebar\"", page.text)
-        self.assertIn("id=\"usage-chart\"", page.text)
-        self.assertIn("QQ Bot Control", page.text)
+        self.assertIn("Kennethbot Control", page.text)
         self.assertIn('/bot-admin/favicon.svg?v=test', page.text)
-        self.assertNotIn("__DASHBOARD_", page.text)
-        self.assertNotIn("__ADMIN_PREFIX__", page.text)
-        self.assertNotIn("__TOKEN_REQUIRED__", page.text)
         self.assertNotIn("unpkg.com", page.text)
         self.assertEqual(sandboxes.json()["active_commands"], 1)
         self.assertEqual(
@@ -614,6 +616,63 @@ class AdminTests(unittest.TestCase):
             preferences.models,
         )
         self.assertEqual(invalid.status_code, 422)
+
+    def test_admin_v1_versions_audits_and_rejects_stale_tool_updates(self) -> None:
+        self.addCleanup(configure_tool_overrides, {})
+        app = FastAPI()
+        register_admin(
+            app,
+            AdminServices(version="test", started_at=1),
+            token="secret",
+        )
+
+        async def run():
+            transport = httpx.ASGITransport(app=app)
+            headers = {
+                "Authorization": "Bearer secret",
+                "If-Match": '"0"',
+                "X-Admin-Actor": "Kenneth",
+            }
+            async with httpx.AsyncClient(
+                transport=transport,
+                base_url="http://test",
+            ) as client:
+                before = await client.get(
+                    "/bot-admin/api/v1/tools",
+                    headers={"Authorization": "Bearer secret"},
+                )
+                changed = await client.put(
+                    "/bot-admin/api/v1/tools/web_search/enabled",
+                    headers=headers,
+                    json={"enabled": False},
+                )
+                stale = await client.put(
+                    "/bot-admin/api/v1/tools/web_search/enabled",
+                    headers=headers,
+                    json={"enabled": True},
+                )
+                audit = await client.get(
+                    "/bot-admin/api/v1/audit",
+                    headers={"Authorization": "Bearer secret"},
+                )
+                versions = await client.get(
+                    "/bot-admin/api/v1/resource-versions",
+                    headers={"Authorization": "Bearer secret"},
+                )
+                return before, changed, stale, audit, versions
+
+        before, changed, stale, audit, versions = asyncio.run(run())
+        self.assertEqual(before.json()["resource_version"], 0)
+        self.assertEqual(changed.status_code, 200)
+        self.assertEqual(changed.json()["resource_version"], 1)
+        self.assertEqual(stale.status_code, 409)
+        self.assertEqual(
+            stale.json()["detail"]["code"],
+            "resource_version_conflict",
+        )
+        self.assertEqual(versions.json()["versions"]["tools"], 1)
+        self.assertEqual(audit.json()["items"][0]["actor"], "Kenneth")
+        self.assertEqual(audit.json()["items"][0]["action"], "tool.enabled.set")
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.7.1-22c55e?style=for-the-badge">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.8.0-22c55e?style=for-the-badge">
   <img alt="Python" src="https://img.shields.io/badge/Python-3.12-3776ab?style=for-the-badge&amp;logo=python&amp;logoColor=white">
   <img alt="NoneBot2" src="https://img.shields.io/badge/NoneBot2-OneBot_V11-ea5252?style=for-the-badge">
   <img alt="PostgreSQL" src="https://img.shields.io/badge/PostgreSQL-Durable-4169e1?style=for-the-badge&amp;logo=postgresql&amp;logoColor=white">
@@ -115,6 +115,7 @@ bot/
 ├── flake.nix                    # Nix 包、开发环境和模块导出
 ├── nix/module.nix               # NixOS 服务模块
 ├── migrations/                  # PostgreSQL / Alembic 迁移
+├── admin-ui/                    # React + TypeScript 管理控制台
 ├── skills/                      # Agent 按需加载的操作说明
 ├── docs/                        # 架构、运维和迁移文档
 ├── tests/                       # 单元测试与集成测试
@@ -381,8 +382,14 @@ http://127.0.0.1:8080/bot-admin
 - 模型 profile 的协议、模型名和能力开关。
 - “我自己”和“其他群友”两类默认模型配置。
 - 每个群的启用开关、自动识图开关和成员单独覆盖。
-- 当前沙箱、执行任务、媒体库、识图队列和旧数据治理状态。
-- Token 用量、Agent 回合、工具调用和投递状态。
+- 当前沙箱、执行任务、媒体审核、识图队列和分享内容状态。
+- Token 用量、Agent 回合、工具调用、Trace 和投递状态。
+- 工具权限开关；停用后下一轮模型请求不会再看到对应 Tool Call。
+- PostgreSQL 持久审计、资源版本和乐观并发冲突保护。
+
+页面由 React + TypeScript 构建，通过 `/api/v1` 管理 API 读取数据，并用 SSE 只更新发生变化的
+资源。正在操作的下拉框会保留本地草稿和焦点，不会因为实时数据更新而关闭。所有控制台写
+操作都会携带当前资源版本；多人同时修改时，旧版本提交返回 `409` 并重新加载最新状态。
 
 推荐只通过 Tailscale、反向代理或 SSH 隧道在可信内网访问。不要把无 Token 的管理台直接暴露
 到公网。

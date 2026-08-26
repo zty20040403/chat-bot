@@ -5,20 +5,31 @@ import hmac
 import json
 import re
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import asdict, dataclass
 from typing import Any, Optional
 
 import httpx
-from fastapi import APIRouter, Header, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, Response, StreamingResponse
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
+from fastapi.routing import APIRoute
 from pydantic import BaseModel
 
-from .admin_dashboard import ADMIN_FAVICON_SVG, dashboard_html
+from .admin_control import (
+    AdminControlStore,
+    AdminVersionConflict,
+    MutationResult,
+    parse_expected_version,
+)
+from .admin_dashboard import ADMIN_FAVICON_SVG, admin_asset_path, dashboard_html
 from .conversation_scope import ConversationScope
-
-
-ADMIN_EVENT_STREAM_LEASE_SECONDS = 10
+from .tool_policy import (
+    TOOL_POLICIES,
+    admin_tool_manifest,
+    configure_tool_overrides,
+    set_tool_enabled,
+    tool_enabled,
+)
 
 
 @dataclass(frozen=True)
@@ -51,6 +62,12 @@ class AdminServices:
     telemetry: Any = None
 
 
+@dataclass(frozen=True)
+class AdminMutationContext:
+    expected_version: int | None
+    actor: str
+
+
 class ModelSelectionRequest(BaseModel):
     profile: str | None = None
 
@@ -63,10 +80,22 @@ class CleanupConfirmationRequest(BaseModel):
     confirmation_token: str
 
 
+class ToolEnabledRequest(BaseModel):
+    enabled: bool
+
+
+class MediaReviewRequest(BaseModel):
+    state: str
+
+
 class AdminEventBroker:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        version_provider: Callable[[], dict[str, int]] | None = None,
+    ) -> None:
         self._sequence = 0
         self._subscribers: set[asyncio.Queue[dict[str, object]]] = set()
+        self._version_provider = version_provider
 
     def subscribe(self) -> asyncio.Queue[dict[str, object]]:
         queue: asyncio.Queue[dict[str, object]] = asyncio.Queue(maxsize=32)
@@ -87,6 +116,11 @@ class AdminEventBroker:
             "resources": normalized,
             "timestamp": int(time.time()),
         }
+        if self._version_provider is not None:
+            versions = self._version_provider()
+            payload["versions"] = {
+                resource: versions.get(resource, 0) for resource in normalized
+            }
         for queue in tuple(self._subscribers):
             if queue.full():
                 try:
@@ -109,7 +143,9 @@ def register_admin(
     prefix = "/" + path.strip("/")
     router = APIRouter(prefix=prefix)
     expected_token = token.strip()
-    event_broker = AdminEventBroker()
+    control_store = AdminControlStore(services.database)
+    configure_tool_overrides(control_store.tool_overrides())
+    event_broker = AdminEventBroker(control_store.versions)
 
     def authorize(authorization: Optional[str] = Header(default=None)) -> None:
         if not expected_token:
@@ -120,9 +156,83 @@ def register_admin(
         if not hmac.compare_digest(supplied, expected_token):
             raise HTTPException(status_code=401, detail="invalid admin token")
 
+    def mutation_context(
+        if_match: Optional[str] = Header(default=None, alias="If-Match"),
+        admin_actor: Optional[str] = Header(default=None, alias="X-Admin-Actor"),
+    ) -> AdminMutationContext:
+        try:
+            expected_version = parse_expected_version(if_match)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        return AdminMutationContext(
+            expected_version=expected_version,
+            actor=" ".join(str(admin_actor or "admin-console").split())[:160],
+        )
+
+    def mutate(
+        context: AdminMutationContext,
+        resource_key: str,
+        *,
+        action: str,
+        target: str = "",
+        before: object = None,
+        operation: Callable[[int], Any],
+    ) -> MutationResult:
+        try:
+            return control_store.mutate(
+                resource_key,
+                expected_version=context.expected_version,
+                actor=context.actor,
+                action=action,
+                target=target,
+                before=before,
+                operation=operation,
+            )
+        except AdminVersionConflict as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "resource_version_conflict",
+                    "resource": exc.resource_key,
+                    "expected_version": exc.expected,
+                    "current_version": exc.current,
+                },
+            ) from None
+
+    def mutation_payload(result: MutationResult, **payload: object) -> dict[str, object]:
+        return {
+            "ok": True,
+            **payload,
+            "resource": result.resource_key,
+            "resource_version": result.resource_version,
+        }
+
+    def require_changed(changed: bool, status_code: int, detail: str) -> bool:
+        if not changed:
+            raise HTTPException(status_code=status_code, detail=detail)
+        return True
+
+    def versioned(resource_key: str, payload: dict[str, object]) -> dict[str, object]:
+        return {
+            **payload,
+            "api_version": "v1",
+            "resource": resource_key,
+            "resource_version": control_store.version(resource_key),
+        }
+
     @router.get("", response_class=HTMLResponse, include_in_schema=False)
     async def dashboard() -> str:
         return dashboard_html(prefix, services.version, bool(expected_token))
+
+    @router.get("/assets/{asset_path:path}", include_in_schema=False)
+    async def dashboard_asset(asset_path: str) -> FileResponse:
+        resolved = admin_asset_path(asset_path)
+        if resolved is None:
+            raise HTTPException(status_code=404, detail="admin asset not found")
+        return FileResponse(
+            resolved,
+            headers={"Cache-Control": "public, max-age=300"},
+        )
 
     @router.get("/favicon.svg", include_in_schema=False)
     async def favicon() -> Response:
@@ -131,6 +241,17 @@ def register_admin(
             media_type="image/svg+xml",
             headers={"Cache-Control": "public, max-age=86400"},
         )
+
+    @router.get("/api/resource-versions")
+    def resource_versions(
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
+        authorize(authorization)
+        return {
+            "api_version": "v1",
+            "persistent": control_store.persistent,
+            "versions": control_store.versions(),
+        }
 
     @router.get("/api/overview", dependencies=[])
     def overview(
@@ -191,25 +312,21 @@ def register_admin(
 
         async def stream() -> AsyncIterator[str]:
             queue = event_broker.subscribe()
-            deadline = time.monotonic() + ADMIN_EVENT_STREAM_LEASE_SECONDS
             ready = {
                 "sequence": 0,
                 "type": "ready",
                 "resources": [],
                 "timestamp": int(time.time()),
+                "versions": control_store.versions(),
             }
             try:
                 yield "retry: 2000\n"
                 yield f"data: {json.dumps(ready, separators=(',', ':'))}\n\n"
-                while (
-                    time.monotonic() < deadline
-                    and not await request.is_disconnected()
-                ):
-                    remaining = max(deadline - time.monotonic(), 0.1)
+                while not await request.is_disconnected():
                     try:
                         payload = await asyncio.wait_for(
                             queue.get(),
-                            timeout=min(2.0, remaining),
+                            timeout=15.0,
                         )
                     except TimeoutError:
                         yield ": heartbeat\n\n"
@@ -281,38 +398,50 @@ def register_admin(
     @router.post("/api/deliveries/{delivery_id}/retry")
     async def retry_delivery(
         delivery_id: int,
+        mutation_info: AdminMutationContext = Depends(mutation_context),
         authorization: Optional[str] = Header(default=None),
     ) -> dict[str, object]:
         authorize(authorization)
-        changed = bool(
-            services.delivery_store is not None
-            and services.delivery_store.requeue(delivery_id)
+        result = mutate(
+            mutation_info,
+            "deliveries",
+            action="delivery.retry",
+            target=f"delivery#{delivery_id}",
+            operation=lambda _version: require_changed(
+                bool(
+                    services.delivery_store is not None
+                    and services.delivery_store.requeue(delivery_id)
+                ),
+                409,
+                "delivery cannot be retried from its current state",
+            ),
         )
-        if not changed:
-            raise HTTPException(
-                status_code=409,
-                detail="delivery cannot be retried from its current state",
-            )
         event_broker.publish("deliveries", "overview")
-        return {"ok": True, "delivery_id": delivery_id}
+        return mutation_payload(result, delivery_id=delivery_id)
 
     @router.post("/api/deliveries/{delivery_id}/cancel")
     async def cancel_delivery(
         delivery_id: int,
+        mutation_info: AdminMutationContext = Depends(mutation_context),
         authorization: Optional[str] = Header(default=None),
     ) -> dict[str, object]:
         authorize(authorization)
-        changed = bool(
-            services.delivery_store is not None
-            and services.delivery_store.cancel(delivery_id)
+        result = mutate(
+            mutation_info,
+            "deliveries",
+            action="delivery.cancel",
+            target=f"delivery#{delivery_id}",
+            operation=lambda _version: require_changed(
+                bool(
+                    services.delivery_store is not None
+                    and services.delivery_store.cancel(delivery_id)
+                ),
+                409,
+                "delivery cannot be cancelled from its current state",
+            ),
         )
-        if not changed:
-            raise HTTPException(
-                status_code=409,
-                detail="delivery cannot be cancelled from its current state",
-            )
         event_broker.publish("deliveries", "overview")
-        return {"ok": True, "delivery_id": delivery_id}
+        return mutation_payload(result, delivery_id=delivery_id)
 
     @router.get("/api/usage")
     def usage(
@@ -352,17 +481,26 @@ def register_admin(
     @router.post("/api/tasks/{task_id}/cancel")
     async def cancel_task(
         task_id: str,
+        mutation_info: AdminMutationContext = Depends(mutation_context),
         authorization: Optional[str] = Header(default=None),
     ) -> dict[str, object]:
         authorize(authorization)
-        changed = bool(
-            services.running_tasks is not None
-            and services.running_tasks.cancel_any(task_id) is not None
+        result = mutate(
+            mutation_info,
+            "tasks",
+            action="task.cancel",
+            target=task_id,
+            operation=lambda _version: require_changed(
+                bool(
+                    services.running_tasks is not None
+                    and services.running_tasks.cancel_any(task_id) is not None
+                ),
+                404,
+                "task not found",
+            ),
         )
-        if not changed:
-            raise HTTPException(status_code=404, detail="task not found")
         event_broker.publish("tasks", "overview")
-        return {"ok": True, "task_id": task_id}
+        return mutation_payload(result, task_id=task_id)
 
     @router.get("/api/jobs")
     def durable_jobs(
@@ -400,36 +538,54 @@ def register_admin(
     @router.post("/api/jobs/{job_id}/cancel")
     def cancel_durable_job(
         job_id: int,
+        mutation_info: AdminMutationContext = Depends(mutation_context),
         authorization: Optional[str] = Header(default=None),
     ) -> dict[str, object]:
         authorize(authorization)
-        changed = bool(
-            services.job_worker.cancel(job_id)
-            if services.job_worker is not None
-            else (
-                services.job_store is not None
-                and services.job_store.cancel(job_id)
-            )
+        result = mutate(
+            mutation_info,
+            "jobs",
+            action="job.cancel",
+            target=f"job#{job_id}",
+            operation=lambda _version: require_changed(
+                bool(
+                    services.job_worker.cancel(job_id)
+                    if services.job_worker is not None
+                    else (
+                        services.job_store is not None
+                        and services.job_store.cancel(job_id)
+                    )
+                ),
+                404,
+                "job is not cancellable",
+            ),
         )
-        if not changed:
-            raise HTTPException(status_code=404, detail="job is not cancellable")
         event_broker.publish("jobs", "overview")
-        return {"ok": True, "job_id": job_id}
+        return mutation_payload(result, job_id=job_id)
 
     @router.post("/api/jobs/{job_id}/retry")
     def retry_durable_job(
         job_id: int,
+        mutation_info: AdminMutationContext = Depends(mutation_context),
         authorization: Optional[str] = Header(default=None),
     ) -> dict[str, object]:
         authorize(authorization)
-        changed = bool(
-            services.job_store is not None
-            and services.job_store.requeue(job_id)
+        result = mutate(
+            mutation_info,
+            "jobs",
+            action="job.retry",
+            target=f"job#{job_id}",
+            operation=lambda _version: require_changed(
+                bool(
+                    services.job_store is not None
+                    and services.job_store.requeue(job_id)
+                ),
+                404,
+                "job is not retryable",
+            ),
         )
-        if not changed:
-            raise HTTPException(status_code=404, detail="job is not retryable")
         event_broker.publish("jobs", "overview")
-        return {"ok": True, "job_id": job_id}
+        return mutation_payload(result, job_id=job_id)
 
     @router.get("/api/sandboxes")
     async def sandboxes(
@@ -505,23 +661,77 @@ def register_admin(
             "available": True,
         }
 
+    @router.get("/api/tools")
+    def tools(
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
+        authorize(authorization)
+        return versioned(
+            "tools",
+            {
+                "items": admin_tool_manifest(),
+                "configured": True,
+                "available": True,
+            },
+        )
+
+    @router.put("/api/tools/{tool_name}/enabled")
+    def set_tool_permission(
+        tool_name: str,
+        selection: ToolEnabledRequest,
+        mutation_info: AdminMutationContext = Depends(mutation_context),
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
+        authorize(authorization)
+        if tool_name not in TOOL_POLICIES:
+            raise HTTPException(status_code=404, detail="工具不存在")
+
+        def update_tool(next_version: int) -> dict[str, object]:
+            persisted = control_store.set_tool_override(
+                tool_name,
+                selection.enabled,
+                actor=mutation_info.actor,
+                resource_version=next_version,
+            )
+            set_tool_enabled(tool_name, selection.enabled)
+            return persisted
+
+        result = mutate(
+            mutation_info,
+            "tools",
+            action="tool.enabled.set",
+            target=tool_name,
+            before={"enabled": tool_enabled(tool_name)},
+            operation=update_tool,
+        )
+        event_broker.publish("tools", "overview")
+        return mutation_payload(
+            result,
+            tool_name=tool_name,
+            enabled=selection.enabled,
+        )
+
     @router.get("/api/group-models")
     def group_models(
         authorization: Optional[str] = Header(default=None),
     ) -> dict[str, object]:
         authorize(authorization)
-        return _group_model_overview(
-            services.model_catalog,
-            services.model_preferences,
-            services.settings,
-            services.message_ledger,
-            services.user_profiles,
+        return versioned(
+            "groups",
+            _group_model_overview(
+                services.model_catalog,
+                services.model_preferences,
+                services.settings,
+                services.message_ledger,
+                services.user_profiles,
+            ),
         )
 
     @router.put("/api/group-models/{group_id}/default")
     async def set_group_model(
         group_id: int,
         selection: ModelSelectionRequest,
+        mutation_info: AdminMutationContext = Depends(mutation_context),
         authorization: Optional[str] = Header(default=None),
     ) -> dict[str, object]:
         authorize(authorization)
@@ -530,28 +740,41 @@ def register_admin(
         if services.model_preferences is None:
             raise HTTPException(status_code=503, detail="模型偏好存储不可用")
         profile = _admin_model_profile(services.model_catalog, selection.profile)
-        _preserve_admin_model_selections(
-            services.model_catalog,
-            services.model_preferences,
-            services.settings,
-            group_id,
+
+        def update_group_model(_version: int) -> dict[str, object]:
+            _preserve_admin_model_selections(
+                services.model_catalog,
+                services.model_preferences,
+                services.settings,
+                group_id,
+            )
+            if profile is None:
+                services.model_preferences.clear_group_default(group_id)
+            else:
+                services.model_preferences.set_group_default(group_id, profile.name)
+            return {"profile": profile.name if profile is not None else None}
+
+        result = mutate(
+            mutation_info,
+            "groups",
+            action="group.model.set",
+            target=str(group_id),
+            before={"profile": services.model_preferences.get_group_default(group_id)},
+            operation=update_group_model,
         )
-        if profile is None:
-            services.model_preferences.clear_group_default(group_id)
-        else:
-            services.model_preferences.set_group_default(group_id, profile.name)
         event_broker.publish("groups", "overview")
-        return {
-            "ok": True,
-            "scope": "group",
-            "group_id": group_id,
-            "profile": profile.name if profile is not None else None,
-        }
+        return mutation_payload(
+            result,
+            scope="group",
+            group_id=group_id,
+            profile=profile.name if profile is not None else None,
+        )
 
     @router.put("/api/group-models/{group_id}/enabled")
     async def set_group_enabled(
         group_id: int,
         selection: GroupEnabledRequest,
+        mutation_info: AdminMutationContext = Depends(mutation_context),
         authorization: Optional[str] = Header(default=None),
     ) -> dict[str, object]:
         authorize(authorization)
@@ -559,21 +782,36 @@ def register_admin(
             raise HTTPException(status_code=422, detail="群号必须是正整数")
         if services.model_preferences is None:
             raise HTTPException(status_code=503, detail="群状态存储不可用")
-        services.model_preferences.set_group_enabled(
-            group_id,
-            selection.enabled,
+        result = mutate(
+            mutation_info,
+            "groups",
+            action="group.enabled.set",
+            target=str(group_id),
+            before={
+                "enabled": services.model_preferences.get_group_enabled_override(
+                    group_id
+                )
+            },
+            operation=lambda _version: (
+                services.model_preferences.set_group_enabled(
+                    group_id,
+                    selection.enabled,
+                )
+                or {"enabled": selection.enabled}
+            ),
         )
         event_broker.publish("groups", "overview")
-        return {
-            "ok": True,
-            "group_id": group_id,
-            "enabled": selection.enabled,
-        }
+        return mutation_payload(
+            result,
+            group_id=group_id,
+            enabled=selection.enabled,
+        )
 
     @router.put("/api/group-models/{group_id}/vision-auto-describe")
     async def set_group_vision_auto_describe(
         group_id: int,
         selection: GroupEnabledRequest,
+        mutation_info: AdminMutationContext = Depends(mutation_context),
         authorization: Optional[str] = Header(default=None),
     ) -> dict[str, object]:
         authorize(authorization)
@@ -581,22 +819,39 @@ def register_admin(
             raise HTTPException(status_code=422, detail="群号必须是正整数")
         if services.model_preferences is None:
             raise HTTPException(status_code=503, detail="群状态存储不可用")
-        services.model_preferences.set_group_vision_auto_describe(
-            group_id,
-            selection.enabled,
+        result = mutate(
+            mutation_info,
+            "groups",
+            action="group.vision-auto-describe.set",
+            target=str(group_id),
+            before={
+                "enabled": (
+                    services.model_preferences.get_group_vision_auto_describe_override(
+                        group_id
+                    )
+                )
+            },
+            operation=lambda _version: (
+                services.model_preferences.set_group_vision_auto_describe(
+                    group_id,
+                    selection.enabled,
+                )
+                or {"vision_auto_describe": selection.enabled}
+            ),
         )
         event_broker.publish("groups", "media", "overview")
-        return {
-            "ok": True,
-            "group_id": group_id,
-            "vision_auto_describe": selection.enabled,
-        }
+        return mutation_payload(
+            result,
+            group_id=group_id,
+            vision_auto_describe=selection.enabled,
+        )
 
     @router.put("/api/group-models/{group_id}/users/{user_id}")
     async def set_group_user_model(
         group_id: int,
         user_id: int,
         selection: ModelSelectionRequest,
+        mutation_info: AdminMutationContext = Depends(mutation_context),
         authorization: Optional[str] = Header(default=None),
     ) -> dict[str, object]:
         authorize(authorization)
@@ -606,18 +861,34 @@ def register_admin(
             raise HTTPException(status_code=503, detail="模型偏好存储不可用")
         profile = _admin_model_profile(services.model_catalog, selection.profile)
         conversation_id = f"group:{group_id}:user:{user_id}"
-        if profile is None:
-            services.model_preferences.clear(conversation_id)
-        else:
-            services.model_preferences.set(conversation_id, profile.name)
+
+        def update_user_model(_version: int) -> dict[str, object]:
+            if profile is None:
+                services.model_preferences.clear(conversation_id)
+            else:
+                services.model_preferences.set(conversation_id, profile.name)
+            return {"profile": profile.name if profile is not None else None}
+
+        result = mutate(
+            mutation_info,
+            "groups",
+            action="group.user-model.set",
+            target=f"{group_id}:{user_id}",
+            before={
+                "profile": services.model_preferences.get_explicit(conversation_id)
+                if callable(getattr(services.model_preferences, "get_explicit", None))
+                else dict(services.model_preferences.items()).get(conversation_id)
+            },
+            operation=update_user_model,
+        )
         event_broker.publish("groups", "overview")
-        return {
-            "ok": True,
-            "scope": "group_user",
-            "group_id": group_id,
-            "user_id": user_id,
-            "profile": profile.name if profile is not None else None,
-        }
+        return mutation_payload(
+            result,
+            scope="group_user",
+            group_id=group_id,
+            user_id=user_id,
+            profile=profile.name if profile is not None else None,
+        )
 
     @router.get("/api/media")
     def media(
@@ -668,7 +939,44 @@ def register_admin(
             "cleanup": cleanup,
             "configured": True,
             "available": True,
+            "api_version": "v1",
+            "resource": "media",
+            "resource_version": control_store.version("media"),
         }
+
+    @router.put("/api/media/{media_id}/review")
+    def review_media(
+        media_id: int,
+        review: MediaReviewRequest,
+        mutation_info: AdminMutationContext = Depends(mutation_context),
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
+        authorize(authorization)
+        if media_id <= 0:
+            raise HTTPException(status_code=422, detail="媒体编号必须是正整数")
+        if review.state not in {"approved", "pending", "rejected"}:
+            raise HTTPException(status_code=422, detail="审核状态无效")
+        if services.media_library is None or not callable(
+            getattr(services.media_library, "set_review_state", None)
+        ):
+            raise HTTPException(status_code=503, detail="媒体审核服务不可用")
+        try:
+            result = mutate(
+                mutation_info,
+                "media",
+                action="media.review.set",
+                target=f"media#{media_id}",
+                before={"requested_state": review.state},
+                operation=lambda _version: services.media_library.set_review_state(
+                    media_id,
+                    review.state,
+                ),
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)[:500]) from None
+        event_broker.publish("media", "stickers", "overview")
+        reviewed = result.value if isinstance(result.value, dict) else {}
+        return mutation_payload(result, **reviewed)
 
     @router.get("/api/sources")
     def sources(
@@ -704,19 +1012,27 @@ def register_admin(
     @router.delete("/api/media/legacy-images")
     async def cleanup_legacy_images(
         confirmation: CleanupConfirmationRequest,
+        mutation_info: AdminMutationContext = Depends(mutation_context),
         authorization: Optional[str] = Header(default=None),
     ) -> dict[str, object]:
         authorize(authorization)
         if services.media_cleanup is None:
             raise HTTPException(status_code=503, detail="旧图片清理服务不可用")
         try:
-            report = services.media_cleanup.apply(
-                confirmation.confirmation_token,
+            result = mutate(
+                mutation_info,
+                "media",
+                action="media.legacy-cleanup",
+                target="legacy-images",
+                operation=lambda _version: services.media_cleanup.apply(
+                    confirmation.confirmation_token,
+                ),
             )
         except (OSError, RuntimeError, TypeError, ValueError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)[:500]) from None
         event_broker.publish("media", "overview")
-        return {"ok": True, **report}
+        report = result.value if isinstance(result.value, dict) else {}
+        return mutation_payload(result, **report)
 
     @router.get("/api/context-plans")
     def context_plans(
@@ -736,6 +1052,47 @@ def register_admin(
                 "error": str(exc)[:500],
             }
         return {"items": items, "configured": True, "available": True}
+
+    @router.get("/api/traces")
+    def traces(
+        limit: int = Query(default=100, ge=1, le=500),
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
+        authorize(authorization)
+        if services.turn_journal is None:
+            return versioned(
+                "traces",
+                {"items": [], "configured": False, "available": False},
+            )
+        try:
+            items = services.turn_journal.recent_trace_summaries(limit=limit)
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            return versioned(
+                "traces",
+                {
+                    "items": [],
+                    "configured": True,
+                    "available": False,
+                    "error": str(exc)[:500],
+                },
+            )
+        return versioned(
+            "traces",
+            {"items": items, "configured": True, "available": True},
+        )
+
+    @router.get("/api/audit")
+    def audit_log(
+        limit: int = Query(default=200, ge=1, le=500),
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
+        authorize(authorization)
+        return {
+            "api_version": "v1",
+            "persistent": control_store.persistent,
+            "items": control_store.audit(limit=limit),
+            "versions": control_store.versions(),
+        }
 
     @router.get(
         "/api/turn-replay/{scope_kind}/{scope_native_id}/{turn_ordinal}"
@@ -819,6 +1176,22 @@ def register_admin(
                 "items": traces,
             },
         }
+
+    legacy_api_prefix = f"{prefix}/api"
+    for route in tuple(router.routes):
+        if not isinstance(route, APIRoute) or not route.path.startswith(
+            f"{legacy_api_prefix}/"
+        ):
+            continue
+        router.add_api_route(
+            "/api/v1" + route.path.removeprefix(legacy_api_prefix),
+            route.endpoint,
+            methods=sorted(route.methods or {"GET"}),
+            name=f"v1_{route.name}",
+            response_class=route.response_class,
+            status_code=route.status_code,
+            include_in_schema=True,
+        )
 
     app.include_router(router)
 

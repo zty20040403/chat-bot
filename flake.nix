@@ -92,6 +92,19 @@
       pkgs = nixpkgs.legacyPackages.${system};
       pythonSet = mkPythonSet system;
       virtualenv = pythonSet.mkVirtualEnv "qq-deepseek-bot-env" workspace.deps.default;
+      adminUi = pkgs.buildNpmPackage {
+        pname = "kennethbot-admin-ui";
+        version = project.project.version;
+        src = ./admin-ui;
+        npmDepsHash = "sha256-PGl4iANG4eWAqH0cUAfJWm8avRuaP71tA8qsyjGyFGU=";
+        npmBuildScript = "build";
+        installPhase = ''
+          runHook preInstall
+          mkdir -p "$out/dist"
+          cp -R dist/. "$out/dist/"
+          runHook postInstall
+        '';
+      };
     in
       pkgs.stdenvNoCC.mkDerivation {
         pname = project.project.name;
@@ -105,6 +118,9 @@
 
           mkdir -p "$out/bin" "$out/share/qq-deepseek-bot"
           cp -R . "$out/share/qq-deepseek-bot"
+          mkdir -p "$out/share/qq-deepseek-bot/src/plugins/ai_chat/admin_ui_dist"
+          cp -R ${adminUi}/dist/. \
+            "$out/share/qq-deepseek-bot/src/plugins/ai_chat/admin_ui_dist/"
           makeWrapper ${virtualenv}/bin/python "$out/bin/qq-deepseek-bot" \
             --add-flags "$out/share/qq-deepseek-bot/bot.py" \
             --chdir "$out/share/qq-deepseek-bot" \
@@ -165,7 +181,7 @@
       virtualenv = pythonSet.mkVirtualEnv "qq-deepseek-bot-dev-env" workspace.deps.default;
     in {
       default = pkgs.mkShell {
-        packages = [virtualenv pkgs.uv];
+        packages = [virtualenv pkgs.uv pkgs.nodejs_22];
         env = {
           UV_NO_SYNC = "1";
           UV_PYTHON = pythonSet.python.interpreter;

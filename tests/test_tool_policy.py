@@ -9,12 +9,17 @@ nonebot.init()
 from src.plugins.ai_chat.tool_policy import (
     ToolCatalog,
     approval_from_user_text,
+    configure_tool_overrides,
+    enabled_tool_definitions,
     policy_for_tool,
+    set_tool_enabled,
 )
 
 
 class ToolPolicyTests(unittest.TestCase):
     def setUp(self) -> None:
+        configure_tool_overrides({})
+        self.addCleanup(configure_tool_overrides, {})
         self.catalog = ToolCatalog(
             [
                 {
@@ -100,6 +105,26 @@ class ToolPolicyTests(unittest.TestCase):
         )
         self.assertFalse(denied.allowed)
         self.assertTrue(allowed.allowed)
+
+    def test_disabled_tool_is_removed_from_model_catalog(self) -> None:
+        definitions = [
+            {
+                "type": "function",
+                "function": {"name": "web_search", "parameters": {"type": "object"}},
+            },
+            {
+                "type": "function",
+                "function": {"name": "context_search", "parameters": {"type": "object"}},
+            },
+        ]
+        set_tool_enabled("web_search", False)
+
+        enabled = enabled_tool_definitions(definitions)
+
+        self.assertEqual(
+            [item["function"]["name"] for item in enabled],
+            ["context_search"],
+        )
 
 
 if __name__ == "__main__":

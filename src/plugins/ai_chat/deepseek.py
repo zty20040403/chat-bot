@@ -18,7 +18,13 @@ from .config import settings
 from .llm_gateway import LLMConfigError, LLMGateway
 from .model_catalog import ModelCatalog, ModelProfile
 from .observability import current_trace_id, telemetry
-from .tool_policy import ToolApproval, ToolCatalog, ToolPolicy, policy_for_tool
+from .tool_policy import (
+    ToolApproval,
+    ToolCatalog,
+    ToolPolicy,
+    enabled_tool_definitions,
+    policy_for_tool,
+)
 
 ChatMessage = dict[str, Any]
 ToolExecutor = Callable[[str, dict[str, Any]], Awaitable[str]]
@@ -517,6 +523,9 @@ async def ask_deepseek_with_tools(
     loop_sequence = 0
     tool_context_chars = 0
     total_tool_calls = 0
+    tools = enabled_tool_definitions(tools)
+    if not tools:
+        next_tool_choice = "none"
     catalog = ToolCatalog(tools)
     stop_reason = "工具调用轮次已达到系统上限。"
     fingerprint_history: list[str] = []

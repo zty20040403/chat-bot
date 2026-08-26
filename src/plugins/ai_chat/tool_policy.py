@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import threading
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -239,10 +240,60 @@ def _policy_registry() -> dict[str, ToolPolicy]:
 
 TOOL_POLICIES = _policy_registry()
 DEFAULT_TOOL_POLICY = ToolPolicy()
+_TOOL_OVERRIDE_LOCK = threading.RLock()
+_TOOL_ENABLED_OVERRIDES: dict[str, bool] = {}
 
 
 def policy_for_tool(name: str) -> ToolPolicy:
     return TOOL_POLICIES.get(name, DEFAULT_TOOL_POLICY)
+
+
+def configure_tool_overrides(overrides: dict[str, bool]) -> None:
+    with _TOOL_OVERRIDE_LOCK:
+        _TOOL_ENABLED_OVERRIDES.clear()
+        _TOOL_ENABLED_OVERRIDES.update(
+            {
+                str(name): bool(enabled)
+                for name, enabled in overrides.items()
+                if str(name) in TOOL_POLICIES
+            }
+        )
+
+
+def set_tool_enabled(name: str, enabled: bool) -> None:
+    if name not in TOOL_POLICIES:
+        raise ValueError(f"unknown tool: {name}")
+    with _TOOL_OVERRIDE_LOCK:
+        _TOOL_ENABLED_OVERRIDES[name] = bool(enabled)
+
+
+def tool_enabled(name: str) -> bool:
+    with _TOOL_OVERRIDE_LOCK:
+        return _TOOL_ENABLED_OVERRIDES.get(name, True)
+
+
+def enabled_tool_definitions(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    enabled: list[dict[str, Any]] = []
+    for tool in tools:
+        function = tool.get("function")
+        name = function.get("name") if isinstance(function, dict) else None
+        if not isinstance(name, str) or tool_enabled(name):
+            enabled.append(tool)
+    return enabled
+
+
+def admin_tool_manifest() -> list[dict[str, Any]]:
+    with _TOOL_OVERRIDE_LOCK:
+        overrides = dict(_TOOL_ENABLED_OVERRIDES)
+    return [
+        {
+            "name": name,
+            "enabled": overrides.get(name, True),
+            "overridden": name in overrides,
+            **policy.as_manifest(),
+        }
+        for name, policy in sorted(TOOL_POLICIES.items())
+    ]
 
 
 def policy_manifest_for_tools(tools: list[dict[str, Any]]) -> dict[str, Any]:
@@ -252,7 +303,10 @@ def policy_manifest_for_tools(tools: list[dict[str, Any]]) -> dict[str, Any]:
         if isinstance(function, dict) and isinstance(function.get("name"), str):
             names.append(str(function["name"]))
     return {
-        name: policy_for_tool(name).as_manifest()
+        name: {
+            **policy_for_tool(name).as_manifest(),
+            "enabled": tool_enabled(name),
+        }
         for name in sorted(set(names))
     }
 

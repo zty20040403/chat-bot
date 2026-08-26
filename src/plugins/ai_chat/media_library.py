@@ -1149,6 +1149,66 @@ class MediaLibrary:
         finally:
             connection.close()
 
+    def set_review_state(self, media_id: int, state: str) -> dict[str, object]:
+        normalized = str(state).strip().lower()
+        safety_by_state = {
+            "approved": "safe",
+            "pending": "review",
+            "rejected": "blocked",
+        }
+        if normalized not in safety_by_state:
+            raise MediaLibraryError("media review state is invalid")
+        now = int(time.time())
+        connection = self.database.store_connection()
+        cursor = connection.cursor()
+        try:
+            row = cursor.execute(
+                """
+                SELECT media_id, is_sticker, contains_person,
+                       contains_private_info, safety
+                FROM media_analysis WHERE media_id = ?
+                """,
+                (int(media_id),),
+            ).fetchone()
+            if row is None:
+                raise MediaLibraryError("media item was not found")
+            safety = safety_by_state[normalized]
+            cursor.execute(
+                "UPDATE media_analysis SET safety = ?, analyzed_at = ? WHERE media_id = ?",
+                (safety, now, int(media_id)),
+            )
+            sendable = bool(row["is_sticker"]) and not bool(
+                row["contains_person"]
+            ) and not bool(row["contains_private_info"])
+            enabled = normalized == "approved" and sendable
+            banned = normalized == "rejected"
+            cursor.execute(
+                """
+                INSERT INTO sticker_library (
+                    media_id, enabled, banned, times_sent, created_at, updated_at
+                ) VALUES (?, ?, ?, 0, ?, ?)
+                ON CONFLICT(media_id) DO UPDATE SET
+                    enabled = EXCLUDED.enabled,
+                    banned = EXCLUDED.banned,
+                    updated_at = EXCLUDED.updated_at
+                """,
+                (int(media_id), int(enabled), int(banned), now, now),
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        return {
+            "media_id": int(media_id),
+            "review_state": normalized,
+            "safety": safety_by_state[normalized],
+            "sticker_enabled": enabled,
+            "sticker_banned": banned,
+            "sendable": sendable,
+        }
+
     def admin_snapshot(self, *, limit: int = 100) -> dict[str, object]:
         connection = self.database.store_connection()
         try:
