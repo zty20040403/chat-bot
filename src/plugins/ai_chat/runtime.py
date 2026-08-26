@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 import time
 from collections.abc import Awaitable, Callable, Sequence
@@ -55,9 +56,11 @@ from .semantic_recall import (
 from .skills import SkillRegistry
 from .stickers import configure_learned_sticker_state
 from .tasks import RunningTaskRegistry
+from .storage.jobs import DurableJobStore
 from .turn_journal import TurnJournal
 from .voice import RecentVoiceStore
 from .vision_worker import VisionWorker
+from .workers.durable_jobs import DurableJobWorker
 
 
 class RuntimeLogger(Protocol):
@@ -104,6 +107,8 @@ class AppContext:
     pin_store: PinStore | None = None
     reminder_store: ReminderStore | None = None
     delivery_store: DeliveryStore | None = None
+    job_store: DurableJobStore | None = None
+    job_worker: DurableJobWorker | None = None
     mirror_state: MirrorStateStore | None = None
     bridge_manager: BridgeManager | None = None
     usage_store: UsageStore | None = None
@@ -159,6 +164,7 @@ class AppContext:
             ("pin store", self.pin_store),
             ("reminder store", self.reminder_store),
             ("delivery store", self.delivery_store),
+            ("durable job store", self.job_store),
             ("usage store", self.usage_store),
             ("semantic index state", self.semantic_index_state),
             ("maintenance state", self.maintenance_state),
@@ -627,6 +633,40 @@ def build_app_context(
             warning=logger.warning,
         )
 
+    job_store: DurableJobStore | None = None
+    job_worker: DurableJobWorker | None = None
+    if settings.durable_jobs_enabled:
+        try:
+            job_store = DurableJobStore(
+                store_source("durable_jobs.sqlite3"),
+                lease_seconds=settings.durable_job_lease_seconds,
+                default_max_attempts=settings.durable_job_max_attempts,
+            )
+            job_worker = DurableJobWorker(
+                job_store,
+                logger=logger,
+                poll_seconds=settings.durable_job_poll_seconds,
+                concurrency=settings.durable_job_concurrency,
+            )
+            if media_library is not None:
+                async def index_stickers(_job):
+                    queued = await asyncio.to_thread(
+                        media_library.enqueue_sticker_embeddings
+                    )
+                    return {"queued": queued}
+
+                job_worker.register("media.index_stickers", index_stickers)
+            if job_store.recovered_jobs:
+                logger.warning(
+                    f"Recovered {job_store.recovered_jobs} expired durable job lease(s)."
+                )
+        except (OSError, RuntimeError, sqlite3.Error, DatabaseError) as exc:
+            if job_store is not None:
+                job_store.close()
+            job_store = None
+            job_worker = None
+            logger.error(f"Durable application job queue could not be opened: {exc}")
+
     return AppContext(
         settings=settings,
         state_dir=state_dir,
@@ -659,6 +699,8 @@ def build_app_context(
         pin_store=pin_store,
         reminder_store=reminder_store,
         delivery_store=delivery_store,
+        job_store=job_store,
+        job_worker=job_worker,
         mirror_state=mirror_state,
         bridge_manager=bridge_manager,
         usage_store=usage_store,

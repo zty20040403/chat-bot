@@ -33,10 +33,10 @@ from nonebot.message import event_preprocessor
 from nonebot.params import CommandArg
 
 from .agent_tools import AGENT_TOOL_PROMPT, AgentToolExecutor
+from .adapters import OneBotIngestAdapter
 from .bootstrap import register_http_surfaces
 from .bridges import (
     BridgeError,
-    BridgeEvent,
     BridgeOutcomeUnknown,
     BridgePermanentError,
     BridgeRetryableError,
@@ -136,6 +136,7 @@ from .ocr import (
 )
 from .reminders import Reminder
 from .runtime import build_app_context
+from .application import ChatOrchestrator, ChatPorts, ChatTurnResult
 from .semantic_recall import (
     SemanticDocument,
 )
@@ -201,7 +202,7 @@ from .matchers import (
 SEND_RETRY_DELAY_SECONDS = 2.0
 SEND_RETRY_MAX_CHARS = 800
 TURN_PROMPT_VERSION = "qqbot-turn-v10"
-BOT_VERSION = "0.5.30"
+BOT_VERSION = "0.6.0"
 EMPTY_MENTION_FOLLOW_UP = "你觉得呢"
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 proactive_check_gate = ProactiveCheckGate()
@@ -239,6 +240,8 @@ self_source = app_context.self_source
 skill_registry = app_context.skill_registry
 reminder_store = app_context.reminder_store
 delivery_store = app_context.delivery_store
+job_store = app_context.job_store
+job_worker = app_context.job_worker
 bridge_router = app_context.bridge_router
 mirror_state = app_context.mirror_state
 bridge_manager = app_context.bridge_manager
@@ -315,11 +318,7 @@ register_http_surfaces(
 )
 
 
-@dataclass(frozen=True)
-class TrackedAIResult:
-    reply: Message | str
-    turn_id: int | None
-    status: str = "succeeded"
+TrackedAIResult = ChatTurnResult
 
 
 def _conversation_scope(event: MessageEvent) -> ConversationScope:
@@ -2664,57 +2663,51 @@ async def _ask_ai(
     return reply
 
 
-def _finish_turn_record(
-    turn_id: int | None,
-    status: str,
-    trace: DeepSeekTrace | None,
-    final_text: str = "",
-    *,
-    scope_key: str = "",
-) -> None:
-    if turn_journal is not None and turn_id is not None:
-        try:
-            turn_journal.finish_turn(
+def _record_turn_trigger(event: MessageEvent, scope: ConversationScope) -> int:
+    if message_ledger is None:
+        raise RuntimeError("canonical message ledger is unavailable")
+    return record_onebot_event(
+        message_ledger,
+        event,
+        scope=scope,
+    ).canonical_message_id
+
+
+def _build_chat_orchestrator() -> ChatOrchestrator:
+    """Bind current runtime ports; tests and hot overrides stay source-compatible."""
+    return ChatOrchestrator(
+        ports=ChatPorts(
+            conversation_id=_conversation_id,
+            conversation_scope=_conversation_scope,
+            is_group_event=lambda event: isinstance(event, GroupMessageEvent),
+            group_id=lambda event: (
+                event.group_id if isinstance(event, GroupMessageEvent) else None
+            ),
+            group_enabled=_is_group_enabled,
+            group_default_profile=_group_default_model_preference,
+            reply_target_turn=_reply_target_turn,
+            record_trigger=_record_turn_trigger,
+            current_turn_context=lambda event, turn_id: _current_turn_context(
+                event,
                 turn_id,
-                status=status,  # type: ignore[arg-type]
-                final_text=final_text,
-                trace_payload=trace.to_payload() if trace is not None else None,
-                input_tokens=trace.input_tokens if trace is not None else 0,
-                output_tokens=trace.output_tokens if trace is not None else 0,
-                total_tokens=trace.total_tokens if trace is not None else 0,
-            )
-        except (
-            OSError,
-            RuntimeError,
-            ValueError,
-            sqlite3.Error,
-            DatabaseError,
-        ) as exc:
-            logger.warning(f"Could not finish durable turn {turn_id}: {exc}")
-    if (
-        usage_store is not None
-        and trace is not None
-        and scope_key
-        and (trace.input_tokens > 0 or trace.output_tokens > 0)
-    ):
-        try:
-            usage_store.record(
-                scope_key=scope_key,
-                source="turn",
-                provider=trace.provider,
-                model=trace.model,
-                input_tokens=trace.input_tokens,
-                output_tokens=trace.output_tokens,
-                turn_id=turn_id,
-            )
-        except (
-            OSError,
-            RuntimeError,
-            ValueError,
-            sqlite3.Error,
-            DatabaseError,
-        ) as exc:
-            logger.warning(f"Could not record model usage: {exc}")
+                include_recent=False,
+            ),
+            drain_feedback=_drain_task_feedback,
+            ask_agent=_ask_ai,
+            is_silence_reply=lambda reply: (
+                isinstance(reply, str) and plan_reply(reply).silence
+            ),
+            journal_reply_text=lambda reply: _journal_reply_text(reply),
+        ),
+        running_tasks=running_tasks,
+        model_preferences=model_preferences,
+        model_catalog=model_profiles,
+        message_ledger=message_ledger,
+        turn_journal=turn_journal,
+        usage_store=usage_store,
+        logger=logger,
+        prompt_version=TURN_PROMPT_VERSION,
+    )
 
 
 @observed_ai_turn
@@ -2724,164 +2717,12 @@ async def _run_tracked_ai(
     user_text: str,
     **kwargs: Any,
 ) -> TrackedAIResult | None:
-    conversation_id = _conversation_id(event)
-    scope = _conversation_scope(event)
-    stream_context = kwargs.pop("_stream_context", None)
-    if usage_store is not None:
-        quota = usage_store.status(scope.key)
-        if not quota.allowed:
-            return TrackedAIResult(
-                reply=(
-                    "今天这个会话的模型额度已经用完了。"
-                    "可以在本机管理页调整配额，或者明天再继续。"
-                ),
-                turn_id=None,
-                status="succeeded",
-            )
-    info = running_tasks.register_current(
-        conversation_id=conversation_id,
-        user_id=event.user_id,
-        group_id=(
-            event.group_id if isinstance(event, GroupMessageEvent) else None
-        ),
-        message_id=event.message_id,
-        summary=user_text,
-    )
-    kwargs.setdefault(
-        "feedback_provider",
-        lambda: _drain_task_feedback(info.task_id),
-    )
-    journal_turn_id: int | None = None
-    trace: DeepSeekTrace | None = None
-    explicit_profile = model_preferences.get_explicit(conversation_id)
-    group_default_profile = _group_default_model_preference(conversation_id)
-    selected_profile = model_profiles.resolve_preference(
-        explicit_profile or group_default_profile
-    )
-    if explicit_profile is None and group_default_profile is None:
-        previous_turn = _reply_target_turn(event)
-        if previous_turn is not None:
-            inherited_profile = model_profiles.find_runtime(
-                profile=previous_turn.profile,
-                provider=previous_turn.provider,
-                model=previous_turn.model,
-            )
-            if inherited_profile is not None:
-                selected_profile = inherited_profile
-    kwargs.setdefault("selected_profile_override", selected_profile)
-    if usage_store is not None:
-        trace = DeepSeekTrace(
-            provider=selected_profile.provider_identity,
-            model=selected_profile.model,
-            profile=selected_profile.name,
-        )
-        kwargs.setdefault("turn_trace", trace)
-    journal_scope_enabled = not isinstance(
+    return await _build_chat_orchestrator().run(
+        bot,
         event,
-        GroupMessageEvent,
-    ) or _is_group_enabled(event.group_id)
-    if (
-        turn_journal is not None
-        and message_ledger is not None
-        and journal_scope_enabled
-    ):
-        trigger_message_id = message_ledger.canonical_id_for_native(
-            scope,
-            event.message_id,
-        )
-        if trigger_message_id is None:
-            try:
-                stored_trigger = record_onebot_event(
-                    message_ledger,
-                    event,
-                    scope=scope,
-                )
-                trigger_message_id = stored_trigger.canonical_message_id
-            except (
-                OSError,
-                RuntimeError,
-                ValueError,
-                sqlite3.Error,
-                DatabaseError,
-            ) as exc:
-                logger.warning(f"Could not journal the turn trigger: {exc}")
-        try:
-            turn = turn_journal.start_turn(
-                scope,
-                trigger_canonical_message_id=trigger_message_id,
-                objective=user_text,
-                provider=selected_profile.provider_identity,
-                model=selected_profile.model,
-                profile=selected_profile.name,
-                prompt_version=TURN_PROMPT_VERSION,
-            )
-            journal_turn_id = turn.turn_id
-            if trace is None:
-                trace = DeepSeekTrace(
-                    provider=selected_profile.provider_identity,
-                    model=selected_profile.model,
-                    profile=selected_profile.name,
-                )
-            kwargs.setdefault("journal_turn_id", journal_turn_id)
-            kwargs.setdefault("turn_trace", trace)
-            kwargs.setdefault(
-                "turn_context",
-                _current_turn_context(
-                    event,
-                    journal_turn_id,
-                    include_recent=False,
-                ),
-            )
-        except (
-            OSError,
-            RuntimeError,
-            ValueError,
-            sqlite3.Error,
-            DatabaseError,
-        ) as exc:
-            logger.warning(f"Could not start the durable AI turn: {exc}")
-    if isinstance(stream_context, dict):
-        stream_context["turn_id"] = journal_turn_id
-    try:
-        reply = await _ask_ai(bot, event, user_text, **kwargs)
-        status = (
-            "silence"
-            if isinstance(reply, str) and plan_reply(reply).silence
-            else "succeeded"
-        )
-        _finish_turn_record(
-            journal_turn_id,
-            status,
-            trace,
-            _journal_reply_text(reply),
-            scope_key=scope.key,
-        )
-        return TrackedAIResult(
-            reply=reply,
-            turn_id=journal_turn_id,
-            status=status,
-        )
-    except asyncio.CancelledError:
-        logger.info(
-            f"AI task {info.task_id} cancelled for {conversation_id}."
-        )
-        _finish_turn_record(
-            journal_turn_id,
-            "aborted",
-            trace,
-            scope_key=scope.key,
-        )
-        return None
-    except Exception:
-        _finish_turn_record(
-            journal_turn_id,
-            "crashed",
-            trace,
-            scope_key=scope.key,
-        )
-        raise
-    finally:
-        running_tasks.finish(info.task_id)
+        user_text,
+        **kwargs,
+    )
 
 
 async def _finish_tracked_ai(
@@ -3998,17 +3839,26 @@ async def _dream_loop() -> None:
 
 @driver.on_startup
 async def start_background_tasks() -> None:
-    if media_library is not None:
+    if job_store is not None and media_library is not None:
         try:
-            queued = await asyncio.to_thread(
-                media_library.enqueue_sticker_embeddings
+            _job, created = await asyncio.to_thread(
+                job_store.enqueue,
+                kind="media.index_stickers",
+                idempotency_key="media.index_stickers:v1",
+                scope_key="system",
             )
-            if queued:
-                logger.info(
-                    f"Queued {queued} existing sticker(s) for global search indexing."
-                )
+            if created:
+                logger.info("Scheduled restart-safe sticker search indexing.")
         except (OSError, RuntimeError, DatabaseError) as exc:
-            logger.warning(f"Could not backfill global sticker search index: {exc}")
+            logger.warning(f"Could not schedule global sticker search indexing: {exc}")
+    if job_worker is not None and background_tasks.start(
+        "durable-jobs",
+        job_worker.run_forever,
+    ):
+        logger.info(
+            "PostgreSQL durable application worker enabled for "
+            f"{', '.join(job_worker.registered_kinds) or 'registered jobs'}."
+        )
     if media_library is not None and background_tasks.start(
         "media-library",
         media_library.run_forever,
@@ -4765,147 +4615,34 @@ async def handle_mention_ai(bot: Bot, event: MessageEvent) -> None:
     )
 
 
+onebot_ingest_adapter = OneBotIngestAdapter(
+    group_enabled=_is_group_enabled,
+    canonical_scope=_conversation_scope,
+    image_cache_key=_image_cache_key,
+    voice_cache_key=_voice_cache_key,
+    ocr_max_images=settings.ocr_max_images,
+    logger=logger,
+    message_ledger=message_ledger,
+    delivery_store=delivery_store,
+    bridge_router=bridge_router,
+    mirror_state=mirror_state,
+    bridge_manager=bridge_manager,
+    media_library=media_library,
+    source_store=source_store,
+    user_profiles=user_profiles,
+    recent_images=recent_images,
+    recent_voices=recent_voices,
+)
+
+
 @canonical_ingest_tracker.handle()
 async def handle_canonical_ingest(event: MessageEvent) -> None:
-    if (
-        isinstance(event, GroupMessageEvent)
-        and not _is_group_enabled(event.group_id)
-    ):
-        return
-    physical_scope = scope_from_event(event)
-    decoded = decode_onebot_message(event.original_message)
-    reconciled_delivery: Delivery | None = None
-    if delivery_store is not None and event.user_id == event.self_id:
-        try:
-            reconciled_delivery = delivery_store.reconcile_echo(
-                physical_scope,
-                decoded.body,
-                native_message_id=event.message_id,
-                reply_to_native_message_id=(
-                    decoded.reply_to_native_message_id
-                ),
-                observed_at=int(event.time),
-            )
-            if reconciled_delivery is not None and mirror_state is not None:
-                mirror_state.confirm_delivery(
-                    reconciled_delivery.delivery_id,
-                    str(event.message_id),
-                    confirmed_at=int(event.time),
-                )
-        except (
-            OSError,
-            RuntimeError,
-            ValueError,
-            sqlite3.Error,
-            DatabaseError,
-        ) as exc:
-            logger.warning(f"Outbound echo reconciliation failed: {exc}")
-    if message_ledger is None:
-        return
-    try:
-        if (
-            bridge_manager is not None
-            and bridge_router.bundle_for(physical_scope) is not None
-            and event.user_id != event.self_id
-        ):
-            sender = getattr(event, "sender", None)
-            sender_name = str(
-                getattr(sender, "card", "")
-                or getattr(sender, "nickname", "")
-                or "群成员"
-            )
-            plain = event.original_message.extract_plain_text().strip()
-            bridge_manager.ingest(
-                BridgeEvent(
-                    scope=physical_scope,
-                    native_event_id=str(event.message_id),
-                    sender_native_user_id=str(event.user_id),
-                    sender_display=sender_name,
-                    body=decoded.body,
-                    occurred_at=int(event.time),
-                    reply_to_native_message_id=(
-                        decoded.reply_to_native_message_id
-                    ),
-                    message_kind=("command" if plain.startswith("/") else "chat"),
-                    raw_event={"source": "onebot-event"},
-                )
-            )
-            return
-        is_mirror_echo = bool(
-            reconciled_delivery is not None
-            and mirror_state is not None
-            and mirror_state.is_mirror_delivery(reconciled_delivery.delivery_id)
-        )
-        if is_mirror_echo:
-            return
-        stored = record_onebot_event(
-            message_ledger,
-            event,
-            scope=_conversation_scope(event),
-        )
-        if media_library is not None and event.user_id != event.self_id:
-            media_library.ingest_message(
-                physical_scope,
-                native_message_id=event.message_id,
-                sender_native_user_id=event.user_id,
-                segments=[
-                    {"type": segment.type, "data": dict(segment.data)}
-                    for segment in event.original_message
-                ],
-                canonical_message_id=stored.canonical_message_id,
-                occurred_at=int(event.time),
-            )
-        if source_store is not None and event.user_id != event.self_id:
-            source_store.ingest_message(
-                physical_scope,
-                body=decoded.body,
-                native_message_id=event.message_id,
-                sender_native_user_id=event.user_id,
-                canonical_message_id=stored.canonical_message_id,
-                occurred_at=int(event.time),
-            )
-        if event.user_id == event.self_id and bridge_manager is not None:
-            bridge_manager.mirror_local_outgoing(
-                source_scope=physical_scope,
-                source_native_event_id=str(event.message_id),
-                canonical_message_id=stored.canonical_message_id,
-                body=decoded.body,
-                occurred_at=int(event.time),
-                reply_to_native_message_id=decoded.reply_to_native_message_id,
-            )
-    except (
-        OSError,
-        RuntimeError,
-        ValueError,
-        sqlite3.Error,
-        DatabaseError,
-    ) as exc:
-        logger.warning(f"Canonical message ingest failed: {exc}")
+    await onebot_ingest_adapter.ingest(event)
 
 
 @group_activity_tracker.handle()
 async def handle_group_activity(event: MessageEvent) -> None:
-    if not isinstance(event, GroupMessageEvent):
-        return
-    if event.user_id == event.self_id:
-        return
-    if not _is_group_enabled(event.group_id):
-        return
-
-    user_profiles.observe(
-        event.group_id,
-        event.user_id,
-        nickname=event.sender.nickname or "",
-        card=event.sender.card or "",
-    )
-    sources = image_sources(
-        event.original_message,
-        max_images=settings.ocr_max_images,
-    )
-    if sources:
-        recent_images.record(_image_cache_key(event), sources)
-    if contains_voice(event.original_message):
-        recent_voices.record(_voice_cache_key(event), event.message_id)
+    await onebot_ingest_adapter.observe_group_activity(event)
 
 
 @image_auto_description.handle()

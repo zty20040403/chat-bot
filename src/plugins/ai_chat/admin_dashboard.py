@@ -279,6 +279,10 @@ _DASHBOARD_TEMPLATE = r"""<!doctype html>
           <div class="table-wrap"><table><thead><tr>
             <th>任务</th><th>会话</th><th>摘要</th><th>耗时</th><th>操作</th>
           </tr></thead><tbody id="task-body"></tbody></table></div>
+          <div class="section-heading compact-heading"><div><h2>持久任务队列</h2><p>由 PostgreSQL 保存，Bot 重启后继续执行</p></div><span class="count-label" id="job-count">0 条</span></div>
+          <div class="table-wrap"><table><thead><tr>
+            <th>任务</th><th>类型</th><th>范围</th><th>状态</th><th>尝试</th><th>更新时间</th><th>操作</th>
+          </tr></thead><tbody id="job-body"></tbody></table></div>
         </section>
 
         <section class="view" id="deliveries" hidden>
@@ -1129,6 +1133,7 @@ const state = {
   deliveries: [],
   usage: [],
   tasks: [],
+  jobs: { items: [], counts: {} },
   sandboxes: { items: [] },
   stickers: { counts: {}, items: [] },
   media: { counts: {}, items: [], jobs: [] },
@@ -1596,6 +1601,20 @@ function renderTasks() {
       `<td><code>${esc(item.conversation_id)}</code></td><td><span class="truncate-cell" title="${esc(item.summary)}">${esc(item.summary)}</span></td>` +
       `<td>${esc(fmtDuration(item.elapsed_seconds))}</td><td><button class="table-action" type="button" data-kill="${esc(item.task_id)}">${icon('square')}停止</button></td></tr>`).join('')
     : emptyRow(5, '当前没有运行任务');
+  const jobs = state.jobs.items || [];
+  document.querySelector('#job-count').textContent = `${number(jobs.length)} 条`;
+  document.querySelector('#job-body').innerHTML = jobs.length
+    ? jobs.map((item) => {
+      const canCancel = ['pending', 'failed'].includes(item.status);
+      const canRetry = ['failed', 'cancelled'].includes(item.status);
+      const actions = `${canRetry ? `<button class="table-action" type="button" data-retry-job="${number(item.job_id)}">${icon('refresh')}重试</button>` : ''}` +
+        `${canCancel ? `<button class="table-action danger" type="button" data-cancel-job="${number(item.job_id)}">${icon('square')}取消</button>` : ''}`;
+      return `<tr><td><code>${esc(item.handle)}</code></td><td><code>${esc(item.kind)}</code></td>` +
+        `<td><span class="truncate-cell" title="${esc(item.scope_key)}">${esc(item.scope_key || 'system')}</span></td>` +
+        `<td>${statusBadge(item.status)}</td><td>${number(item.attempts)} / ${number(item.max_attempts)}</td>` +
+        `<td>${esc(fmt(item.updated_at))}</td><td>${actions || '<span class="subtle">完成</span>'}</td></tr>`;
+    }).join('')
+    : emptyRow(7, '当前没有持久任务');
 }
 
 function renderDeliveries() {
@@ -2052,6 +2071,7 @@ function resourcePath(resource) {
     deliveries: '/deliveries',
     usage: `/usage?days=${state.usageDays}`,
     tasks: '/tasks',
+    jobs: '/jobs',
     sandboxes: '/sandboxes',
     stickers: '/stickers',
     media: '/media',
@@ -2082,6 +2102,10 @@ function applyResource(resource, payload, { force = false } = {}) {
     drawChart();
   } else if (resource === 'tasks') {
     state.tasks = payload.items || [];
+    renderTasks();
+    renderOverview();
+  } else if (resource === 'jobs') {
+    state.jobs = payload;
     renderTasks();
     renderOverview();
   } else if (resource === 'sandboxes') {
@@ -2136,12 +2160,13 @@ async function load() {
   setLoading(true);
   clearError();
   try {
-    const [overview, observability, deliveries, usage, tasks, sandboxes, stickers, media, sources, databases, groups, contextPlans] = await Promise.all([
+    const [overview, observability, deliveries, usage, tasks, jobs, sandboxes, stickers, media, sources, databases, groups, contextPlans] = await Promise.all([
       api('/overview'),
       api('/observability'),
       api('/deliveries'),
       api(`/usage?days=${state.usageDays}`),
       api('/tasks'),
+      api('/jobs'),
       api('/sandboxes'),
       api('/stickers'),
       api('/media'),
@@ -2155,6 +2180,7 @@ async function load() {
     state.deliveries = deliveries.items || [];
     state.usage = usage.items || [];
     state.tasks = tasks.items || [];
+    state.jobs = jobs;
     state.sandboxes = sandboxes;
     state.stickers = stickers;
     state.media = media;
@@ -2164,7 +2190,7 @@ async function load() {
     state.contextPlans = contextPlans;
     chartRows = state.usage;
     const loadedAt = Date.now();
-    ['overview', 'observability', 'deliveries', 'usage', 'tasks', 'sandboxes', 'stickers', 'media', 'sources', 'databases', 'groups', 'contextPlans'].forEach((resource) => {
+    ['overview', 'observability', 'deliveries', 'usage', 'tasks', 'jobs', 'sandboxes', 'stickers', 'media', 'sources', 'databases', 'groups', 'contextPlans'].forEach((resource) => {
       refreshedAt[resource] = loadedAt;
     });
     renderAll();
@@ -2185,6 +2211,7 @@ const resourceIntervals = {
   deliveries: 3000,
   usage: 30000,
   tasks: 3000,
+  jobs: 3000,
   sandboxes: 5000,
   stickers: 10000,
   media: 10000,
@@ -2199,7 +2226,7 @@ const viewResources = {
   observability: ['observability'],
   deliveries: ['deliveries'],
   usage: ['usage'],
-  tasks: ['tasks'],
+  tasks: ['tasks', 'jobs'],
   sandboxes: ['sandboxes'],
   stickers: ['stickers'],
   media: ['media'],
@@ -2451,6 +2478,18 @@ document.addEventListener('click', (event) => {
   if (kill) runAction(
     () => api(`/tasks/${encodeURIComponent(kill.dataset.kill)}/cancel`, { method: 'POST' }),
     ['tasks', 'overview']
+  );
+
+  const retryJob = event.target.closest('[data-retry-job]');
+  if (retryJob) runAction(
+    () => api(`/jobs/${encodeURIComponent(retryJob.dataset.retryJob)}/retry`, { method: 'POST' }),
+    ['jobs', 'overview']
+  );
+
+  const cancelJob = event.target.closest('[data-cancel-job]');
+  if (cancelJob) runAction(
+    () => api(`/jobs/${encodeURIComponent(cancelJob.dataset.cancelJob)}/cancel`, { method: 'POST' }),
+    ['jobs', 'overview']
   );
 });
 

@@ -41,6 +41,7 @@ from src.plugins.ai_chat.semantic_recall import (
     SemanticDocument,
     SemanticIndexState,
 )
+from src.plugins.ai_chat.storage.jobs import DurableJobStore
 from src.plugins.ai_chat.turn_journal import TurnJournal
 
 
@@ -228,7 +229,9 @@ class PostgresIntegrationTests(unittest.TestCase):
         semantic_state = SemanticIndexState(self.database)
         maintenance = MaintenanceState(self.database)
         journal = TurnJournal(self.database)
+        jobs = DurableJobStore(self.database, lease_seconds=30)
         stores = (
+            jobs,
             journal,
             maintenance,
             semantic_state,
@@ -300,6 +303,31 @@ class PostgresIntegrationTests(unittest.TestCase):
                 deliveries.mark_committed(
                     delivery.delivery_id,
                     native_message_id="sent-1",
+                    now=101,
+                )
+            )
+
+            job, created = jobs.enqueue(
+                kind="integration.verify",
+                idempotency_key="integration:job:1",
+                payload={"schema": TEST_SCHEMA},
+                scope_key=scope.key,
+                now=100,
+            )
+            self.assertTrue(created)
+            duplicate, duplicate_created = jobs.enqueue(
+                kind="integration.verify",
+                idempotency_key="integration:job:1",
+                now=100,
+            )
+            self.assertFalse(duplicate_created)
+            self.assertEqual(duplicate.job_id, job.job_id)
+            claimed_job = jobs.claim_due("integration-worker", now=100)[0]
+            self.assertTrue(
+                jobs.mark_succeeded(
+                    claimed_job.job_id,
+                    "integration-worker",
+                    result={"ok": True},
                     now=101,
                 )
             )

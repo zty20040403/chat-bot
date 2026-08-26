@@ -196,6 +196,11 @@ class Settings:
     outbox_check_seconds: int
     outbox_lease_seconds: int
     outbox_max_attempts: int
+    durable_jobs_enabled: bool
+    durable_job_poll_seconds: float
+    durable_job_lease_seconds: int
+    durable_job_max_attempts: int
+    durable_job_concurrency: int
     quota_enabled: bool
     quota_daily_calls: int
     quota_daily_input_tokens: int
@@ -598,6 +603,23 @@ class Settings:
             outbox_max_attempts=min(
                 max(_get_int("AI_OUTBOX_MAX_ATTEMPTS", 5), 1),
                 50,
+            ),
+            durable_jobs_enabled=_get_bool("AI_DURABLE_JOBS_ENABLED", True),
+            durable_job_poll_seconds=max(
+                _get_float("AI_DURABLE_JOB_POLL_SECONDS", 2.0),
+                0.1,
+            ),
+            durable_job_lease_seconds=min(
+                max(_get_int("AI_DURABLE_JOB_LEASE_SECONDS", 300), 10),
+                3600,
+            ),
+            durable_job_max_attempts=min(
+                max(_get_int("AI_DURABLE_JOB_MAX_ATTEMPTS", 3), 1),
+                50,
+            ),
+            durable_job_concurrency=min(
+                max(_get_int("AI_DURABLE_JOB_CONCURRENCY", 2), 1),
+                32,
             ),
             quota_enabled=_get_bool("AI_QUOTA_ENABLED", True),
             quota_daily_calls=max(

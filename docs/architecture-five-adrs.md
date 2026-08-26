@@ -158,3 +158,23 @@ state_blobs                            长期记忆、模型选择等小型状�
 
 `AI_STATE_DIR/browser_profiles`、沙盒目录和缓存仍在 h610 本地，但不是权威业务数据。
 旧 `.sqlite3`/JSON 文件只允许迁移程序读取，详见 `postgresql-migration.md`。
+
+## 第五阶段：模块边界与持久任务
+
+运行时现在明确分成六个职责边界：
+
+- `adapters/`：把 OneBot 事件翻译成内部输入。
+- `application/`：编排对话回合、额度、模型选择、Journal 和用量统计。
+- `agent/`：向 Application 暴露 Agent Loop 契约。
+- `tools/`：提供工具能力目录边界。
+- `storage/`：保存 `durable_jobs` 等可恢复应用状态。
+- `workers/`：租用并执行持久任务，不依赖聊天平台 SDK。
+
+`runtime.py` 仍是唯一 Composition Root。Matcher 可以调用 Adapter 和
+Application，但 Application、Storage、Workers 不能导入 NoneBot；架构测试会持续
+检查这一规则。
+
+通用任务队列依靠 PostgreSQL 行租约和幂等键运行。多个 Bot 实例通过
+`FOR UPDATE SKIP LOCKED` 安全领取任务；进程中断后，过期租约会自动回到等待状态。
+因此每个 Handler 都必须可重复执行。首个迁移任务是全局表情搜索索引回填，媒体和
+投递现有专用队列会保持兼容，再按风险逐步迁入。

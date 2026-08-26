@@ -27,6 +27,7 @@ class AdminServices:
     delivery_store: Any = None
     usage_store: Any = None
     running_tasks: Any = None
+    job_store: Any = None
     bridge_router: Any = None
     bridge_state: Any = None
     browser_manager: Any = None
@@ -144,11 +145,17 @@ def register_admin(
             if services.running_tasks is not None
             else 0
         )
+        durable_jobs = (
+            services.job_store.stats()
+            if services.job_store is not None
+            else {}
+        )
         return {
             "version": services.version,
             "uptime_seconds": max(int(time.time()) - services.started_at, 0),
             "deliveries": deliveries,
             "running_tasks": tasks,
+            "durable_jobs": durable_jobs,
             "background_tasks": (
                 {
                     "running": list(services.background_tasks.running()),
@@ -354,6 +361,69 @@ def register_admin(
             raise HTTPException(status_code=404, detail="task not found")
         event_broker.publish("tasks", "overview")
         return {"ok": True, "task_id": task_id}
+
+    @router.get("/api/jobs")
+    def durable_jobs(
+        limit: int = Query(default=100, ge=1, le=500),
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
+        authorize(authorization)
+        if services.job_store is None:
+            return {"items": [], "counts": {}, "configured": False}
+        return {
+            "items": [
+                {
+                    "job_id": item.job_id,
+                    "handle": item.handle,
+                    "kind": item.kind,
+                    "scope_key": item.scope_key,
+                    "status": item.status,
+                    "priority": item.priority,
+                    "attempts": item.attempts,
+                    "max_attempts": item.max_attempts,
+                    "next_attempt_at": item.next_attempt_at,
+                    "lease_owner": item.lease_owner,
+                    "lease_until": item.lease_until,
+                    "last_error": item.last_error,
+                    "created_at": item.created_at,
+                    "updated_at": item.updated_at,
+                    "finished_at": item.finished_at,
+                }
+                for item in services.job_store.recent_summaries(limit=limit)
+            ],
+            "counts": services.job_store.stats(),
+            "configured": True,
+        }
+
+    @router.post("/api/jobs/{job_id}/cancel")
+    def cancel_durable_job(
+        job_id: int,
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
+        authorize(authorization)
+        changed = bool(
+            services.job_store is not None
+            and services.job_store.cancel(job_id)
+        )
+        if not changed:
+            raise HTTPException(status_code=404, detail="job is not cancellable")
+        event_broker.publish("jobs", "overview")
+        return {"ok": True, "job_id": job_id}
+
+    @router.post("/api/jobs/{job_id}/retry")
+    def retry_durable_job(
+        job_id: int,
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
+        authorize(authorization)
+        changed = bool(
+            services.job_store is not None
+            and services.job_store.requeue(job_id)
+        )
+        if not changed:
+            raise HTTPException(status_code=404, detail="job is not retryable")
+        event_broker.publish("jobs", "overview")
+        return {"ok": True, "job_id": job_id}
 
     @router.get("/api/sandboxes")
     async def sandboxes(
