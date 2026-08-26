@@ -31,7 +31,7 @@ export const RESOURCE_PATHS: Record<ResourceName, string> = {
   overview: '/overview',
   observability: '/observability',
   deliveries: '/deliveries',
-  usage: '/usage',
+  usage: '/usage?days=90',
   tasks: '/tasks',
   jobs: '/jobs',
   sandboxes: '/sandboxes',

@@ -35,6 +35,7 @@ export function useControlPlane(runtime: KennethbotAdminRuntime) {
   const [loading, setLoading] = useState<Set<ResourceName>>(new Set())
   const [online, setOnline] = useState(false)
   const [error, setError] = useState('')
+  const [updatedAt, setUpdatedAt] = useState(0)
   const eventSequence = useRef(0)
   const client = useMemo(() => new AdminClient(runtime, token), [runtime, token])
   const authenticated = !runtime.requiresToken || Boolean(token)
@@ -64,6 +65,7 @@ export function useControlPlane(runtime: KennethbotAdminRuntime) {
           }))
         }
         setOnline(true)
+        setUpdatedAt(Date.now())
         setError('')
       } catch (reason) {
         if (signal?.aborted) return
@@ -90,6 +92,7 @@ export function useControlPlane(runtime: KennethbotAdminRuntime) {
     },
     [refresh],
   )
+  const refreshAll = useCallback(() => refreshMany(INITIAL_RESOURCES), [refreshMany])
 
   useEffect(() => {
     if (!authenticated) return
@@ -132,8 +135,8 @@ export function useControlPlane(runtime: KennethbotAdminRuntime) {
   useEffect(() => {
     if (!authenticated) return
     const timer = window.setInterval(() => {
-      void refreshMany(['overview', 'observability', 'databases'])
-    }, 60000)
+      void refreshMany(['overview', 'observability', 'databases', 'usage'])
+    }, 30000)
     return () => window.clearInterval(timer)
   }, [authenticated, refreshMany])
 
@@ -174,10 +177,12 @@ export function useControlPlane(runtime: KennethbotAdminRuntime) {
     versions,
     loading,
     online,
+    updatedAt,
     error,
     clearError: () => setError(''),
     refresh,
     refreshMany,
+    refreshAll,
     mutate,
   }
 }

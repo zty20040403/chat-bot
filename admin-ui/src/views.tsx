@@ -1,5 +1,4 @@
 import {
-  Activity,
   Ban,
   Check,
   CircleAlert,
@@ -12,6 +11,7 @@ import {
   Square,
   X,
 } from 'lucide-react'
+import { TokenUsageChart } from './TokenUsageChart'
 import {
   DataTable,
   DraftSelect,
@@ -48,9 +48,15 @@ export function OverviewView({ plane }: { plane: Plane }) {
   const overview = plane.data.overview ?? {}
   const observability = plane.data.observability ?? {}
   const totals = observability.process?.totals ?? {}
-  const models = rows(overview.models?.profiles)
-  const running = rows(overview.background_tasks?.running)
-  const failures = overview.background_tasks?.failures ?? {}
+  const usage = rows(plane.data.usage?.items)
+  const deliveries = rows(plane.data.deliveries?.items)
+  const sandboxes = plane.data.sandboxes ?? {}
+  const media = plane.data.media ?? {}
+  const usageTotals = usage.reduce((sum, item) => ({
+    input: sum.input + Number(item.input_tokens ?? 0),
+    output: sum.output + Number(item.output_tokens ?? 0),
+    calls: sum.calls + Number(item.calls ?? 0),
+  }), { input: 0, output: 0, calls: 0 })
   return (
     <>
       <PageHeader
@@ -58,35 +64,46 @@ export function OverviewView({ plane }: { plane: Plane }) {
         description="服务状态、模型请求、Token 与后台任务的实时视图"
         action={<RefreshButton loading={plane.loading.has('overview')} onClick={() => void plane.refreshMany(['overview', 'observability'])} />}
       />
-      <div className="metric-grid">
-        <Metric label="服务版本" value={`v${overview.version ?? window.__KENNETHBOT_ADMIN__.version}`} hint={plane.online ? '实时连接正常' : '实时连接断开'} />
-        <Metric label="运行时间" value={fmtDuration(overview.uptime_seconds)} hint="当前进程" />
-        <Metric label="Agent 回合" value={fmtNumber(totals.turns)} hint={`${fmtNumber(totals.model_requests)} 次模型请求`} />
-        <Metric label="运行任务" value={fmtNumber(overview.running_tasks)} hint={`${fmtNumber(overview.durable_jobs?.running)} 个持久任务`} />
-        <Metric label="输入 Token" value={fmtNumber(totals.input_tokens)} hint={`输出 ${fmtNumber(totals.output_tokens)}`} />
-        <Metric label="工具调用" value={fmtNumber(totals.tool_calls)} hint={`${fmtNumber(totals.tool_failures)} 次失败`} />
+      <div className="metric-grid overview-metrics">
+        <Metric label="服务状态" value={plane.online ? '运行中' : '连接断开'} hint={`v${overview.version ?? window.__KENNETHBOT_ADMIN__.version} · 已运行 ${fmtDuration(overview.uptime_seconds)}`} />
+        <Metric label="运行任务" value={fmtNumber(overview.running_tasks)} hint={`${fmtNumber(overview.durable_jobs?.running)} 个持久任务 · ${fmtNumber(totals.turns)} 个 Agent 回合`} />
+        <Metric label="沙盒活动" value={fmtNumber(sandboxes.active_commands)} hint={`${fmtNumber(rows(sandboxes.items).length)} 个沙盒 · 任务结束后自动销毁`} />
+        <Metric label="90 天 Token" value={fmtNumber(usageTotals.input + usageTotals.output)} hint={`${fmtNumber(usageTotals.calls)} 次调用 · 输入 ${fmtNumber(usageTotals.input)} / 输出 ${fmtNumber(usageTotals.output)}`} />
       </div>
-      <Section title="模型池" description="部署配置与当前健康状态">
+      <TokenUsageChart rows={usage} />
+      <Section title="最近消息投递" description="消息发往 QQ 后的回执状态；失败项可在“任务与投递”中重试">
         <DataTable>
-          <thead><tr><th>配置</th><th>模型</th><th>提供方</th><th>能力</th><th>健康</th></tr></thead>
-          <tbody>
-            {models.map((model) => (
-              <tr key={model.name}>
-                <td><strong>{model.name}</strong>{overview.models?.default === model.name && <span className="inline-note">默认</span>}</td>
-                <td><code>{model.model}</code></td>
-                <td>{model.provider}</td>
-                <td className="capabilities">{model.capabilities?.tools && <span>Tool</span>}{model.capabilities?.vision && <span>Vision</span>}{model.capabilities?.streaming && <span>Stream</span>}</td>
-                <td><StatusBadge value={model.configured ? model.health?.status ?? 'configured' : 'unconfigured'} /></td>
-              </tr>
-            ))}
-          </tbody>
+          <thead><tr><th>投递</th><th>目标</th><th>状态</th><th>尝试</th><th>最后错误</th></tr></thead>
+          <tbody>{deliveries.slice(0, 8).map((delivery) => <tr key={delivery.delivery_id}><td><code>{delivery.handle ?? `delivery#${delivery.delivery_id}`}</code></td><td>{delivery.scope_key ?? delivery.conversation_id ?? '-'}</td><td><StatusBadge value={delivery.status} /></td><td>{fmtNumber(delivery.attempts)}</td><td className="truncate">{delivery.last_error || '-'}</td></tr>)}</tbody>
         </DataTable>
+        {!deliveries.length && <EmptyState>还没有消息投递记录</EmptyState>}
       </Section>
-      <Section title="后台进程" description="生命周期任务与最近错误">
-        <div className="split-list">
-          <div><h3>正在运行</h3>{running.length ? running.map((name) => <div className="list-row" key={name}><Activity size={15} /><span>{name}</span><StatusBadge value="active" label="运行中" /></div>) : <EmptyState>当前没有后台进程</EmptyState>}</div>
-          <div><h3>异常记录</h3>{Object.entries(failures).length ? Object.entries(failures).map(([name, message]) => <div className="list-row danger-row" key={name}><CircleAlert size={15} /><span><strong>{name}</strong><small>{String(message)}</small></span></div>) : <EmptyState>没有后台异常</EmptyState>}</div>
-        </div>
+      <div className="overview-footnote">当前表情库存 {fmtNumber(media.counts?.stickers)} 个 · 工具调用 {fmtNumber(totals.tool_calls)} 次 · 工具失败 {fmtNumber(totals.tool_failures)} 次</div>
+    </>
+  )
+}
+
+export function UsageView({ plane }: { plane: Plane }) {
+  const usage = rows(plane.data.usage?.items)
+  const totals = usage.reduce((sum, item) => ({
+    calls: sum.calls + Number(item.calls ?? 0),
+    input: sum.input + Number(item.input_tokens ?? 0),
+    output: sum.output + Number(item.output_tokens ?? 0),
+    cached: sum.cached + Number(item.cached_tokens ?? 0),
+  }), { calls: 0, input: 0, output: 0, cached: 0 })
+  return (
+    <>
+      <PageHeader title="模型用量" description="按日期、会话和来源查看模型调用与 Token 消耗" action={<RefreshButton loading={plane.loading.has('usage')} onClick={() => void plane.refresh('usage')} />} />
+      <div className="metric-grid compact">
+        <Metric label="总 Token" value={fmtNumber(totals.input + totals.output)} hint="输入 + 输出，不重复计算缓存命中" />
+        <Metric label="输入 Token" value={fmtNumber(totals.input)} />
+        <Metric label="输出 Token" value={fmtNumber(totals.output)} />
+        <Metric label="模型调用" value={fmtNumber(totals.calls)} hint={`缓存命中 ${fmtNumber(totals.cached)}`} />
+      </div>
+      <TokenUsageChart rows={usage} />
+      <Section title="用量明细" description="同一天可能按群、私聊和系统任务拆成多条记录">
+        <DataTable><thead><tr><th>日期</th><th>Scope</th><th>来源</th><th>调用</th><th>输入 Token</th><th>输出 Token</th><th>缓存命中</th></tr></thead><tbody>{usage.map((item, index) => <tr key={`${item.day}-${item.scope_key}-${item.source}-${index}`}><td>{item.day}</td><td><code>{item.scope_key || '-'}</code></td><td>{item.source || '-'}</td><td>{fmtNumber(item.calls)}</td><td>{fmtNumber(item.input_tokens)}</td><td>{fmtNumber(item.output_tokens)}</td><td>{fmtNumber(item.cached_tokens)}</td></tr>)}</tbody></DataTable>
+        {!usage.length && <EmptyState>当前统计周期没有模型用量</EmptyState>}
       </Section>
     </>
   )
@@ -264,6 +281,55 @@ export function ObservabilityView({ plane }: { plane: Plane }) {
       <div className="metric-grid"><Metric label="Prometheus" value={<StatusBadge value={data.prometheus?.available ? 'online' : 'offline'} />} hint={data.prometheus?.url ?? '未配置'} /><Metric label="活动告警" value={alerts.length} /><Metric label="模型请求" value={fmtNumber(process.totals?.model_requests)} /><Metric label="降级路由" value={fmtNumber(rows(process.fallback_routes).length)} /></div>
       <Section title="模型延迟"><DataTable><thead><tr><th>模型</th><th>请求</th><th>失败</th><th>P50</th><th>P95</th></tr></thead><tbody>{rows(process.models).map((model) => <tr key={model.profile ?? model.model}><td>{model.profile ?? model.model}</td><td>{fmtNumber(model.requests)}</td><td>{fmtNumber(model.failures)}</td><td>{model.p50_ms ?? '-'} ms</td><td>{model.p95_ms ?? '-'} ms</td></tr>)}</tbody></DataTable></Section>
       <Section title="活动告警">{alerts.length ? alerts.map((alert) => <div className="alert-row" key={alert.fingerprint ?? alert.name}><CircleAlert size={17} /><div><strong>{alert.name}</strong><p>{alert.summary || alert.description}</p></div><StatusBadge value={alert.severity} /></div>) : <EmptyState>当前没有活动告警</EmptyState>}</Section>
+    </>
+  )
+}
+
+const HELP_SECTIONS = [
+  {
+    title: '概览与用量',
+    items: [
+      ['概览', '查看服务、任务、沙盒、Token 趋势和最近投递。把鼠标停在趋势图某一天，即可看到输入、输出、缓存命中、总 Token 和调用次数。'],
+      ['模型用量', '切换 90、30、14 天窗口；下方明细按日期、群聊或私聊 Scope、调用来源拆分，便于定位费用来自哪里。'],
+      ['可观测性', '查看 Prometheus、活动告警、模型请求失败和 P50/P95 延迟。P95 很高通常说明少量请求明显变慢。'],
+    ],
+  },
+  {
+    title: '运行与排障',
+    items: [
+      ['任务与投递', '查看当前 Agent、后台持久任务和 QQ 消息投递。右侧方形按钮取消任务，旋转箭头重试任务，播放按钮重试失败投递。'],
+      ['Trace 与上下文', '用 Trace ID 串起一次回答的模型、工具、Token 和耗时；上下文决策显示“你觉得呢”等追问最终关联了哪条消息及置信度。'],
+      ['数据库', '查看 h610 主库和备用节点、连接池、延迟及复制状态。出现 offline 或 degraded 时先看节点错误，不要直接清数据。'],
+      ['沙盒', '查看临时容器、正在执行的命令、内存和 Agent 任务。任务完成后沙盒自动销毁，因此这里为空通常是正常状态。'],
+    ],
+  },
+  {
+    title: '配置与内容',
+    items: [
+      ['模型与群友', '群开关决定机器人是否处理该群消息；“其他群友统一模型”设置默认模型，“我自己”和成员详情可覆盖到个人。下拉修改会立即提交并留下审计记录。'],
+      ['工具权限', '开关决定下一轮 Agent 能否看到该工具。风险、幂等、副作用和超时由宿主执行器强制控制；关闭后不会中断已经开始的调用。'],
+      ['媒体审核', '审核识图 worker 生成的表情候选：勾号批准发送，时钟保留待审，叉号拒绝。普通图片不长期保存；分享内容区展示各平台帖子与视频解析状态。'],
+      ['审计记录', '查看谁在何时修改了哪个资源及版本。若提交时版本已经过期，控制台会拒绝覆盖并自动拉取最新版。'],
+    ],
+  },
+  {
+    title: '实时更新规则',
+    items: [
+      ['实时状态', '右上角“实时”表示 SSE 已连接。后台只增量更新发生变化的资源，编辑中的下拉框不会因刷新而关闭。'],
+      ['手动刷新', '侧栏“刷新数据”或右上角刷新按钮会重新拉取全部面板；用于刚部署完成、网络恢复或怀疑数据未同步时。'],
+      ['安全边界', '管理 Token 只保存在当前浏览器本地，模型密钥不会返回前端。危险工具仍需宿主批准，数据库和媒体操作都有审计。'],
+    ],
+  },
+]
+
+export function HelpView() {
+  return (
+    <>
+      <PageHeader title="使用说明" description="控制台每个功能的用途、操作方法和影响范围" />
+      <div className="guide-intro"><strong>先看概览，异常时沿 Trace 排查，修改配置后去审计确认。</strong><span>这是最短的日常管理路径，也能避免在故障时盲目重启。</span></div>
+      <div className="guide-grid">
+        {HELP_SECTIONS.map((section) => <section className="guide-section" key={section.title}><h2>{section.title}</h2>{section.items.map(([title, description], index) => <article key={title}><span>{String(index + 1).padStart(2, '0')}</span><div><h3>{title}</h3><p>{description}</p></div></article>)}</section>)}
+      </div>
     </>
   )
 }

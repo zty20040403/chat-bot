@@ -1,7 +1,9 @@
 import { useEffect, useState, type ComponentType } from 'react'
 import {
   Activity,
+  BarChart3,
   Bot,
+  BookOpen,
   Boxes,
   BrainCircuit,
   Database,
@@ -12,7 +14,7 @@ import {
   ListChecks,
   Menu,
   PanelLeftClose,
-  ShieldCheck,
+  RefreshCw,
   Users,
   Wrench,
   X,
@@ -23,6 +25,7 @@ import {
   AuditView,
   DatabasesView,
   GroupsView,
+  HelpView,
   MediaView,
   ObservabilityView,
   OverviewView,
@@ -30,6 +33,7 @@ import {
   TasksView,
   ToolsView,
   TracesView,
+  UsageView,
 } from './views'
 
 const runtime = window.__KENNETHBOT_ADMIN__ ?? {
@@ -39,19 +43,21 @@ const runtime = window.__KENNETHBOT_ADMIN__ ?? {
   requiresToken: false,
 }
 
-type ViewId = 'overview' | 'observability' | 'groups' | 'tasks' | 'tools' | 'traces' | 'databases' | 'sandboxes' | 'media' | 'audit'
+type ViewId = 'overview' | 'observability' | 'usage' | 'groups' | 'tasks' | 'tools' | 'traces' | 'databases' | 'sandboxes' | 'media' | 'audit' | 'help'
 
-const NAVIGATION: Array<{ id: ViewId; label: string; group: string; icon: ComponentType<{ size?: number }> }> = [
-  { id: 'overview', label: '概览', group: '运行', icon: Gauge },
-  { id: 'observability', label: '可观测性', group: '运行', icon: Activity },
-  { id: 'tasks', label: '任务与投递', group: '运行', icon: ListChecks },
-  { id: 'traces', label: 'Trace 与上下文', group: '运行', icon: BrainCircuit },
-  { id: 'groups', label: '模型与群友', group: '配置', icon: Users },
-  { id: 'tools', label: '工具权限', group: '配置', icon: Wrench },
-  { id: 'media', label: '媒体审核', group: '数据', icon: Image },
-  { id: 'sandboxes', label: '沙盒', group: '数据', icon: Boxes },
-  { id: 'databases', label: '数据库', group: '基础设施', icon: Database },
-  { id: 'audit', label: '审计记录', group: '基础设施', icon: FileClock },
+const NAVIGATION: Array<{ id: ViewId; label: string; description: string; group: string; icon: ComponentType<{ size?: number }> }> = [
+  { id: 'overview', label: '概览', description: '服务状态、Token 趋势与最近投递', group: '运行', icon: Gauge },
+  { id: 'observability', label: '可观测性', description: 'Prometheus、告警、延迟与模型降级', group: '运行', icon: Activity },
+  { id: 'tasks', label: '任务与投递', description: 'Agent、持久任务和 QQ 消息回执', group: '运行', icon: ListChecks },
+  { id: 'usage', label: '模型用量', description: '按日期、会话和来源统计 Token', group: '运行', icon: BarChart3 },
+  { id: 'traces', label: 'Trace 与上下文', description: '回放回答链路与上下文选择过程', group: '运行', icon: BrainCircuit },
+  { id: 'sandboxes', label: '沙盒', description: '临时容器、命令和资源使用情况', group: '资源', icon: Boxes },
+  { id: 'media', label: '媒体审核', description: '表情候选、识图和分享内容记录', group: '资源', icon: Image },
+  { id: 'groups', label: '模型与群友', description: '配置群开关、统一模型和个人模型', group: '配置', icon: Users },
+  { id: 'tools', label: '工具权限', description: '控制 Agent 可见工具与执行策略', group: '配置', icon: Wrench },
+  { id: 'databases', label: '数据库', description: '主备节点、连接池与复制状态', group: '基础设施', icon: Database },
+  { id: 'audit', label: '审计记录', description: '查询所有控制面修改及资源版本', group: '基础设施', icon: FileClock },
+  { id: 'help', label: '使用说明', description: '每个功能的用途、操作方法和影响', group: '帮助', icon: BookOpen },
 ]
 
 export function App() {
@@ -61,6 +67,7 @@ export function App() {
     return NAVIGATION.some((item) => item.id === requested) ? requested : 'overview'
   })
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  const activeEntry = NAVIGATION.find((item) => item.id === active) ?? NAVIGATION[0]
 
   useEffect(() => {
     window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}#${active}`)
@@ -79,10 +86,11 @@ export function App() {
     <div className="app-shell">
       <aside className={`sidebar ${sidebarOpen ? 'open' : ''}`}>
         <div className="brand">
-          <span className="brand-icon"><Bot size={22} /></span>
-          <div><strong>Kennethbot</strong><span>Control Plane</span></div>
+          <span className="brand-icon"><Bot size={21} /></span>
+          <div><strong>QQ Bot</strong><span>Control Center</span></div>
           <button className="mobile-close" title="关闭导航" onClick={() => setSidebarOpen(false)}><PanelLeftClose size={18} /></button>
         </div>
+        <button className="quick-refresh" type="button" onClick={() => void plane.refreshAll()}><RefreshCw className={plane.loading.size ? 'spin' : ''} size={16} /><span>刷新数据</span></button>
         <nav aria-label="管理导航">
           {[...new Set(NAVIGATION.map((item) => item.group))].map((group) => (
             <div className="nav-section" key={group}>
@@ -94,14 +102,14 @@ export function App() {
             </div>
           ))}
         </nav>
-        <div className="sidebar-foot"><ShieldCheck size={16} /><span>API v1 · 审计已启用</span></div>
+        <div className="sidebar-foot"><span className={`status-dot ${plane.online ? 'online' : ''}`} /><span><strong>{plane.online ? '节点运行正常' : '实时连接断开'}</strong><small>v{runtime.version} · API v1</small></span></div>
       </aside>
       {sidebarOpen && <button className="sidebar-scrim" aria-label="关闭导航" onClick={() => setSidebarOpen(false)} />}
       <div className="workspace">
         <header className="topbar">
           <button className="menu-button" title="打开导航" onClick={() => setSidebarOpen(true)}><Menu size={19} /></button>
-          <div className="crumb"><span>Kennethbot</span><b>/</b><strong>{NAVIGATION.find((item) => item.id === active)?.label}</strong></div>
-          <div className="topbar-status"><StatusBadge value={plane.online ? 'online' : 'offline'} label={plane.online ? '实时' : '断开'} /><span>v{runtime.version}</span>{runtime.requiresToken && <button className="text-button" onClick={() => plane.setToken('')}>退出</button>}</div>
+          <div className="topbar-title"><h1>{activeEntry.label}</h1><p>{activeEntry.description}</p></div>
+          <div className="topbar-status"><StatusBadge value={plane.online ? 'online' : 'offline'} label={plane.online ? '实时' : '断开'} /><span>{plane.updatedAt ? `更新于 ${new Date(plane.updatedAt).toLocaleTimeString('zh-CN', { hour12: false })}` : '正在加载'}</span><button className="icon-button topbar-refresh" title="刷新全部数据" onClick={() => void plane.refreshAll()}><RefreshCw className={plane.loading.size ? 'spin' : ''} size={16} /></button>{runtime.requiresToken && <button className="text-button" onClick={() => plane.setToken('')}>退出</button>}</div>
         </header>
         {plane.error && <div className="error-banner"><span>{plane.error}</span><button title="关闭错误提示" onClick={plane.clearError}><X size={16} /></button></div>}
         <main>
@@ -109,12 +117,14 @@ export function App() {
           {active === 'observability' && <ObservabilityView plane={plane} />}
           {active === 'groups' && <GroupsView plane={plane} />}
           {active === 'tasks' && <TasksView plane={plane} />}
+          {active === 'usage' && <UsageView plane={plane} />}
           {active === 'tools' && <ToolsView plane={plane} />}
           {active === 'traces' && <TracesView plane={plane} />}
           {active === 'databases' && <DatabasesView plane={plane} />}
           {active === 'sandboxes' && <SandboxesView plane={plane} />}
           {active === 'media' && <MediaView plane={plane} />}
           {active === 'audit' && <AuditView plane={plane} />}
+          {active === 'help' && <HelpView />}
         </main>
       </div>
     </div>
