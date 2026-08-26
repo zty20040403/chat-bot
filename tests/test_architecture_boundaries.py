@@ -10,6 +10,74 @@ PLUGIN_ROOT = Path(__file__).parents[1] / "src" / "plugins" / "ai_chat"
 
 
 class ArchitectureBoundaryTests(unittest.TestCase):
+    def test_plugin_entrypoint_only_composes_and_registers(self) -> None:
+        entrypoint = PLUGIN_ROOT / "__init__.py"
+        source = entrypoint.read_text(encoding="utf-8")
+        self.assertLessEqual(len(source.splitlines()), 600)
+        tree = ast.parse(source, filename=str(entrypoint))
+        allowed_functions = {
+            "_is_group_enabled",
+            "_is_group_vision_auto_describe_enabled",
+            "ignore_disabled_group_event",
+            "_bind_implementation_module",
+            "start_background_tasks",
+            "shutdown_app_context",
+        }
+        definitions = {
+            node.name
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        self.assertEqual(definitions, allowed_functions)
+
+    def test_split_responsibilities_have_single_owners(self) -> None:
+        expected = {
+            "command_handlers.py": {"handle_ai", "handle_model_command"},
+            "message_ingest.py": {
+                "handle_canonical_ingest",
+                "handle_group_context_recorder",
+            },
+            "trigger_service.py": {
+                "handle_proactive_chat",
+                "_semantic_index_loop",
+            },
+            "chat_orchestrator.py": {
+                "_current_turn_context",
+                "_run_tracked_ai",
+            },
+            "tool_executor.py": {"_ask_ai"},
+            "reply_service.py": {"_finish_tracked_ai", "_finish_safely"},
+            "onebot_delivery.py": {"_delivery_loop", "_deliver_onebot_outbox"},
+        }
+        for filename, required in expected.items():
+            path = PLUGIN_ROOT / filename
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            definitions = {
+                node.name
+                for node in tree.body
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            }
+            self.assertTrue(required <= definitions, f"{filename}: {required - definitions}")
+            self.assertFalse(
+                any(
+                    node.decorator_list
+                    for node in tree.body
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and node.name.startswith("handle_")
+                ),
+                f"{filename} must not register Matchers",
+            )
+            imported_modules = {
+                ("." * node.level) + (node.module or "")
+                for node in ast.walk(tree)
+                if isinstance(node, ast.ImportFrom)
+            }
+            self.assertNotIn(
+                ".matchers",
+                imported_modules,
+                f"{filename} must not depend on Matcher declarations",
+            )
+
     def test_application_does_not_depend_on_chat_platform_sdk(self) -> None:
         self._assert_no_imports(
             PLUGIN_ROOT / "application",

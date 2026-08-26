@@ -178,3 +178,21 @@ Application，但 Application、Storage、Workers 不能导入 NoneBot；架构�
 `FOR UPDATE SKIP LOCKED` 安全领取任务；进程中断后，过期租约会自动回到等待状态。
 因此每个 Handler 都必须可重复执行。首个迁移任务是全局表情搜索索引回填，媒体和
 投递现有专用队列会保持兼容，再按风险逐步迁入。
+
+## 插件入口拆分
+
+`src/plugins/ai_chat/__init__.py` 只保留 Composition Root、生命周期和 Matcher
+注册。原来集中在主插件中的实现按职责迁入：
+
+```text
+command_handlers.py  命令解析、模型/记忆/任务控制
+message_ingest.py    消息账本、用户资料、图片与群上下文采集
+trigger_service.py   主动回复判断、语义索引、Historian 与 Dream
+chat_orchestrator.py QQ 上下文准备和 Application 回合入口
+tool_executor.py     Agent Tool Call 循环
+reply_service.py     回复规划、引用、流式片段、富文本和发送收尾
+onebot_delivery.py   OneBot Outbox、提醒及跨平台投递循环
+```
+
+入口在装配时把实现绑定到同一运行时命名空间，以保留原有热配置和测试 patch 兼容性；
+业务实现模块自身不注册 Matcher。架构测试限制入口规模并检查每项职责只有一个所有者。
