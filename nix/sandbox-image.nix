@@ -12,7 +12,6 @@ let
       odfpy
       openpyxl
       pandas
-      pdfplumber
       pillow
       pymupdf
       pypdf
