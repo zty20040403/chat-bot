@@ -113,9 +113,11 @@ pkgs.dockerTools.buildLayeredImage {
 
   extraCommands = ''
     mkdir -p workspace home/sandbox tmp etc
-    chmod 0755 workspace home/sandbox
+    # Nix builders cannot materialize arbitrary numeric ownership in every
+    # sandbox backend. The container is isolated and runs as uid 1000, so make
+    # its private workspace and home writable without a build-time chown.
+    chmod 0777 workspace home/sandbox
     chmod 1777 tmp
-    chown 1000:1000 workspace home/sandbox
     printf 'sandbox:x:1000:1000:Kennethbot sandbox:/home/sandbox:/bin/sh\n' > etc/passwd
     printf 'sandbox:x:1000:\n' > etc/group
     printf 'hosts: files dns\n' > etc/nsswitch.conf
