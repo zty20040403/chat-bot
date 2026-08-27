@@ -105,6 +105,8 @@ class FakeBot:
             }
         if api == "get_file":
             return {"base64": base64.b64encode(b"hello").decode("ascii")}
+        if api == "get_group_file_url":
+            return {}
         if api == "upload_group_file":
             self.uploads.append(data)
             return {"file_id": "uploaded"}
@@ -359,6 +361,25 @@ class AgentToolExecutorTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(content, b"downloaded")
+
+    async def test_napcat_group_file_url_is_used_before_container_path(self) -> None:
+        async def call_api(api: str, **data: Any) -> Any:
+            self.assertEqual(api, "get_group_file_url")
+            self.assertEqual(data["group_id"], 100)
+            self.assertEqual(data["file_id"], "message-file-1")
+            self.assertEqual(data["busid"], 102)
+            return {"url": "https://example.invalid/report.pdf"}
+
+        with patch.object(self.bot, "call_api", side_effect=call_api):
+            response = await self.executor._resolve_napcat_file(
+                {"file_name": "report.pdf"},
+                "message-file-1",
+            )
+
+        self.assertEqual(
+            response,
+            {"url": "https://example.invalid/report.pdf"},
+        )
 
     async def test_say_allows_repeated_progress_messages(self) -> None:
         seeded = await self.executor.ensure_canonical_message(500)

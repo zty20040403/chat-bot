@@ -157,6 +157,7 @@ def _message_attachments(raw_message: Any) -> list[dict[str, Any]]:
 def _safe_file_info(raw_file: dict[str, Any]) -> dict[str, Any]:
     return {
         "_native_file_id": str(raw_file.get("file_id", "")),
+        "_busid": int(raw_file.get("busid") or raw_file.get("bus_id") or 102),
         "file_name": str(raw_file.get("file_name", "")),
         "file_size": int(raw_file.get("file_size") or raw_file.get("size") or 0),
         "upload_time": int(raw_file.get("upload_time") or 0),
@@ -949,6 +950,7 @@ class AgentToolExecutor:
         destination = str(arguments.get("destination", "")).strip()
         matched_file: dict[str, Any] | None = None
         native_file_id = ""
+        canonical_download_url = ""
 
         if raw_message_handle is not None and message_id is None:
             return _json_result(
@@ -990,9 +992,14 @@ class AgentToolExecutor:
                         error="当前消息中找不到这个规范附件句柄。",
                     )
                 native_file_id = str(selected["_native_file_id"])
+                canonical_download_url = str(
+                    selected.get("_download_url") or ""
+                )
             elif len(canonical_attachments) == 1:
-                native_file_id = str(
-                    canonical_attachments[0]["_native_file_id"]
+                selected = canonical_attachments[0]
+                native_file_id = str(selected["_native_file_id"])
+                canonical_download_url = str(
+                    selected.get("_download_url") or ""
                 )
             elif len(canonical_attachments) > 1:
                 return _json_result(
@@ -1033,6 +1040,10 @@ class AgentToolExecutor:
                     ok=False,
                     error="这个附件没有可下载的宿主映射。",
                 )
+            if canonical_download_url and not matched_file.get(
+                "_download_url"
+            ):
+                matched_file["_download_url"] = canonical_download_url
         else:
             if not file_handle:
                 return _json_result(
@@ -1057,17 +1068,10 @@ class AgentToolExecutor:
         ):
             return _json_result(ok=False, error="群文件超过导入大小上限。")
 
-        response = await self.bot.call_api(
-            "get_file",
-            file_id=native_file_id,
+        response = await self._resolve_napcat_file(
+            matched_file,
+            native_file_id,
         )
-        if not isinstance(response, dict):
-            return _json_result(ok=False, error="NapCat 没有返回可下载文件。")
-        fallback_url = str(matched_file.get("_download_url") or "")
-        if not response.get("url") and fallback_url.startswith(
-            ("http://", "https://")
-        ):
-            response = {**response, "url": fallback_url}
         content = await self._read_napcat_file(response)
         await self.sandbox_manager.write_file(
             self.owner,
@@ -1228,9 +1232,42 @@ class AgentToolExecutor:
                     "_native_file_id": str(
                         node.raw_data.get("file_id") or node.source or ""
                     ),
+                    "_download_url": str(node.raw_data.get("url") or ""),
                 }
             )
         return records
+
+    async def _resolve_napcat_file(
+        self,
+        matched_file: dict[str, Any],
+        native_file_id: str,
+    ) -> dict[str, Any]:
+        inline_url = str(matched_file.get("_download_url") or "")
+        if inline_url.startswith(("http://", "https://")):
+            return {"url": inline_url}
+
+        try:
+            group_url = await self.bot.call_api(
+                "get_group_file_url",
+                group_id=self.event.group_id,
+                file_id=native_file_id,
+                busid=int(matched_file.get("_busid") or 102),
+            )
+        except Exception as exc:
+            logger.debug(f"NapCat group file URL lookup failed: {exc}")
+        else:
+            if isinstance(group_url, dict):
+                url = str(group_url.get("url") or "")
+                if url.startswith(("http://", "https://")):
+                    return {"url": url}
+
+        response = await self.bot.call_api(
+            "get_file",
+            file_id=native_file_id,
+        )
+        if isinstance(response, dict):
+            return response
+        raise ValueError("NapCat 没有返回可下载文件。")
 
     async def _read_napcat_file(self, response: dict[str, Any]) -> bytes:
         encoded = response.get("base64")
