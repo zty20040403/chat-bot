@@ -1586,7 +1586,7 @@ async def _ask_ai(
     if not answer and not voice_reply_text and visual_reply_segment is None:
         return "模型没有返回内容。"
 
-    answer = _trim_reply(voice_reply_text or answer)
+    answer = voice_reply_text or answer
     memory_user_text = user_text
     if used_ocr_texts:
         memory_user_text += "\n\n[图片 OCR]\n" + "\n\n".join(used_ocr_texts)

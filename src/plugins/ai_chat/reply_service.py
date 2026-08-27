@@ -63,12 +63,6 @@ from .stickers import (
 )
 
 
-def _trim_reply(text: str) -> str:
-    if len(text) <= settings.max_reply_chars:
-        return text
-    return text[: settings.max_reply_chars].rstrip() + "\n\n[回复太长，已截断]"
-
-
 def _is_napcat_send_timeout(exc: ActionFailed) -> bool:
     info = getattr(exc, "info", {})
     if not isinstance(info, dict) or info.get("retcode") != 1200:

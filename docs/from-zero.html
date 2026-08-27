@@ -2016,7 +2016,6 @@ handle_group_context_recorder()  把普通群消息写入群上下文</code></pr
             <table class="method-table">
               <thead><tr><th>方法</th><th>输入与输出</th><th>具体作用</th></tr></thead>
               <tbody>
-                <tr><td><code>_trim_reply(text)</code></td><td>回答 → 截断后的回答</td><td>超过 <code>AI_MAX_REPLY_CHARS</code> 时截断，并添加“回复太长”提示。</td></tr>
                 <tr><td><code>_is_napcat_send_timeout(exc)</code></td><td>ActionFailed → 布尔值</td><td>只把 retcode 1200 且错误里包含 sendMsg timeout 的异常识别为“发送回执超时”。</td></tr>
                 <tr><td><code>_make_retry_text(message)</code></td><td>文本 → 较短文本</td><td>重试前移除完整 URL，并最多保留 800 字，降低 QQ 再次发送超时的概率。</td></tr>
                 <tr><td><code>_reply_target_segments(event)</code></td><td>事件 → 消息段列表</td><td>群聊返回 <code>@提问者 + 空格</code>；私聊和机器人自己发的消息返回空。</td></tr>
