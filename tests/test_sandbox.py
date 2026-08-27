@@ -56,6 +56,23 @@ class DockerSandboxCancellationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("--pids-limit", command)
         self.assertIn("qqbot.owner_ref=owner", command)
 
+    async def test_configured_advanced_image_runs_as_sandbox_user(self) -> None:
+        manager = DockerSandboxManager(image="kennethbot-sandbox:latest")
+        manager.list = AsyncMock(return_value=[])  # type: ignore[method-assign]
+        manager._list_by_label = AsyncMock(  # type: ignore[method-assign]
+            return_value=[]
+        )
+        manager._run = AsyncMock(  # type: ignore[method-assign]
+            return_value=SandboxResult("container-id\n", "", 0)
+        )
+
+        created = await manager.create("owner", "python")
+
+        command = manager._run.await_args.args
+        self.assertIn("kennethbot-sandbox:latest", command)
+        self.assertEqual(command[command.index("--user") + 1], "1000:1000")
+        self.assertEqual(created["toolset"], "advanced")
+
     async def test_zero_file_limit_allows_large_transfers(self) -> None:
         manager = DockerSandboxManager(max_file_bytes=0)
         manager._owned_container = AsyncMock(  # type: ignore[method-assign]

@@ -309,7 +309,10 @@ SANDBOX_CREATE_TOOL: ToolDefinition = {
     "function": {
         "name": SANDBOX_CREATE_TOOL_NAME,
         "description": (
-            "创建隔离的 Docker 开发沙盒。需要写代码、安装依赖、构建或测试项目时先调用。"
+            "创建隔离的高级 Docker 工作站沙盒。已预装常用 shell 工具、"
+            "Git、Python/Node/Go/Rust/Java、编译器、PDF/Office、图片、OCR、"
+            "音视频、数据分析和数据库客户端。需要写代码、处理文件、"
+            "构建或测试项目时先调用。"
             "工作目录固定为 /workspace。本次任务结束时宿主会自动销毁它，"
             "销毁前必须用发送工具交付需要保留的文件。"
         ),
@@ -363,7 +366,9 @@ SANDBOX_EXEC_TOOL: ToolDefinition = {
         "name": SANDBOX_EXEC_TOOL_NAME,
         "description": (
             "在指定沙盒的 /workspace 中执行 shell 命令，适合安装依赖、构建、测试、"
-            "运行程序和打包文件。不要用于读写宿主机。预计超过一次对话等待时间时，"
+            "运行程序和打包文件。常用开发、PDF/Office、媒体、OCR 和数据"
+            "工具已预装，先用 command -v 确认再考虑额外安装。不要用于读写宿主机。"
+            "预计超过一次对话等待时间时，"
             "设置 background=true 交给可恢复的持久任务队列。"
         ),
         "parameters": {

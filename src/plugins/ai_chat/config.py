@@ -272,6 +272,7 @@ class Settings:
     codesnap_timeout_seconds: int
     codesnap_cache_entries: int
     sandbox_enabled: bool
+    sandbox_image: str
     sandbox_allowed_users: set[int]
     sandbox_max_per_user: int
     sandbox_max_total: int
@@ -801,6 +802,7 @@ class Settings:
                 max(_get_int("AI_CODESNAP_CACHE_ENTRIES", 256), 16), 2048
             ),
             sandbox_enabled=_get_bool("AI_SANDBOX_ENABLED", False),
+            sandbox_image=os.getenv("AI_SANDBOX_IMAGE", "").strip(),
             sandbox_allowed_users=_get_group_ids(
                 "AI_SANDBOX_ALLOWED_USERS"
             ),

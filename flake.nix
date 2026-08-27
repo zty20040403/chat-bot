@@ -148,11 +148,24 @@
           platforms = supportedSystems;
         };
       };
+    mkSandboxImage = system: let
+      pkgs = nixpkgs.legacyPackages.${system};
+    in
+      import ./nix/sandbox-image.nix {
+        inherit pkgs lib;
+        version = project.project.version;
+      };
   in {
-    packages = forAllSystems (system: {
-      default = mkPackage system;
-      qq-deepseek-bot = mkPackage system;
-    });
+    packages = forAllSystems (system: let
+      pkgs = nixpkgs.legacyPackages.${system};
+    in
+      {
+        default = mkPackage system;
+        qq-deepseek-bot = mkPackage system;
+      }
+      // lib.optionalAttrs pkgs.stdenv.isLinux {
+        sandbox-image = mkSandboxImage system;
+      });
 
     apps = forAllSystems (system: {
       default = {

@@ -60,12 +60,14 @@ class DockerSandboxManager:
     def __init__(
         self,
         *,
+        image: str = "",
         max_per_owner: int = 2,
         max_total: int = 8,
         default_timeout_seconds: int = 120,
         max_output_chars: int = 12000,
         max_file_bytes: int = 20 * 1024 * 1024,
     ) -> None:
+        self.image = image.strip()
         self.max_per_owner = max(1, max_per_owner)
         self.max_total = max(1, max_total)
         self.default_timeout_seconds = max(5, default_timeout_seconds)
@@ -75,7 +77,7 @@ class DockerSandboxManager:
         self._last_execs: dict[str, SandboxExecutionActivity] = {}
 
     async def create(self, owner: str, runtime: str = "python") -> dict[str, str]:
-        image = RUNTIME_IMAGES.get(runtime)
+        image = self.image or RUNTIME_IMAGES.get(runtime)
         if image is None:
             raise SandboxError("不支持的运行环境。")
 
@@ -121,11 +123,26 @@ class DockerSandboxManager:
             "/workspace",
             "--restart",
             "no",
-            image,
-            "sh",
-            "-lc",
-            "mkdir -p /workspace && exec sleep infinity",
         ]
+        if self.image:
+            command.extend(
+                [
+                    "--user",
+                    "1000:1000",
+                    "--env",
+                    "HOME=/home/sandbox",
+                    "--env",
+                    "USER=sandbox",
+                ]
+            )
+        command.extend(
+            [
+                image,
+                "sh",
+                "-lc",
+                "mkdir -p /workspace && exec sleep infinity",
+            ]
+        )
         result = await self._run(*command, timeout=300)
         if result.returncode != 0:
             detail = result.stderr or result.stdout
@@ -135,6 +152,11 @@ class DockerSandboxManager:
             "runtime": runtime,
             "image": image,
             "status": "running",
+            "toolset": (
+                "advanced"
+                if self.image
+                else f"minimal-{runtime}"
+            ),
         }
 
     async def list(self, owner: str) -> list[dict[str, str]]:

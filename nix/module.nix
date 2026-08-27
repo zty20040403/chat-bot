@@ -9,6 +9,7 @@
   statePath = "/var/lib/${cfg.stateDirectory}";
   cachePath = "/var/cache/${cfg.cacheDirectory}";
   defaultPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
+  defaultSandboxImage = self.packages.${pkgs.stdenv.hostPlatform.system}.sandbox-image;
   codesnapFonts = pkgs.runCommand "qq-bot-codesnap-fonts" {} ''
     mkdir -p "$out/share/fonts"
     cp ${pkgs.sarasa-gothic}/share/fonts/truetype/Sarasa-Regular.ttc \
@@ -154,6 +155,19 @@ in {
       type = lib.types.bool;
       default = false;
       description = "Allow the bot to create Docker-backed execution sandboxes.";
+    };
+
+    sandbox.imageArchive = lib.mkOption {
+      type = lib.types.package;
+      default = defaultSandboxImage;
+      defaultText = lib.literalExpression "inputs.qq-bot.packages.${pkgs.stdenv.hostPlatform.system}.sandbox-image";
+      description = "Reproducible OCI archive loaded for advanced bot sandboxes.";
+    };
+
+    sandbox.imageName = lib.mkOption {
+      type = lib.types.str;
+      default = "kennethbot-sandbox:latest";
+      description = "Docker image name used when creating advanced sandboxes.";
     };
 
     browser = {
@@ -321,7 +335,14 @@ in {
       description = "DeepSeek QQ bot";
       wantedBy = ["multi-user.target"];
       wants = ["network-online.target"];
-      after = ["network-online.target"];
+      requires = lib.optionals cfg.sandbox.enable [
+        "${serviceName}-sandbox-image.service"
+      ];
+      after =
+        ["network-online.target"]
+        ++ lib.optionals cfg.sandbox.enable [
+          "${serviceName}-sandbox-image.service"
+        ];
       path =
         cfg.runtimePackages
         ++ lib.optionals cfg.sandbox.enable [pkgs.docker]
@@ -337,6 +358,7 @@ in {
           AI_STATE_DIR = "${statePath}/state";
           AI_CACHE_DIR = cachePath;
           AI_SANDBOX_ENABLED = boolString cfg.sandbox.enable;
+          AI_SANDBOX_IMAGE = cfg.sandbox.imageName;
           HOST = cfg.host;
           PORT = toString cfg.port;
           PYTHONUNBUFFERED = "1";
@@ -399,6 +421,18 @@ in {
         // lib.optionalAttrs (cfg.environmentFile != null) {
           EnvironmentFile = cfg.environmentFile;
         };
+    };
+
+    systemd.services."${serviceName}-sandbox-image" = lib.mkIf cfg.sandbox.enable {
+      description = "Load the Kennethbot advanced sandbox image";
+      wantedBy = ["multi-user.target"];
+      requires = ["docker.service"];
+      after = ["docker.service"];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        ExecStart = "${pkgs.docker}/bin/docker load --input ${cfg.sandbox.imageArchive}";
+      };
     };
 
     virtualisation.oci-containers = lib.mkIf cfg.napcat.enable {

@@ -634,6 +634,7 @@ def build_app_context(
         )
 
     sandbox_manager = DockerSandboxManager(
+        image=settings.sandbox_image,
         max_per_owner=settings.sandbox_max_per_user,
         max_total=settings.sandbox_max_total,
         default_timeout_seconds=settings.sandbox_timeout_seconds,
