@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 import nonebot
 
@@ -320,6 +321,44 @@ class AgentToolExecutorTests(unittest.IsolatedAsyncioTestCase):
             self.sandbox.files[("s123abc", "report.pdf")],
             b"hello",
         )
+
+    async def test_napcat_missing_container_path_falls_back_to_url(self) -> None:
+        class FakeDownload:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            def raise_for_status(self) -> None:
+                return None
+
+            async def aiter_bytes(self):
+                yield b"downloaded"
+
+        class FakeClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            def stream(self, method: str, url: str) -> FakeDownload:
+                self.request = (method, url)
+                return FakeDownload()
+
+        with patch(
+            "src.plugins.ai_chat.agent_tools.httpx.AsyncClient",
+            return_value=FakeClient(),
+        ):
+            content = await self.executor._read_napcat_file(
+                {
+                    "file": "/app/.config/QQ/NapCat/temp/report.pdf",
+                    "url": "https://example.invalid/report.pdf",
+                }
+            )
+
+        self.assertEqual(content, b"downloaded")
 
     async def test_say_allows_repeated_progress_messages(self) -> None:
         seeded = await self.executor.ensure_canonical_message(500)

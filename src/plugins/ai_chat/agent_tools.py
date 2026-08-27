@@ -148,6 +148,7 @@ def _message_attachments(raw_message: Any) -> list[dict[str, Any]]:
                     data.get("file_size") or data.get("fileSize") or 0
                 ),
                 "type": segment_type,
+                "_download_url": str(data.get("url") or ""),
             }
         )
     return attachments
@@ -160,6 +161,7 @@ def _safe_file_info(raw_file: dict[str, Any]) -> dict[str, Any]:
         "file_size": int(raw_file.get("file_size") or raw_file.get("size") or 0),
         "upload_time": int(raw_file.get("upload_time") or 0),
         "uploader": int(raw_file.get("uploader") or raw_file.get("uploader_id") or 0),
+        "_download_url": str(raw_file.get("url") or ""),
     }
 
 
@@ -1061,6 +1063,11 @@ class AgentToolExecutor:
         )
         if not isinstance(response, dict):
             return _json_result(ok=False, error="NapCat 没有返回可下载文件。")
+        fallback_url = str(matched_file.get("_download_url") or "")
+        if not response.get("url") and fallback_url.startswith(
+            ("http://", "https://")
+        ):
+            response = {**response, "url": fallback_url}
         content = await self._read_napcat_file(response)
         await self.sandbox_manager.write_file(
             self.owner,
@@ -1237,11 +1244,18 @@ class AgentToolExecutor:
         local_file = response.get("file")
         if isinstance(local_file, str) and local_file:
             path = Path(local_file)
-            size = await asyncio.to_thread(path.stat)
-            if self.max_file_bytes and size.st_size > self.max_file_bytes:
-                raise ValueError("文件超过导入大小上限。")
-            content = await asyncio.to_thread(path.read_bytes)
-            return self._check_download_size(content)
+            try:
+                size = await asyncio.to_thread(path.stat)
+                if self.max_file_bytes and size.st_size > self.max_file_bytes:
+                    raise ValueError("文件超过导入大小上限。")
+                content = await asyncio.to_thread(path.read_bytes)
+            except OSError as exc:
+                logger.debug(
+                    "NapCat local file is unavailable; trying its download URL: "
+                    f"{exc}"
+                )
+            else:
+                return self._check_download_size(content)
 
         url = response.get("url")
         if isinstance(url, str) and url.startswith(("http://", "https://")):
