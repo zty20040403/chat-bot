@@ -670,7 +670,7 @@ def _render_code_html(source: str, language: str) -> str:
         {syntax_css}
         .code-wrap {{ display:flex; max-width:1280px; background:#11161d; color:#e7edf3;
           border:1px solid #27313b; border-radius:6px; overflow:hidden; }}
-        pre {{ margin:0; padding:18px 20px; font:15px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;
+        pre {{ margin:0; padding:18px 20px; font:15px/1.55 "Sarasa Mono SC","Noto Sans Mono CJK SC",ui-monospace,SFMono-Regular,Menlo,monospace;
           white-space:pre; tab-size:4; letter-spacing:0; }}
         .numbers {{ color:#71808e; text-align:right; user-select:none; padding-right:12px;
           border-right:1px solid #27313b; background:#0d1218; }}
@@ -696,7 +696,7 @@ def _render_table_html(source: str) -> str | None:
         f'<div id="capture"><table><thead><tr>{head_html}</tr></thead><tbody>{body_html}</tbody></table></div>',
         """
         #capture { display:inline-block; max-width:1320px; background:white; }
-        table { border-collapse:collapse; color:#182026; font:15px/1.45 system-ui,-apple-system,"PingFang SC",sans-serif; }
+        table { border-collapse:collapse; color:#182026; font:15px/1.45 "Noto Sans CJK SC","Sarasa Gothic SC","Source Han Sans SC","Microsoft YaHei","PingFang SC",system-ui,sans-serif; }
         th,td { border:1px solid #c8d0d5; padding:9px 12px; min-width:90px; max-width:360px;
           text-align:left; vertical-align:top; overflow-wrap:anywhere; letter-spacing:0; }
         th { background:#eef2f4; font-weight:650; }

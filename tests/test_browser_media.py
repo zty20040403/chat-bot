@@ -25,12 +25,22 @@ from src.plugins.ai_chat.browser_tools import (
     BrowserManager,
     BrowserPolicyError,
     RichMessageRenderer,
+    _render_table_html,
     parse_rich_block,
 )
 from src.plugins.ai_chat.media_tools import BilibiliClient, find_bilibili_ref
 
 
 class BrowserAndMediaTests(unittest.TestCase):
+    def test_table_renderer_uses_server_available_chinese_fonts(self) -> None:
+        markup = _render_table_html(
+            "| 题型 | 得分 |\n| --- | --- |\n| 选择题 | 40 |"
+        )
+
+        self.assertIsNotNone(markup)
+        self.assertIn('"Noto Sans CJK SC"', markup)
+        self.assertIn('"Sarasa Gothic SC"', markup)
+
     def test_rich_block_parser_distinguishes_code_table_and_plain_text(self) -> None:
         self.assertEqual(
             parse_rich_block("```python\nprint('ok')\n```")[0:2],  # type: ignore[index]

@@ -15,6 +15,12 @@
     cp ${pkgs.sarasa-gothic}/share/fonts/truetype/Sarasa-Regular.ttc \
       "$out/share/fonts/Sarasa-Regular.ttc"
   '';
+  richFontConfig = pkgs.makeFontsConf {
+    fontDirectories = [
+      pkgs.sarasa-gothic
+      pkgs.noto-fonts-cjk-sans
+    ];
+  };
   defaultWhisperModel = pkgs.fetchurl {
     url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin";
     hash = "sha256-YO1bw90U7qhWST0zQ0m0BXgt3K8AKNS130CINF+6Lv4=";
@@ -366,6 +372,7 @@ in {
         // lib.optionalAttrs cfg.browser.enable {
           AI_BROWSER_ENABLED = "true";
           AI_BROWSER_EXECUTABLE_PATH = lib.getExe cfg.browser.package;
+          FONTCONFIG_FILE = "${richFontConfig}";
         }
         // lib.optionalAttrs cfg.codesnap.enable {
           AI_CODESNAP_ENABLED = "true";
