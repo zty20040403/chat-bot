@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react'
-import { LoaderCircle, RefreshCw } from 'lucide-react'
+import { ArrowRight, LoaderCircle, RefreshCw } from 'lucide-react'
 
 export function PageHeader({
   title,
@@ -77,6 +77,15 @@ export function RefreshButton({ loading, onClick }: { loading?: boolean; onClick
   return (
     <button className="icon-button" type="button" onClick={onClick} title="刷新当前数据" disabled={loading}>
       {loading ? <LoaderCircle className="spin" size={17} /> : <RefreshCw size={17} />}
+    </button>
+  )
+}
+
+export function ViewAllButton({ count, onClick }: { count: number; onClick: () => void }) {
+  return (
+    <button className="view-all-button" type="button" onClick={onClick}>
+      <span>查看全部{count ? ` (${count})` : ''}</span>
+      <ArrowRight size={14} />
     </button>
   )
 }
@@ -171,9 +180,24 @@ export function fmtBytes(value: unknown): string {
 }
 
 export function fmtTime(value: unknown): string {
-  const number = Number(value ?? 0)
-  if (!number) return '-'
-  return new Date(number * 1000).toLocaleString('zh-CN', { hour12: false })
+  if (value === null || value === undefined || value === '') return '-'
+  const numeric = Number(value)
+  const date = Number.isFinite(numeric)
+    ? new Date(numeric > 10_000_000_000 ? numeric : numeric * 1000)
+    : new Date(String(value))
+  if (!Number.isFinite(date.getTime())) return '-'
+  const parts = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(date)
+  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((item) => item.type === type)?.value ?? ''
+  return `${part('year')}-${part('month')}-${part('day')} ${part('hour')}:${part('minute')}:${part('second')}`
 }
 
 export function fmtDuration(value: unknown): string {

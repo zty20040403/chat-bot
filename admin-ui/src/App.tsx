@@ -20,6 +20,7 @@ import {
   X,
 } from 'lucide-react'
 import { StatusBadge } from './components'
+import { DETAIL_META, DetailView, type DetailViewId } from './detailViews'
 import { useControlPlane } from './useControlPlane'
 import {
   AuditView,
@@ -60,26 +61,63 @@ const NAVIGATION: Array<{ id: ViewId; label: string; description: string; group:
   { id: 'help', label: '使用说明', description: '每个功能的用途、操作方法和影响', group: '帮助', icon: BookOpen },
 ]
 
+interface RouteState {
+  active: ViewId
+  detail: DetailViewId | null
+}
+
+function parseRoute(value: string): RouteState {
+  const requested = value.replace(/^#/, '')
+  const detail = (Object.entries(DETAIL_META) as Array<[DetailViewId, (typeof DETAIL_META)[DetailViewId]]>)
+    .find(([, meta]) => meta.route === requested)
+  if (detail) return { active: detail[1].parent, detail: detail[0] }
+  const view = requested as ViewId
+  return {
+    active: NAVIGATION.some((item) => item.id === view) ? view : 'overview',
+    detail: null,
+  }
+}
+
+function routeValue(route: RouteState): string {
+  return route.detail ? DETAIL_META[route.detail].route : route.active
+}
+
 export function App() {
   const plane = useControlPlane(runtime)
-  const [active, setActive] = useState<ViewId>(() => {
-    const requested = window.location.hash.replace('#', '') as ViewId
-    return NAVIGATION.some((item) => item.id === requested) ? requested : 'overview'
-  })
+  const [route, setRoute] = useState<RouteState>(() => parseRoute(window.location.hash))
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  const active = route.active
   const activeEntry = NAVIGATION.find((item) => item.id === active) ?? NAVIGATION[0]
+  const detailEntry = route.detail ? DETAIL_META[route.detail] : null
 
   useEffect(() => {
-    window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}#${active}`)
-  }, [active])
+    const syncRoute = () => setRoute(parseRoute(window.location.hash))
+    window.addEventListener('popstate', syncRoute)
+    window.addEventListener('hashchange', syncRoute)
+    if (!window.location.hash) {
+      window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}#overview`)
+    }
+    return () => {
+      window.removeEventListener('popstate', syncRoute)
+      window.removeEventListener('hashchange', syncRoute)
+    }
+  }, [])
 
   if (!plane.authenticated) {
     return <TokenGate onSubmit={plane.setToken} />
   }
 
   const openView = (view: ViewId) => {
-    setActive(view)
+    const next = { active: view, detail: null }
+    window.history.pushState(null, '', `${window.location.pathname}${window.location.search}#${routeValue(next)}`)
+    setRoute(next)
     setSidebarOpen(false)
+  }
+
+  const openDetail = (detail: DetailViewId) => {
+    const next = { active: DETAIL_META[detail].parent, detail }
+    window.history.pushState(null, '', `${window.location.pathname}${window.location.search}#${routeValue(next)}`)
+    setRoute(next)
   }
 
   return (
@@ -108,23 +146,29 @@ export function App() {
       <div className="workspace">
         <header className="topbar">
           <button className="menu-button" title="打开导航" onClick={() => setSidebarOpen(true)}><Menu size={19} /></button>
-          <div className="topbar-title"><h1>{activeEntry.label}</h1><p>{activeEntry.description}</p></div>
+          <div className="topbar-title"><h1>{detailEntry?.title ?? activeEntry.label}</h1><p>{detailEntry?.description ?? activeEntry.description}</p></div>
           <div className="topbar-status"><StatusBadge value={plane.online ? 'online' : 'offline'} label={plane.online ? '实时' : '断开'} /><span>{plane.updatedAt ? `更新于 ${new Date(plane.updatedAt).toLocaleTimeString('zh-CN', { hour12: false })}` : '正在加载'}</span><button className="icon-button topbar-refresh" title="刷新全部数据" onClick={() => void plane.refreshAll()}><RefreshCw className={plane.loading.size ? 'spin' : ''} size={16} /></button>{runtime.requiresToken && <button className="text-button" onClick={() => plane.setToken('')}>退出</button>}</div>
         </header>
         {plane.error && <div className="error-banner"><span>{plane.error}</span><button title="关闭错误提示" onClick={plane.clearError}><X size={16} /></button></div>}
         <main>
-          {active === 'overview' && <OverviewView plane={plane} />}
-          {active === 'observability' && <ObservabilityView plane={plane} />}
-          {active === 'groups' && <GroupsView plane={plane} />}
-          {active === 'tasks' && <TasksView plane={plane} />}
-          {active === 'usage' && <UsageView plane={plane} />}
-          {active === 'tools' && <ToolsView plane={plane} />}
-          {active === 'traces' && <TracesView plane={plane} />}
-          {active === 'databases' && <DatabasesView plane={plane} />}
-          {active === 'sandboxes' && <SandboxesView plane={plane} />}
-          {active === 'media' && <MediaView plane={plane} />}
-          {active === 'audit' && <AuditView plane={plane} />}
-          {active === 'help' && <HelpView />}
+          {route.detail ? (
+            <DetailView detail={route.detail} plane={plane} onBack={() => openView(DETAIL_META[route.detail!].parent)} />
+          ) : (
+            <>
+              {active === 'overview' && <OverviewView plane={plane} onOpenDetail={openDetail} />}
+              {active === 'observability' && <ObservabilityView plane={plane} onOpenDetail={openDetail} />}
+              {active === 'groups' && <GroupsView plane={plane} />}
+              {active === 'tasks' && <TasksView plane={plane} onOpenDetail={openDetail} />}
+              {active === 'usage' && <UsageView plane={plane} onOpenDetail={openDetail} />}
+              {active === 'tools' && <ToolsView plane={plane} />}
+              {active === 'traces' && <TracesView plane={plane} onOpenDetail={openDetail} />}
+              {active === 'databases' && <DatabasesView plane={plane} />}
+              {active === 'sandboxes' && <SandboxesView plane={plane} />}
+              {active === 'media' && <MediaView plane={plane} onOpenDetail={openDetail} />}
+              {active === 'audit' && <AuditView plane={plane} onOpenDetail={openDetail} />}
+              {active === 'help' && <HelpView />}
+            </>
+          )}
         </main>
       </div>
     </div>

@@ -22,14 +22,17 @@ import {
   Section,
   StatusBadge,
   Toggle,
+  ViewAllButton,
   fmtBytes,
   fmtDuration,
   fmtNumber,
   fmtTime,
 } from './components'
+import type { DetailViewId } from './detailViews'
 import type { useControlPlane } from './useControlPlane'
 
 type Plane = ReturnType<typeof useControlPlane>
+type DetailOpener = (detail: DetailViewId) => void
 
 function rows(value: unknown): any[] {
   return Array.isArray(value) ? value : []
@@ -44,7 +47,7 @@ function jsonRows(value: unknown): any[] {
   }
 }
 
-export function OverviewView({ plane }: { plane: Plane }) {
+export function OverviewView({ plane, onOpenDetail }: { plane: Plane; onOpenDetail: DetailOpener }) {
   const overview = plane.data.overview ?? {}
   const observability = plane.data.observability ?? {}
   const totals = observability.process?.totals ?? {}
@@ -71,10 +74,10 @@ export function OverviewView({ plane }: { plane: Plane }) {
         <Metric label="90 天 Token" value={fmtNumber(usageTotals.input + usageTotals.output)} hint={`${fmtNumber(usageTotals.calls)} 次调用 · 输入 ${fmtNumber(usageTotals.input)} / 输出 ${fmtNumber(usageTotals.output)}`} />
       </div>
       <TokenUsageChart rows={usage} />
-      <Section title="最近消息投递" description="消息发往 QQ 后的回执状态；失败项可在“任务与投递”中重试">
+      <Section title="最近消息投递" description="消息发往 QQ 后的回执状态；失败项可在“任务与投递”中重试" action={<ViewAllButton count={deliveries.length} onClick={() => onOpenDetail('deliveries')} />}>
         <DataTable>
-          <thead><tr><th>投递</th><th>目标</th><th>状态</th><th>尝试</th><th>最后错误</th></tr></thead>
-          <tbody>{deliveries.slice(0, 8).map((delivery) => <tr key={delivery.delivery_id}><td><code>{delivery.handle ?? `delivery#${delivery.delivery_id}`}</code></td><td>{delivery.scope_key ?? delivery.conversation_id ?? '-'}</td><td><StatusBadge value={delivery.status} /></td><td>{fmtNumber(delivery.attempts)}</td><td className="truncate">{delivery.last_error || '-'}</td></tr>)}</tbody>
+          <thead><tr><th>更新时间</th><th>投递</th><th>目标</th><th>状态</th><th>尝试</th><th>最后错误</th></tr></thead>
+          <tbody>{deliveries.slice(0, 5).map((delivery) => <tr key={delivery.delivery_id}><td>{fmtTime(delivery.updated_at)}</td><td><code>{delivery.handle ?? `delivery#${delivery.delivery_id}`}</code></td><td>{delivery.scope_key ?? delivery.conversation_id ?? '-'}</td><td><StatusBadge value={delivery.status} /></td><td>{fmtNumber(delivery.attempts)}</td><td className="truncate">{delivery.last_error || '-'}</td></tr>)}</tbody>
         </DataTable>
         {!deliveries.length && <EmptyState>还没有消息投递记录</EmptyState>}
       </Section>
@@ -83,7 +86,7 @@ export function OverviewView({ plane }: { plane: Plane }) {
   )
 }
 
-export function UsageView({ plane }: { plane: Plane }) {
+export function UsageView({ plane, onOpenDetail }: { plane: Plane; onOpenDetail: DetailOpener }) {
   const usage = rows(plane.data.usage?.items)
   const totals = usage.reduce((sum, item) => ({
     calls: sum.calls + Number(item.calls ?? 0),
@@ -101,8 +104,8 @@ export function UsageView({ plane }: { plane: Plane }) {
         <Metric label="模型调用" value={fmtNumber(totals.calls)} hint={`缓存命中 ${fmtNumber(totals.cached)}`} />
       </div>
       <TokenUsageChart rows={usage} />
-      <Section title="用量明细" description="同一天可能按群、私聊和系统任务拆成多条记录">
-        <DataTable><thead><tr><th>日期</th><th>Scope</th><th>来源</th><th>调用</th><th>输入 Token</th><th>输出 Token</th><th>缓存命中</th></tr></thead><tbody>{usage.map((item, index) => <tr key={`${item.day}-${item.scope_key}-${item.source}-${index}`}><td>{item.day}</td><td><code>{item.scope_key || '-'}</code></td><td>{item.source || '-'}</td><td>{fmtNumber(item.calls)}</td><td>{fmtNumber(item.input_tokens)}</td><td>{fmtNumber(item.output_tokens)}</td><td>{fmtNumber(item.cached_tokens)}</td></tr>)}</tbody></DataTable>
+      <Section title="用量明细" description="同一天可能按群、私聊和系统任务拆成多条记录" action={<ViewAllButton count={usage.length} onClick={() => onOpenDetail('usage-records')} />}>
+        <DataTable><thead><tr><th>日期</th><th>Scope</th><th>来源</th><th>调用</th><th>输入 Token</th><th>输出 Token</th><th>缓存命中</th></tr></thead><tbody>{usage.slice(0, 5).map((item, index) => <tr key={`${item.day}-${item.scope_key}-${item.source}-${index}`}><td>{item.day}</td><td><code>{item.scope_key || '-'}</code></td><td>{item.source || '-'}</td><td>{fmtNumber(item.calls)}</td><td>{fmtNumber(item.input_tokens)}</td><td>{fmtNumber(item.output_tokens)}</td><td>{fmtNumber(item.cached_tokens)}</td></tr>)}</tbody></DataTable>
         {!usage.length && <EmptyState>当前统计周期没有模型用量</EmptyState>}
       </Section>
     </>
@@ -164,7 +167,7 @@ function MemberTable({ title, members, groupId, options, onCommit, collapsed = f
   )
 }
 
-export function TasksView({ plane }: { plane: Plane }) {
+export function TasksView({ plane, onOpenDetail }: { plane: Plane; onOpenDetail: DetailOpener }) {
   const tasks = rows(plane.data.tasks?.items)
   const jobs = rows(plane.data.jobs?.items)
   const deliveries = rows(plane.data.deliveries?.items)
@@ -175,11 +178,11 @@ export function TasksView({ plane }: { plane: Plane }) {
         <DataTable><thead><tr><th>任务</th><th>会话</th><th>摘要</th><th>耗时</th><th></th></tr></thead><tbody>{tasks.map((task) => <tr key={task.task_id}><td><code>{task.task_id}</code></td><td>{task.conversation_id}</td><td>{task.summary}</td><td>{fmtDuration(task.elapsed_seconds)}</td><td className="actions"><button className="icon-button danger" title="取消任务" onClick={() => void plane.mutate('tasks', `/tasks/${task.task_id}/cancel`, 'POST', {}, ['tasks'])}><Square size={15} /></button></td></tr>)}</tbody></DataTable>
         {!tasks.length && <EmptyState>当前没有正在运行的 Agent</EmptyState>}
       </Section>
-      <Section title="持久任务" description="后台执行、重试和租约状态">
-        <DataTable><thead><tr><th>任务</th><th>类型</th><th>范围</th><th>状态</th><th>尝试</th><th>更新时间</th><th></th></tr></thead><tbody>{jobs.map((job) => <tr key={job.job_id}><td><code>{job.handle}</code></td><td>{job.kind}</td><td>{job.scope_key || '-'}</td><td><StatusBadge value={job.status} /></td><td>{job.attempts}/{job.max_attempts}</td><td>{fmtTime(job.updated_at)}</td><td className="actions"><button className="icon-button" title="重试任务" onClick={() => void plane.mutate('jobs', `/jobs/${job.job_id}/retry`, 'POST', {}, ['jobs'])}><RotateCcw size={15} /></button><button className="icon-button danger" title="取消任务" onClick={() => void plane.mutate('jobs', `/jobs/${job.job_id}/cancel`, 'POST', {}, ['jobs'])}><Ban size={15} /></button></td></tr>)}</tbody></DataTable>
+      <Section title="持久任务" description="后台执行、重试和租约状态" action={<ViewAllButton count={jobs.length} onClick={() => onOpenDetail('jobs')} />}>
+        <DataTable><thead><tr><th>更新时间</th><th>任务</th><th>类型</th><th>范围</th><th>状态</th><th>尝试</th><th></th></tr></thead><tbody>{jobs.slice(0, 5).map((job) => <tr key={job.job_id}><td>{fmtTime(job.updated_at)}</td><td><code>{job.handle}</code></td><td>{job.kind}</td><td>{job.scope_key || '-'}</td><td><StatusBadge value={job.status} /></td><td>{job.attempts}/{job.max_attempts}</td><td className="actions"><button className="icon-button" title="重试任务" onClick={() => void plane.mutate('jobs', `/jobs/${job.job_id}/retry`, 'POST', {}, ['jobs'])}><RotateCcw size={15} /></button><button className="icon-button danger" title="取消任务" onClick={() => void plane.mutate('jobs', `/jobs/${job.job_id}/cancel`, 'POST', {}, ['jobs'])}><Ban size={15} /></button></td></tr>)}</tbody></DataTable>
       </Section>
-      <Section title="消息投递" description="失败投递可重试，未知结果不会自动重复发送">
-        <DataTable><thead><tr><th>ID</th><th>目标</th><th>状态</th><th>尝试</th><th>错误</th><th></th></tr></thead><tbody>{deliveries.map((delivery) => <tr key={delivery.delivery_id}><td><code>{delivery.handle ?? `delivery#${delivery.delivery_id}`}</code></td><td>{delivery.scope_key ?? delivery.conversation_id ?? '-'}</td><td><StatusBadge value={delivery.status} /></td><td>{delivery.attempts ?? 0}</td><td className="truncate">{delivery.last_error || '-'}</td><td className="actions"><button className="icon-button" title="重试投递" onClick={() => void plane.mutate('deliveries', `/deliveries/${delivery.delivery_id}/retry`, 'POST', {}, ['deliveries'])}><Play size={15} /></button><button className="icon-button danger" title="取消投递" onClick={() => void plane.mutate('deliveries', `/deliveries/${delivery.delivery_id}/cancel`, 'POST', {}, ['deliveries'])}><X size={15} /></button></td></tr>)}</tbody></DataTable>
+      <Section title="消息投递" description="失败投递可重试，未知结果不会自动重复发送" action={<ViewAllButton count={deliveries.length} onClick={() => onOpenDetail('deliveries')} />}>
+        <DataTable><thead><tr><th>更新时间</th><th>ID</th><th>目标</th><th>状态</th><th>尝试</th><th>错误</th><th></th></tr></thead><tbody>{deliveries.slice(0, 5).map((delivery) => <tr key={delivery.delivery_id}><td>{fmtTime(delivery.updated_at)}</td><td><code>{delivery.handle ?? `delivery#${delivery.delivery_id}`}</code></td><td>{delivery.scope_key ?? delivery.conversation_id ?? '-'}</td><td><StatusBadge value={delivery.status} /></td><td>{delivery.attempts ?? 0}</td><td className="truncate">{delivery.last_error || '-'}</td><td className="actions"><button className="icon-button" title="重试投递" onClick={() => void plane.mutate('deliveries', `/deliveries/${delivery.delivery_id}/retry`, 'POST', {}, ['deliveries'])}><Play size={15} /></button><button className="icon-button danger" title="取消投递" onClick={() => void plane.mutate('deliveries', `/deliveries/${delivery.delivery_id}/cancel`, 'POST', {}, ['deliveries'])}><X size={15} /></button></td></tr>)}</tbody></DataTable>
       </Section>
     </>
   )
@@ -197,17 +200,17 @@ export function ToolsView({ plane }: { plane: Plane }) {
   )
 }
 
-export function TracesView({ plane }: { plane: Plane }) {
+export function TracesView({ plane, onOpenDetail }: { plane: Plane; onOpenDetail: DetailOpener }) {
   const traces = rows(plane.data.traces?.items)
   const plans = rows(plane.data.contextPlans?.items)
   return (
     <>
       <PageHeader title="Trace 与上下文" description="每个回合的模型路由、工具调用、Token 和上下文决策" action={<RefreshButton onClick={() => void plane.refreshMany(['traces', 'contextPlans', 'observability'])} />} />
-      <Section title="最近 Trace" description="Trace ID 可以关联模型、工具和投递日志">
-        <DataTable><thead><tr><th>Trace ID</th><th>回合</th><th>模型</th><th>状态</th><th>耗时</th><th>工具</th><th>Token</th></tr></thead><tbody>{traces.map((trace) => <tr key={trace.trace_id}><td><code>{String(trace.trace_id).slice(0, 12)}</code></td><td>{trace.turn_handle}</td><td>{trace.profile}<small className="cell-sub">{trace.model}</small></td><td><StatusBadge value={trace.status} /></td><td>{fmtDuration(trace.duration_seconds)}</td><td>{trace.tool_call_count} / {trace.tool_failures} 失败</td><td>{fmtNumber(trace.total_tokens)}</td></tr>)}</tbody></DataTable>
+      <Section title="最近 Trace" description="Trace ID 可以关联模型、工具和投递日志" action={<ViewAllButton count={traces.length} onClick={() => onOpenDetail('traces')} />}>
+        <DataTable><thead><tr><th>开始时间</th><th>Trace ID</th><th>回合</th><th>模型</th><th>状态</th><th>耗时</th><th>工具</th><th>Token</th></tr></thead><tbody>{traces.slice(0, 5).map((trace) => <tr key={trace.trace_id}><td>{fmtTime(trace.started_at)}</td><td><code>{String(trace.trace_id).slice(0, 12)}</code></td><td>{trace.turn_handle}</td><td>{trace.profile}<small className="cell-sub">{trace.model}</small></td><td><StatusBadge value={trace.status} /></td><td>{fmtDuration(trace.duration_seconds)}</td><td>{trace.tool_call_count} / {trace.tool_failures} 失败</td><td>{fmtNumber(trace.total_tokens)}</td></tr>)}</tbody></DataTable>
       </Section>
-      <Section title="上下文决策" description="焦点消息、相关候选和 Reranker 置信度">
-        <DataTable><thead><tr><th>回合</th><th>范围</th><th>焦点</th><th>置信度</th><th>理由</th><th>状态</th></tr></thead><tbody>{plans.map((plan) => <tr key={`${plan.scope_key}-${plan.turn_handle}`}><td>{plan.turn_handle}</td><td><code>{plan.scope_key}</code></td><td>msg#{plan.focus_message_id}</td><td>{Math.round(Number(plan.confidence ?? 0) * 100)}%</td><td className="capabilities">{rows(plan.reason_codes).map((reason) => <span key={reason}>{reason}</span>)}</td><td><StatusBadge value={plan.status} /></td></tr>)}</tbody></DataTable>
+      <Section title="上下文决策" description="焦点消息、相关候选和 Reranker 置信度" action={<ViewAllButton count={plans.length} onClick={() => onOpenDetail('context-plans')} />}>
+        <DataTable><thead><tr><th>决策时间</th><th>回合</th><th>范围</th><th>焦点</th><th>置信度</th><th>理由</th><th>状态</th></tr></thead><tbody>{plans.slice(0, 5).map((plan) => <tr key={`${plan.scope_key}-${plan.turn_handle}`}><td>{fmtTime(plan.created_at)}</td><td>{plan.turn_handle}</td><td><code>{plan.scope_key}</code></td><td>{plan.focus_message_id ? `msg#${plan.focus_message_id}` : '-'}</td><td>{Math.round(Number(plan.confidence ?? 0) * 100)}%</td><td className="capabilities">{rows(plan.reason_codes).map((reason) => <span key={reason}>{reason}</span>)}</td><td><StatusBadge value={plan.status} /></td></tr>)}</tbody></DataTable>
       </Section>
     </>
   )
@@ -238,7 +241,7 @@ export function SandboxesView({ plane }: { plane: Plane }) {
   )
 }
 
-export function MediaView({ plane }: { plane: Plane }) {
+export function MediaView({ plane, onOpenDetail }: { plane: Plane; onOpenDetail: DetailOpener }) {
   const media = plane.data.media ?? {}
   const items = rows(media.items)
   const sources = rows(plane.data.sources?.items)
@@ -247,31 +250,31 @@ export function MediaView({ plane }: { plane: Plane }) {
     <>
       <PageHeader title="媒体审核" description="普通图片不长期保存；表情候选经过识图、安全判断和人工审核" action={<RefreshButton onClick={() => void plane.refreshMany(['media', 'stickers', 'sources'])} />} />
       <div className="metric-grid compact"><Metric label="可发表情" value={fmtNumber(media.counts?.stickers)} /><Metric label="占用空间" value={fmtBytes(media.counts?.bytes)} /><Metric label="处理队列" value={fmtNumber(media.counts?.queued)} /><Metric label="失败任务" value={fmtNumber(media.counts?.failed)} /></div>
-      <Section title="表情候选" description={`识图模型：${media.vision_profile ?? '-'}`}>
-        <DataTable><thead><tr><th>媒体</th><th>标签</th><th>识图模型</th><th>安全</th><th>发送</th><th>审核</th></tr></thead><tbody>{items.map((item) => <tr key={item.media_id}><td><code>media#{item.media_id}</code><small className="cell-sub">{fmtBytes(item.byte_size)}</small></td><td><strong>{item.summary || '未命名'}</strong><div className="capabilities">{jsonRows(item.emotions_json).slice(0, 3).map((tag) => <span key={tag}>{tag}</span>)}</div></td><td>{item.vision_model}</td><td><StatusBadge value={item.safety} /></td><td>{item.enabled && !item.banned ? `已启用 · ${item.times_sent} 次` : item.banned ? '已拒绝' : '未启用'}</td><td className="actions"><button className="icon-button success" title="批准并允许发送" onClick={() => void review(item.media_id, 'approved')}><Check size={15} /></button><button className="icon-button" title="保留待审" onClick={() => void review(item.media_id, 'pending')}><Clock3 size={15} /></button><button className="icon-button danger" title="拒绝并禁止发送" onClick={() => void review(item.media_id, 'rejected')}><X size={15} /></button></td></tr>)}</tbody></DataTable>
+      <Section title="表情候选" description={`识图模型：${media.vision_profile ?? '-'}`} action={<ViewAllButton count={items.length} onClick={() => onOpenDetail('media-items')} />}>
+        <DataTable><thead><tr><th>最后出现</th><th>媒体</th><th>标签</th><th>识图模型</th><th>安全</th><th>发送</th><th>审核</th></tr></thead><tbody>{items.slice(0, 5).map((item) => <tr key={item.media_id}><td>{fmtTime(item.last_seen_at)}</td><td><code>media#{item.media_id}</code><small className="cell-sub">{fmtBytes(item.byte_size)}</small></td><td><strong>{item.summary || '未命名'}</strong><div className="capabilities">{jsonRows(item.emotions_json).slice(0, 3).map((tag) => <span key={tag}>{tag}</span>)}</div></td><td>{item.vision_model}</td><td><StatusBadge value={item.safety} /></td><td>{item.enabled && !item.banned ? `已启用 · ${item.times_sent} 次` : item.banned ? '已拒绝' : '未启用'}</td><td className="actions"><button className="icon-button success" title="批准并允许发送" onClick={() => void review(item.media_id, 'approved')}><Check size={15} /></button><button className="icon-button" title="保留待审" onClick={() => void review(item.media_id, 'pending')}><Clock3 size={15} /></button><button className="icon-button danger" title="拒绝并禁止发送" onClick={() => void review(item.media_id, 'rejected')}><X size={15} /></button></td></tr>)}</tbody></DataTable>
       </Section>
-      <Section title="分享内容" description="B站、小红书及其他平台的帖子和视频解析记录">
-        <DataTable><thead><tr><th>平台</th><th>标题</th><th>类型</th><th>状态</th><th>更新时间</th></tr></thead><tbody>{sources.map((source) => <tr key={source.source_id}><td>{source.platform}</td><td>{source.title || source.canonical_url}<ExternalLink className="inline-icon" size={13} /></td><td>{source.content_kind}</td><td><StatusBadge value={source.status} /></td><td>{fmtTime(source.updated_at)}</td></tr>)}</tbody></DataTable>
+      <Section title="分享内容" description="B站、小红书及其他平台的帖子和视频解析记录" action={<ViewAllButton count={sources.length} onClick={() => onOpenDetail('sources')} />}>
+        <DataTable><thead><tr><th>最后出现</th><th>平台</th><th>标题</th><th>类型</th><th>状态</th></tr></thead><tbody>{sources.slice(0, 5).map((source) => <tr key={source.source_id}><td>{fmtTime(source.last_seen_at ?? source.fetched_at)}</td><td>{source.platform}</td><td>{source.title || source.canonical_url}<ExternalLink className="inline-icon" size={13} /></td><td>{source.content_kind}</td><td><StatusBadge value={source.status} /></td></tr>)}</tbody></DataTable>
       </Section>
     </>
   )
 }
 
-export function AuditView({ plane }: { plane: Plane }) {
+export function AuditView({ plane, onOpenDetail }: { plane: Plane; onOpenDetail: DetailOpener }) {
   const payload = plane.data.audit ?? {}
   const items = rows(payload.items)
   return (
     <>
       <PageHeader title="审计记录" description="所有控制台写操作都带资源版本、操作者、目标和结果" action={<RefreshButton onClick={() => void plane.refreshMany(['audit', 'versions'])} />} />
       <div className="audit-banner"><ShieldCheck size={20} /><div><strong>{payload.persistent ? 'PostgreSQL 持久审计已启用' : '当前使用进程内审计'}</strong><p>乐观并发会拒绝基于旧版本提交的修改。</p></div></div>
-      <Section title="最近修改">
-        <DataTable><thead><tr><th>时间</th><th>资源版本</th><th>动作</th><th>目标</th><th>操作者</th><th>结果</th></tr></thead><tbody>{items.map((item) => <tr key={item.audit_id}><td>{fmtTime(item.created_at)}</td><td><code>{item.resource_key}@{item.resource_version}</code></td><td>{item.action}</td><td>{item.target || '-'}</td><td>{item.actor}</td><td><StatusBadge value={item.status} /></td></tr>)}</tbody></DataTable>
+      <Section title="最近修改" action={<ViewAllButton count={items.length} onClick={() => onOpenDetail('audit-records')} />}>
+        <DataTable><thead><tr><th>时间</th><th>资源版本</th><th>动作</th><th>目标</th><th>操作者</th><th>结果</th></tr></thead><tbody>{items.slice(0, 5).map((item) => <tr key={item.audit_id}><td>{fmtTime(item.created_at)}</td><td><code>{item.resource_key}@{item.resource_version}</code></td><td>{item.action}</td><td>{item.target || '-'}</td><td>{item.actor}</td><td><StatusBadge value={item.status} /></td></tr>)}</tbody></DataTable>
       </Section>
     </>
   )
 }
 
-export function ObservabilityView({ plane }: { plane: Plane }) {
+export function ObservabilityView({ plane, onOpenDetail }: { plane: Plane; onOpenDetail: DetailOpener }) {
   const data = plane.data.observability ?? {}
   const process = data.process ?? {}
   const alerts = rows(data.alertmanager?.items)
@@ -280,7 +283,7 @@ export function ObservabilityView({ plane }: { plane: Plane }) {
       <PageHeader title="可观测性" description="Prometheus、告警、阶段延迟、模型降级和工具表现" action={<RefreshButton onClick={() => void plane.refresh('observability')} />} />
       <div className="metric-grid"><Metric label="Prometheus" value={<StatusBadge value={data.prometheus?.available ? 'online' : 'offline'} />} hint={data.prometheus?.url ?? '未配置'} /><Metric label="活动告警" value={alerts.length} /><Metric label="模型请求" value={fmtNumber(process.totals?.model_requests)} /><Metric label="降级路由" value={fmtNumber(rows(process.fallback_routes).length)} /></div>
       <Section title="模型延迟"><DataTable><thead><tr><th>模型</th><th>请求</th><th>失败</th><th>P50</th><th>P95</th></tr></thead><tbody>{rows(process.models).map((model) => <tr key={model.profile ?? model.model}><td>{model.profile ?? model.model}</td><td>{fmtNumber(model.requests)}</td><td>{fmtNumber(model.failures)}</td><td>{model.p50_ms ?? '-'} ms</td><td>{model.p95_ms ?? '-'} ms</td></tr>)}</tbody></DataTable></Section>
-      <Section title="活动告警">{alerts.length ? alerts.map((alert) => <div className="alert-row" key={alert.fingerprint ?? alert.name}><CircleAlert size={17} /><div><strong>{alert.name}</strong><p>{alert.summary || alert.description}</p></div><StatusBadge value={alert.severity} /></div>) : <EmptyState>当前没有活动告警</EmptyState>}</Section>
+      <Section title="活动告警" description="按触发时间倒序显示最近 5 条" action={<ViewAllButton count={alerts.length} onClick={() => onOpenDetail('alerts')} />}>{alerts.length ? [...alerts].sort((left, right) => Date.parse(String(right.starts_at || '')) - Date.parse(String(left.starts_at || ''))).slice(0, 5).map((alert) => <div className="alert-row" key={alert.fingerprint ?? alert.name}><CircleAlert size={17} /><div><strong>{alert.name}</strong><p>{alert.summary || alert.description}</p><time>{fmtTime(alert.starts_at)}</time></div><StatusBadge value={alert.severity} /></div>) : <EmptyState>当前没有活动告警</EmptyState>}</Section>
     </>
   )
 }
@@ -315,6 +318,7 @@ const HELP_SECTIONS = [
   {
     title: '实时更新规则',
     items: [
+      ['摘要与详情', '告警、任务、投递、Trace、上下文、媒体和审计等高频记录在主页面只显示最近 5 条。点击“查看全部”进入独立详情页，可搜索、分页并查看精确到秒的上海时间。'],
       ['实时状态', '右上角“实时”表示 SSE 已连接。后台只增量更新发生变化的资源，编辑中的下拉框不会因刷新而关闭。'],
       ['手动刷新', '侧栏“刷新数据”或右上角刷新按钮会重新拉取全部面板；用于刚部署完成、网络恢复或怀疑数据未同步时。'],
       ['安全边界', '管理 Token 只保存在当前浏览器本地，模型密钥不会返回前端。危险工具仍需宿主批准，数据库和媒体操作都有审计。'],

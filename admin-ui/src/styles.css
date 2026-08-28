@@ -76,6 +76,8 @@ main { width: min(1480px, 100%); margin: 0 auto; padding: 24px 28px 56px; }
 .section-heading h2, .group-card h2, .database-card h2, .sandbox-card h2 { margin: 0; font-size: 15px; font-weight: 680; }
 .section-heading p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
 .section h3 { margin: 0 0 9px; font-size: 12px; color: #52525b; }
+.view-all-button { min-height: 30px; display: inline-flex; align-items: center; gap: 6px; padding: 0 9px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: #52525b; font-size: 10px; white-space: nowrap; }
+.view-all-button:hover { border-color: var(--border-strong); color: var(--foreground); background: var(--surface-subtle); }
 .metric-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-bottom: 24px; }
 .metric-grid.compact { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .metric { min-width: 0; min-height: 124px; display: grid; align-content: center; gap: 8px; padding: 18px 19px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
@@ -165,7 +167,27 @@ dd { margin: 0; font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
 .alert-row > div { flex: 1; display: grid; gap: 3px; }
 .alert-row strong { font-size: 12px; }
 .alert-row p { margin: 0; color: var(--muted); font-size: 10px; }
+.alert-row time { color: #a1a1aa; font-family: "SFMono-Regular", Consolas, monospace; font-size: 9px; }
 .alert-row svg { color: var(--amber); }
+.detail-page { display: grid; gap: 14px; }
+.detail-toolbar { min-height: 48px; display: flex; align-items: center; gap: 12px; padding-bottom: 13px; border-bottom: 1px solid var(--border); }
+.back-button { min-height: 32px; display: inline-flex; align-items: center; gap: 7px; padding: 0 9px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: #52525b; font-size: 11px; }
+.back-button:hover { border-color: var(--border-strong); color: var(--foreground); }
+.detail-total { margin-left: auto; display: flex; align-items: baseline; gap: 5px; color: var(--muted); }
+.detail-total strong { color: var(--foreground); font-size: 17px; }
+.detail-total span { font-size: 10px; }
+.detail-filters { display: flex; align-items: center; gap: 10px; }
+.search-field { position: relative; width: min(420px, 100%); }
+.search-field svg { position: absolute; top: 50%; left: 10px; color: var(--muted); transform: translateY(-50%); pointer-events: none; }
+.search-field input { width: 100%; padding-left: 32px; }
+.page-size { margin-left: auto; display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 10px; }
+.page-size select { min-width: 88px; }
+.inline-error { min-height: 38px; display: flex; align-items: center; padding: 8px 11px; border: 1px solid #fecaca; background: var(--red-soft); color: #991b1b; font-size: 11px; }
+.pagination { min-height: 38px; display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 10px; }
+.pagination > div { display: flex; gap: 5px; }
+.detail-message { min-width: 220px; max-width: 420px; white-space: normal; overflow-wrap: anywhere; }
+.record-link { display: inline-flex; align-items: center; gap: 5px; color: #1d4ed8; text-decoration: none; }
+.record-link:hover { text-decoration: underline; }
 .usage-panel { margin-bottom: 24px; padding: 20px 20px 13px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
 .usage-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
 .usage-heading h2 { margin: 0; font-size: 15px; font-weight: 700; }
@@ -243,6 +265,10 @@ dd { margin: 0; font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
   .guide-intro span { text-align: left; }
   .usage-panel { padding: 15px 12px 10px; }
   .usage-heading { align-items: stretch; flex-direction: column; }
+  .detail-filters { align-items: stretch; flex-direction: column; }
+  .search-field { width: 100%; }
+  .page-size { width: 100%; margin-left: 0; justify-content: space-between; }
+  .detail-total span { display: none; }
   .segment-control { align-self: flex-start; }
   .chart-legend { justify-content: flex-start; flex-wrap: wrap; }
   .chart-legend .legend-note { width: 100%; margin-left: 0; }

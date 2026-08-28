@@ -86,6 +86,10 @@ export class AdminClient {
     return this.request(RESOURCE_PATHS[name], { signal })
   }
 
+  async query(path: string, signal?: AbortSignal): Promise<JsonObject> {
+    return this.request(path, { signal })
+  }
+
   async mutate(
     path: string,
     method: 'POST' | 'PUT' | 'DELETE',

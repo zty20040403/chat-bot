@@ -93,6 +93,10 @@ export function useControlPlane(runtime: KennethbotAdminRuntime) {
     [refresh],
   )
   const refreshAll = useCallback(() => refreshMany(INITIAL_RESOURCES), [refreshMany])
+  const query = useCallback(
+    (path: string, signal?: AbortSignal) => client.query(path, signal),
+    [client],
+  )
 
   useEffect(() => {
     if (!authenticated) return
@@ -183,6 +187,7 @@ export function useControlPlane(runtime: KennethbotAdminRuntime) {
     refresh,
     refreshMany,
     refreshAll,
+    query,
     mutate,
   }
 }
