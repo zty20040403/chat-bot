@@ -74,7 +74,7 @@ class AlertNotificationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(delivered, 0)
         self.assertEqual(bot.calls, [])
 
-    async def test_new_alert_mentions_all_and_is_not_repeated(self) -> None:
+    async def test_new_alert_does_not_mention_all_and_is_not_repeated(self) -> None:
         current = [alert("existing")]
         bot = Bot()
         with tempfile.TemporaryDirectory() as directory:
@@ -107,10 +107,8 @@ class AlertNotificationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(bot.calls), 1)
         self.assertEqual(bot.calls[0]["group_id"], 611798505)
         message = bot.calls[0]["message"]
-        self.assertEqual(message[0].type, "at")
-        self.assertEqual(message[0].data["qq"], "all")
-        self.assertIn("tank 服务器寄了", str(message))
-        self.assertIn("问题等级：严重（critical）", str(message))
+        self.assertTrue(all(segment.type != "at" for segment in message))
+        self.assertIn("严重｜tank｜服务器寄了", str(message))
         self.assertIn("2026-08-28 11:00:00", str(message))
 
     async def test_persisted_state_prevents_replay_after_restart(self) -> None:
@@ -143,12 +141,15 @@ class AlertNotificationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(delivered, 0)
         self.assertEqual(bot.calls, [])
 
-    def test_warning_notification_uses_calm_but_urgent_wording(self) -> None:
+    def test_warning_notification_is_compact(self) -> None:
         text = format_alert_notification([alert("warning")])
 
-        self.assertIn("【活动告警｜警告】", text)
-        self.assertIn("需要尽快看一下", text)
-        self.assertIn("发生了什么：链路连续丢包", text)
+        self.assertEqual(
+            text,
+            "【活动告警】\n"
+            "1. 警告｜h610 → tank｜h610 到 tank 丢包 30%"
+            "｜2026-08-28 10:20:55",
+        )
 
 
 async def _result(value: list[ActivityAlert]) -> list[ActivityAlert]:

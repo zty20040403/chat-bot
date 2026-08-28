@@ -130,10 +130,7 @@ class AlertNotificationService:
             return 0
 
         message = Message(
-            [
-                MessageSegment.at("all"),
-                MessageSegment.text("\n" + format_alert_notification(new_alerts)),
-            ]
+            [MessageSegment.text(format_alert_notification(new_alerts))]
         )
         try:
             await bots[0].send_group_msg(
@@ -146,7 +143,7 @@ class AlertNotificationService:
                 return 0
             self._logger.warning(
                 "Activity alert notification receipt timed out; treating the "
-                "outcome as delivered to avoid duplicate @all messages."
+                "outcome as delivered to avoid duplicate alert messages."
             )
         except (OSError, RuntimeError, TypeError, ValueError) as exc:
             self._logger.warning(f"Activity alert notification failed: {exc}")
@@ -218,35 +215,26 @@ def format_alert_notification(alerts: Sequence[ActivityAlert]) -> str:
     )
     highest = max((_severity_rank(alert.severity) for alert in ordered), default=0)
     if highest >= 3:
-        heading = "【紧急活动告警｜严重】"
-        intro = "快看，出现严重告警了。"
-        ending = "请马上检查相关服务器和网络。"
+        heading = "【紧急告警】"
     elif highest == 2:
-        heading = "【活动告警｜警告】"
-        intro = "出现了新的活动告警，需要尽快看一下。"
-        ending = "请尽快检查，避免问题继续扩大。"
+        heading = "【活动告警】"
     else:
-        heading = "【活动告警｜提示】"
-        intro = "监控发现了一条新情况。"
-        ending = "请在方便时确认一下。"
+        heading = "【监控提示】"
 
-    lines = [heading, intro]
+    lines = [heading]
     for index, alert in enumerate(ordered, start=1):
         level = _severity_label(alert.severity)
         if alert.is_server_down and alert.instance:
-            problem = f"{alert.instance} 服务器寄了"
+            target = alert.instance
+            problem = "服务器寄了"
         else:
-            problem = _compact(alert.summary) or alert.name
-        lines.extend(
-            (
-                "",
-                f"{index}. {problem}",
-                f"问题等级：{level}（{alert.severity or 'unknown'}）",
-                f"发生时间：{_format_time(alert.starts_at)}",
-                f"发生了什么：{_alert_detail(alert)}",
-            )
+            target = " → ".join(
+                value for value in (alert.instance, alert.peer) if value
+            ) or alert.name
+            problem = (_compact(alert.summary) or alert.name)[:120]
+        lines.append(
+            f"{index}. {level}｜{target}｜{problem}｜{_format_time(alert.starts_at)}"
         )
-    lines.extend(("", ending))
     return "\n".join(lines)
 
 
@@ -265,16 +253,6 @@ def _parse_alert(raw: dict[str, Any]) -> ActivityAlert:
         starts_at=str(raw.get("startsAt") or "")[:64],
         fingerprint=str(raw.get("fingerprint") or _fallback_fingerprint(raw))[:128],
     )
-
-
-def _alert_detail(alert: ActivityAlert) -> str:
-    summary = _compact(alert.summary)
-    description = _compact(alert.description)
-    if alert.is_server_down and alert.instance:
-        prefix = f"监控目前已经无法联系 {alert.instance}。"
-        evidence = description or summary
-        return f"{prefix} {evidence}".strip()
-    return description or summary or f"监控触发了 {alert.name}。"
 
 
 def _severity_rank(severity: str) -> int:
