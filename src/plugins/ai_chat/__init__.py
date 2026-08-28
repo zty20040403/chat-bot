@@ -34,6 +34,7 @@ from nonebot.message import event_preprocessor
 from nonebot.params import CommandArg
 
 from .agent_tools import AGENT_TOOL_PROMPT, AgentToolExecutor
+from .alert_notifier import AlertNotificationService
 from .adapters import OneBotIngestAdapter
 from .bootstrap import register_http_surfaces
 from .bridges import (
@@ -299,6 +300,13 @@ if (
         logger.warning(f"Deep video analysis is unavailable: {exc}")
 cold_archive = app_context.cold_archive
 background_tasks = app_context.background_tasks
+alert_notifier = AlertNotificationService(
+    alertmanager_url=settings.alertmanager_url,
+    group_id=settings.alert_notify_group_id,
+    check_seconds=settings.alert_notify_check_seconds,
+    state_path=app_context.state_dir / "alert-notifier.json",
+    logger=logger,
+)
 BOT_STARTED_AT = app_context.started_at
 driver = get_driver()
 
@@ -388,6 +396,16 @@ onebot_ingest_adapter = OneBotIngestAdapter(
 
 @driver.on_startup
 async def start_background_tasks() -> None:
+    if (
+        settings.alert_notify_enabled
+        and settings.alertmanager_url
+        and settings.alert_notify_group_id > 0
+        and background_tasks.start("alert-notifier", alert_notifier.run_forever)
+    ):
+        logger.info(
+            "Activity alert QQ notifier enabled for group "
+            f"{settings.alert_notify_group_id}."
+        )
     if (
         job_store is not None
         and media_library is not None

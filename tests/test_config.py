@@ -104,6 +104,22 @@ class SettingsGroupFilterTests(unittest.TestCase):
 
         self.assertEqual(settings.admin_user_ids, {3526452465, 2291939848})
 
+    def test_activity_alert_notification_settings(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "AI_ALERT_NOTIFY_ENABLED": "true",
+                "AI_ALERT_NOTIFY_GROUP_ID": "611798505",
+                "AI_ALERT_NOTIFY_CHECK_SECONDS": "5",
+            },
+            clear=True,
+        ):
+            settings = Settings.from_env()
+
+        self.assertTrue(settings.alert_notify_enabled)
+        self.assertEqual(settings.alert_notify_group_id, 611798505)
+        self.assertEqual(settings.alert_notify_check_seconds, 10)
+
     def test_postgres_node_names_parse_in_dsn_order(self) -> None:
         with patch.dict(
             os.environ,

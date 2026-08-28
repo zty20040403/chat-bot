@@ -240,6 +240,9 @@ class Settings:
     metrics_path: str
     prometheus_url: str
     alertmanager_url: str
+    alert_notify_enabled: bool
+    alert_notify_group_id: int
+    alert_notify_check_seconds: int
     otel_service_name: str
     otel_exporter_otlp_endpoint: str
     mirror_routes_json: str
@@ -729,6 +732,15 @@ class Settings:
             ),
             prometheus_url=os.getenv("AI_PROMETHEUS_URL", "").strip().rstrip("/"),
             alertmanager_url=os.getenv("AI_ALERTMANAGER_URL", "").strip().rstrip("/"),
+            alert_notify_enabled=_get_bool("AI_ALERT_NOTIFY_ENABLED", False),
+            alert_notify_group_id=max(
+                _get_int("AI_ALERT_NOTIFY_GROUP_ID", 0),
+                0,
+            ),
+            alert_notify_check_seconds=max(
+                _get_int("AI_ALERT_NOTIFY_CHECK_SECONDS", 30),
+                10,
+            ),
             otel_service_name=(
                 os.getenv("OTEL_SERVICE_NAME", "kennethbot").strip()
                 or "kennethbot"
