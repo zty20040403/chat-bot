@@ -133,6 +133,7 @@ from .proactive import (
     parse_proactive_decision,
     should_use_proactive_voice,
 )
+from .runtime_clock import runtime_clock_prompt
 from .paths import CACHE_DIR, PROJECT_ROOT, STATE_DIR
 from .ocr import (
     OCRError,

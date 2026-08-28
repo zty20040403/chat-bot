@@ -51,6 +51,9 @@ from .proactive import (
     parse_proactive_decision,
     should_use_proactive_voice,
 )
+from .runtime_clock import (
+    runtime_clock_prompt,
+)
 from .semantic_recall import (
     SemanticDocument,
 )
@@ -66,6 +69,7 @@ async def _generate_proactive_reply(
 ) -> ProactiveDecision:
     system_prompt = (
         f"以下是你在群里的固定人设：\n{settings.system_prompt}\n\n"
+        f"{runtime_clock_prompt()}\n\n"
         "你是QQ群中一个有自己兴趣、但很少抢话的普通群友。现在每条未点名消息都会"
         "让你判断一次，不代表你应该回复。结合你的人设和最近群聊，返回 JSON："
         "interest 是 0 到 100 的整数；reply 是你真想插话时的一句简短自然回复，否则"

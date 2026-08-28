@@ -9,7 +9,6 @@ import re
 import time
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from datetime import date
 from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, Literal
 
@@ -18,6 +17,7 @@ from .config import settings
 from .llm_gateway import LLMConfigError, LLMGateway
 from .model_catalog import ModelCatalog, ModelProfile
 from .observability import current_trace_id, telemetry
+from .runtime_clock import runtime_clock_prompt
 from .tool_policy import (
     ToolApproval,
     ToolCatalog,
@@ -171,7 +171,7 @@ def _build_system_prompt(
 ) -> str:
     prompt_parts = [
         settings.system_prompt,
-        f"当前日期是 {date.today().isoformat()}（Asia/Shanghai）。",
+        runtime_clock_prompt(),
     ]
 
     if current_user:
