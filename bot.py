@@ -15,4 +15,4 @@ nonebot.load_plugin("src.plugins.ai_chat")
 
 
 if __name__ == "__main__":
-    nonebot.run()
+    nonebot.run(timeout_graceful_shutdown=10)
