@@ -11,6 +11,7 @@ import {
 const INITIAL_RESOURCES: ResourceName[] = [
   'overview',
   'observability',
+  'alerts',
   'deliveries',
   'usage',
   'tasks',
@@ -139,7 +140,7 @@ export function useControlPlane(runtime: KennethbotAdminRuntime) {
   useEffect(() => {
     if (!authenticated) return
     const timer = window.setInterval(() => {
-      void refreshMany(['overview', 'observability', 'databases', 'usage'])
+      void refreshMany(['overview', 'observability', 'alerts', 'databases', 'usage'])
     }, 30000)
     return () => window.clearInterval(timer)
   }, [authenticated, refreshMany])

@@ -113,6 +113,8 @@ _IDENTITY_COLUMNS = {
     "content_sources": "source_id",
     "message_sources": "message_source_id",
     "durable_jobs": "job_id",
+    "alert_events": "event_id",
+    "alert_notifications": "notification_id",
 }
 
 

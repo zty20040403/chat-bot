@@ -278,12 +278,21 @@ export function ObservabilityView({ plane, onOpenDetail }: { plane: Plane; onOpe
   const data = plane.data.observability ?? {}
   const process = data.process ?? {}
   const alerts = rows(data.alertmanager?.items)
+  const history = plane.data.alerts ?? data.alert_history ?? {}
+  const summary = history.summary ?? {}
+  const events = rows(history.events)
+  const incidents = rows(history.incidents)
+  const notifications = rows(history.notifications)
   return (
     <>
-      <PageHeader title="可观测性" description="Prometheus、告警、阶段延迟、模型降级和工具表现" action={<RefreshButton onClick={() => void plane.refresh('observability')} />} />
-      <div className="metric-grid"><Metric label="Prometheus" value={<StatusBadge value={data.prometheus?.available ? 'online' : 'offline'} />} hint={data.prometheus?.url ?? '未配置'} /><Metric label="活动告警" value={alerts.length} /><Metric label="模型请求" value={fmtNumber(process.totals?.model_requests)} /><Metric label="降级路由" value={fmtNumber(rows(process.fallback_routes).length)} /></div>
+      <PageHeader title="可观测性" description="Prometheus、告警事故、阶段延迟、模型降级和工具表现" action={<RefreshButton onClick={() => void plane.refreshMany(['observability', 'alerts'])} />} />
+      <div className="metric-grid"><Metric label="当前活动" value={fmtNumber(data.alertmanager?.active_count ?? alerts.length)} hint={`${fmtNumber(summary.current_incidents)} 个根因事故`} /><Metric label="今日触发" value={fmtNumber(summary.triggered)} hint={`${fmtNumber(summary.firing_notifications)} 次 QQ 通知`} /><Metric label="今日恢复" value={fmtNumber(summary.resolved)} hint={`${fmtNumber(summary.recovery_notifications)} 次恢复通知`} /><Metric label="今日根因事故" value={fmtNumber(summary.incidents)} /></div>
+      <div className="metric-grid"><Metric label="Prometheus" value={<StatusBadge value={data.prometheus?.available ? 'online' : 'offline'} />} hint={data.prometheus?.url ?? '未配置'} /><Metric label="模型请求" value={fmtNumber(process.totals?.model_requests)} /><Metric label="降级路由" value={fmtNumber(rows(process.fallback_routes).length)} /><Metric label="工具失败" value={fmtNumber(process.totals?.tool_failures)} /></div>
       <Section title="模型延迟"><DataTable><thead><tr><th>模型</th><th>请求</th><th>失败</th><th>P50</th><th>P95</th></tr></thead><tbody>{rows(process.models).map((model) => <tr key={model.profile ?? model.model}><td>{model.profile ?? model.model}</td><td>{fmtNumber(model.requests)}</td><td>{fmtNumber(model.failures)}</td><td>{model.p50_ms ?? '-'} ms</td><td>{model.p95_ms ?? '-'} ms</td></tr>)}</tbody></DataTable></Section>
-      <Section title="活动告警" description="按触发时间倒序显示最近 5 条" action={<ViewAllButton count={alerts.length} onClick={() => onOpenDetail('alerts')} />}>{alerts.length ? [...alerts].sort((left, right) => Date.parse(String(right.starts_at || '')) - Date.parse(String(left.starts_at || ''))).slice(0, 5).map((alert) => <div className="alert-row" key={alert.fingerprint ?? alert.name}><CircleAlert size={17} /><div><strong>{alert.name}</strong><p>{alert.summary || alert.description}</p><time>{fmtTime(alert.starts_at)}</time></div><StatusBadge value={alert.severity} /></div>) : <EmptyState>当前没有活动告警</EmptyState>}</Section>
+      <Section title="当前活动告警" description="此刻仍未恢复，按触发时间倒序显示最近 5 条" action={<ViewAllButton count={alerts.length} onClick={() => onOpenDetail('alerts')} />}>{alerts.length ? [...alerts].sort((left, right) => Date.parse(String(right.starts_at || '')) - Date.parse(String(left.starts_at || ''))).slice(0, 5).map((alert) => <div className="alert-row" key={alert.fingerprint ?? alert.name}><CircleAlert size={17} /><div><strong>{alert.name}</strong><p>{alert.summary || alert.description}</p><time>{fmtTime(alert.starts_at)}</time></div><StatusBadge value={alert.severity} /></div>) : <EmptyState>当前没有活动告警</EmptyState>}</Section>
+      <Section title="根因事故" description="相关链路告警已按受影响主机或服务合并" action={<ViewAllButton count={incidents.length} onClick={() => onOpenDetail('alert-incidents')} />}>{incidents.length ? incidents.slice(0, 5).map((incident) => <div className="alert-row" key={incident.incident_key}><CircleAlert size={17} /><div><strong>{incident.incident_key}</strong><p>{incident.summary || incident.name} · 合并 {fmtNumber(incident.event_count)} 条</p><time>{fmtTime(incident.last_seen_at)}</time></div><StatusBadge value={incident.status} /></div>) : <EmptyState>暂无事故记录</EmptyState>}</Section>
+      <Section title="最近告警事件" description="包括已恢复以及被根因事故合并的原始事件" action={<ViewAllButton count={events.length} onClick={() => onOpenDetail('alert-events')} />}>{events.length ? events.slice(0, 5).map((event) => <div className="alert-row" key={event.event_id}><CircleAlert size={17} /><div><strong>{event.name}</strong><p>{event.summary || event.description}{event.suppressed ? ' · 已合并压制' : ''}</p><time>{fmtTime(event.first_seen_at)}</time></div><StatusBadge value={event.status} /></div>) : <EmptyState>暂无告警历史</EmptyState>}</Section>
+      <Section title="QQ 告警通知" description="只记录事故首次发生、严重升级和完全恢复" action={<ViewAllButton count={notifications.length} onClick={() => onOpenDetail('alert-notifications')} />}>{notifications.length ? notifications.slice(0, 5).map((notification) => <div className="alert-row" key={notification.notification_id}><CircleAlert size={17} /><div><strong>{notification.incident_key}</strong><p>{notification.kind} · 合并 {fmtNumber(notification.alert_count)} 条</p><time>{fmtTime(notification.created_at)}</time></div><StatusBadge value={notification.severity} /></div>) : <EmptyState>暂无 QQ 告警通知</EmptyState>}</Section>
     </>
   )
 }
@@ -294,7 +303,7 @@ const HELP_SECTIONS = [
     items: [
       ['概览', '查看服务、任务、沙盒、Token 趋势和最近投递。把鼠标停在趋势图某一天，即可看到输入、输出、缓存命中、总 Token 和调用次数。'],
       ['模型用量', '切换 90、30、14 天窗口；下方明细按日期、群聊或私聊 Scope、调用来源拆分，便于定位费用来自哪里。'],
-      ['可观测性', '查看 Prometheus、活动告警、模型请求失败和 P50/P95 延迟。P95 很高通常说明少量请求明显变慢。'],
+      ['可观测性', '“当前活动”只统计此刻未恢复告警；“今日触发/恢复”来自 PostgreSQL 历史。链路丢包和路径降级会按受影响主机合并为根因事故，QQ 只通知首次发生、升级和恢复。'],
     ],
   },
   {

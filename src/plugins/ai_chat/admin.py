@@ -60,6 +60,7 @@ class AdminServices:
     turn_journal: Any = None
     database: Any = None
     telemetry: Any = None
+    alert_store: Any = None
 
 
 @dataclass(frozen=True)
@@ -1162,20 +1163,40 @@ def register_admin(
         settings = services.settings
         prometheus_url = str(getattr(settings, "prometheus_url", "") or "")
         alertmanager_url = str(getattr(settings, "alertmanager_url", "") or "")
-        prometheus, alerts = await asyncio.gather(
+        prometheus, alerts, alert_history = await asyncio.gather(
             _prometheus_health(prometheus_url),
             _alertmanager_alerts(alertmanager_url),
+            _alert_history_snapshot(
+                services.alert_store,
+                days=1,
+                limit=limit,
+            ),
         )
         return {
             "process": process,
             "prometheus": prometheus,
             "alertmanager": alerts,
+            "alert_history": alert_history,
             "traces": {
                 "configured": services.turn_journal is not None,
                 "available": traces_available,
                 "items": traces,
             },
         }
+
+    @router.get("/api/alerts")
+    async def alert_history(
+        days: int = Query(default=1, ge=1, le=365),
+        limit: int = Query(default=200, ge=1, le=500),
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
+        authorize(authorization)
+        payload = await _alert_history_snapshot(
+            services.alert_store,
+            days=days,
+            limit=limit,
+        )
+        return versioned("alerts", payload)
 
     legacy_api_prefix = f"{prefix}/api"
     for route in tuple(router.routes):
@@ -1242,7 +1263,11 @@ async def _alertmanager_alerts(base_url: str) -> dict[str, object]:
         async with httpx.AsyncClient(timeout=3.0) as client:
             response = await client.get(
                 f"{base_url.rstrip('/')}/api/v2/alerts",
-                params={"active": "true", "silenced": "false", "inhibited": "false"},
+                params={
+                    "active": "true",
+                    "silenced": "false",
+                    "inhibited": "false",
+                },
             )
             response.raise_for_status()
             payload = response.json()
@@ -1263,6 +1288,43 @@ async def _alertmanager_alerts(base_url: str) -> dict[str, object]:
             "items": [],
             "error": str(exc)[:240],
             "checked_at": int(time.time()),
+        }
+
+
+async def _alert_history_snapshot(
+    store: Any,
+    *,
+    days: int,
+    limit: int,
+) -> dict[str, object]:
+    if store is None or not callable(getattr(store, "snapshot", None)):
+        return {
+            "configured": False,
+            "available": False,
+            "summary": {
+                "current_active": 0,
+                "current_incidents": 0,
+                "triggered": 0,
+                "resolved": 0,
+                "incidents": 0,
+                "firing_notifications": 0,
+                "recovery_notifications": 0,
+            },
+            "events": [],
+            "incidents": [],
+            "notifications": [],
+        }
+    try:
+        return await asyncio.to_thread(store.snapshot, days=days, limit=limit)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        return {
+            "configured": True,
+            "available": False,
+            "error": str(exc)[:240],
+            "summary": {},
+            "events": [],
+            "incidents": [],
+            "notifications": [],
         }
 
 

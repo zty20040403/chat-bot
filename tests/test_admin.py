@@ -201,6 +201,42 @@ class Telemetry:
         }
 
 
+class AlertHistory:
+    def snapshot(self, *, days=1, limit=200):
+        return {
+            "configured": True,
+            "available": True,
+            "range_start": 100,
+            "generated_at": 200,
+            "summary": {
+                "current_active": 2,
+                "current_incidents": 1,
+                "triggered": 9,
+                "resolved": 7,
+                "incidents": 3,
+                "firing_notifications": 3,
+                "recovery_notifications": 2,
+            },
+            "events": [
+                {
+                    "event_id": 1,
+                    "name": "HostUnreachable",
+                    "incident_key": "host:r2s",
+                    "status": "firing",
+                }
+            ][:limit],
+            "incidents": [
+                {
+                    "incident_key": "host:r2s",
+                    "status": "firing",
+                    "event_count": 2,
+                }
+            ],
+            "notifications": [],
+            "days": days,
+        }
+
+
 class Settings:
     enabled_groups = {930690526}
     disabled_groups = {201644592}
@@ -348,6 +384,7 @@ class AdminTests(unittest.TestCase):
                 turn_journal=TurnJournal(),
                 database=Database(),
                 telemetry=Telemetry(),
+                alert_store=AlertHistory(),
             ),
             token="secret",
         )
@@ -401,6 +438,10 @@ class AdminTests(unittest.TestCase):
                     "/bot-admin/api/observability",
                     headers={"Authorization": "Bearer secret"},
                 )
+                alerts = await client.get(
+                    "/bot-admin/api/v1/alerts?days=30&limit=50",
+                    headers={"Authorization": "Bearer secret"},
+                )
                 return (
                     page,
                     favicon,
@@ -415,6 +456,7 @@ class AdminTests(unittest.TestCase):
                     context_plans,
                     databases,
                     observability,
+                    alerts,
                 )
 
         (
@@ -431,6 +473,7 @@ class AdminTests(unittest.TestCase):
             context_plans,
             databases,
             observability,
+            alerts,
         ) = asyncio.run(run())
         self.assertEqual(page.status_code, 200)
         self.assertIn("window.__KENNETHBOT_ADMIN__", page.text)
@@ -484,6 +527,14 @@ class AdminTests(unittest.TestCase):
         )
         self.assertNotIn("scope_key", observability.text)
         self.assertNotIn("objective", observability.text)
+        self.assertEqual(
+            observability.json()["alert_history"]["summary"]["triggered"],
+            9,
+        )
+        self.assertEqual(alerts.status_code, 200)
+        self.assertEqual(alerts.json()["summary"]["resolved"], 7)
+        self.assertEqual(alerts.json()["days"], 30)
+        self.assertEqual(alerts.json()["resource"], "alerts")
         group_rows = group_models.json()["items"]
         self.assertEqual(
             [row["group_id"] for row in group_rows],

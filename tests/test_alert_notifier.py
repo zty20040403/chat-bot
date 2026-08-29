@@ -13,6 +13,7 @@ from src.plugins.ai_chat.alert_notifier import (
     ActivityAlert,
     AlertNotificationService,
     format_alert_notification,
+    group_alert_incidents,
 )
 
 
@@ -39,6 +40,7 @@ def alert(
     name: str = "TailnetLinkPacketLoss",
     severity: str = "warning",
     instance: str = "h610",
+    peer: str = "tank",
     summary: str = "h610 到 tank 丢包 30%",
     starts_at: str = "2026-08-28T02:20:55.317Z",
 ) -> ActivityAlert:
@@ -46,7 +48,7 @@ def alert(
         name=name,
         severity=severity,
         instance=instance,
-        peer="tank",
+        peer=peer,
         summary=summary,
         description="链路连续丢包，请检查网络路径。",
         starts_at=starts_at,
@@ -141,13 +143,129 @@ class AlertNotificationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(delivered, 0)
         self.assertEqual(bot.calls, [])
 
+    async def test_related_link_alerts_are_sent_as_one_root_incident(self) -> None:
+        current: list[ActivityAlert] = []
+        bot = Bot()
+        with tempfile.TemporaryDirectory() as directory:
+            service = AlertNotificationService(
+                alertmanager_url="http://alertmanager",
+                group_id=611798505,
+                check_seconds=30,
+                state_path=Path(directory) / "alerts.json",
+                logger=Logger(),
+                fetcher=lambda: _result(current),
+                bot_provider=lambda: [bot],
+            )
+            await service.run_once()
+            current.extend(
+                [
+                    alert("loss-a", peer="r2s"),
+                    alert(
+                        "loss-b",
+                        name="TailscalePathDegraded",
+                        instance="h310",
+                        peer="r2s",
+                    ),
+                    alert(
+                        "down",
+                        name="HostUnreachable",
+                        severity="critical",
+                        instance="r2s",
+                        peer="",
+                        summary="r2s 抓不到了",
+                    ),
+                ]
+            )
+
+            delivered = await service.run_once()
+            duplicate = await service.run_once()
+
+        self.assertEqual(delivered, 1)
+        self.assertEqual(duplicate, 0)
+        self.assertEqual(len(bot.calls), 1)
+        self.assertIn("严重｜r2s｜服务器寄了", str(bot.calls[0]["message"]))
+        self.assertIn("合并3条", str(bot.calls[0]["message"]))
+
+    async def test_derivative_alert_does_not_repeat_existing_incident(self) -> None:
+        current: list[ActivityAlert] = []
+        bot = Bot()
+        with tempfile.TemporaryDirectory() as directory:
+            service = AlertNotificationService(
+                alertmanager_url="http://alertmanager",
+                group_id=611798505,
+                check_seconds=30,
+                state_path=Path(directory) / "alerts.json",
+                logger=Logger(),
+                fetcher=lambda: _result(current),
+                bot_provider=lambda: [bot],
+            )
+            await service.run_once()
+            current.append(alert("loss-a", peer="r2s"))
+            first = await service.run_once()
+            current.append(
+                alert(
+                    "loss-b",
+                    name="TailscalePathDegraded",
+                    instance="h310",
+                    peer="r2s",
+                )
+            )
+            derivative = await service.run_once()
+
+        self.assertEqual(first, 1)
+        self.assertEqual(derivative, 0)
+        self.assertEqual(len(bot.calls), 1)
+
+    async def test_notified_incident_sends_one_full_recovery(self) -> None:
+        current: list[ActivityAlert] = []
+        bot = Bot()
+        with tempfile.TemporaryDirectory() as directory:
+            service = AlertNotificationService(
+                alertmanager_url="http://alertmanager",
+                group_id=611798505,
+                check_seconds=30,
+                state_path=Path(directory) / "alerts.json",
+                logger=Logger(),
+                fetcher=lambda: _result(current),
+                bot_provider=lambda: [bot],
+            )
+            await service.run_once()
+            current.append(alert("loss", peer="r2s"))
+            await service.run_once()
+            current.clear()
+
+            recovered = await service.run_once()
+            duplicate = await service.run_once()
+
+        self.assertEqual(recovered, 1)
+        self.assertEqual(duplicate, 0)
+        self.assertEqual(len(bot.calls), 2)
+        self.assertIn("【告警恢复】", str(bot.calls[1]["message"]))
+        self.assertIn("r2s｜已恢复", str(bot.calls[1]["message"]))
+
+    def test_grouping_marks_non_representative_events_as_suppressed(self) -> None:
+        first = alert("loss-a", peer="r2s")
+        second = alert(
+            "down",
+            name="HostUnreachable",
+            severity="critical",
+            instance="r2s",
+            peer="",
+        )
+
+        incidents, suppressed = group_alert_incidents([first, second])
+
+        self.assertEqual(list(incidents), ["host:r2s"])
+        self.assertEqual(incidents["host:r2s"].representative, second)
+        self.assertEqual(suppressed, {first.identity})
+
     def test_warning_notification_is_compact(self) -> None:
         text = format_alert_notification([alert("warning")])
 
         self.assertEqual(
             text,
             "【活动告警】\n"
-            "1. 警告｜h610 → tank｜h610 到 tank 丢包 30%"
+            "1. 警告｜tank｜h610 到 tank 丢包 30%"
             "｜2026-08-28 10:20:55",
         )
 

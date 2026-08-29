@@ -306,6 +306,7 @@ alert_notifier = AlertNotificationService(
     check_seconds=settings.alert_notify_check_seconds,
     state_path=app_context.state_dir / "alert-notifier.json",
     logger=logger,
+    history_store=app_context.alert_store,
 )
 BOT_STARTED_AT = app_context.started_at
 driver = get_driver()

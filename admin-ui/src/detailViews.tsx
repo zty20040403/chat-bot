@@ -29,6 +29,9 @@ type Plane = ReturnType<typeof useControlPlane>
 
 export type DetailViewId =
   | 'alerts'
+  | 'alert-events'
+  | 'alert-incidents'
+  | 'alert-notifications'
   | 'usage-records'
   | 'jobs'
   | 'deliveries'
@@ -45,7 +48,10 @@ export const DETAIL_META: Record<DetailViewId, {
   description: string
   parentLabel: string
 }> = {
-  alerts: { parent: 'observability', route: 'observability/alerts', title: '全部活动告警', description: '查看当前所有未恢复告警及精确触发时间', parentLabel: '可观测性' },
+  alerts: { parent: 'observability', route: 'observability/alerts', title: '当前活动告警', description: '查看当前所有未恢复告警及精确触发时间', parentLabel: '可观测性' },
+  'alert-events': { parent: 'observability', route: 'observability/alert-events', title: '告警事件历史', description: '查看告警触发、恢复、归并和压制状态', parentLabel: '可观测性' },
+  'alert-incidents': { parent: 'observability', route: 'observability/incidents', title: '根因事故', description: '按受影响主机或服务合并相关告警', parentLabel: '可观测性' },
+  'alert-notifications': { parent: 'observability', route: 'observability/notifications', title: 'QQ 告警通知', description: '查看首次告警、升级和恢复通知记录', parentLabel: '可观测性' },
   'usage-records': { parent: 'usage', route: 'usage/records', title: '全部用量明细', description: '按日期、范围和调用来源查询 Token 消耗', parentLabel: '模型用量' },
   jobs: { parent: 'tasks', route: 'tasks/jobs', title: '全部持久任务', description: '查询后台任务状态、重试次数和错误', parentLabel: '任务与投递' },
   deliveries: { parent: 'tasks', route: 'tasks/deliveries', title: '全部消息投递', description: '查询 QQ 消息回执、发送时间和失败原因', parentLabel: '任务与投递' },
@@ -64,6 +70,9 @@ interface DetailSource {
 
 const DETAIL_SOURCES: Record<DetailViewId, DetailSource> = {
   alerts: { resource: 'observability', path: '/observability?limit=200', extract: (payload) => rows(payload.alertmanager?.items) },
+  'alert-events': { resource: 'alerts', path: '/alerts?days=30&limit=500', extract: (payload) => rows(payload.events) },
+  'alert-incidents': { resource: 'alerts', path: '/alerts?days=30&limit=500', extract: (payload) => rows(payload.incidents) },
+  'alert-notifications': { resource: 'alerts', path: '/alerts?days=30&limit=500', extract: (payload) => rows(payload.notifications) },
   'usage-records': { resource: 'usage', path: '/usage?days=365', extract: (payload) => rows(payload.items) },
   jobs: { resource: 'jobs', path: '/jobs?limit=500', extract: (payload) => rows(payload.items) },
   deliveries: { resource: 'deliveries', path: '/deliveries?limit=500', extract: (payload) => rows(payload.items) },
@@ -95,6 +104,9 @@ function jsonRows(value: unknown): any[] {
 
 function itemTime(detail: DetailViewId, item: any): unknown {
   if (detail === 'alerts') return item.starts_at
+  if (detail === 'alert-events') return item.first_seen_at
+  if (detail === 'alert-incidents') return item.last_seen_at
+  if (detail === 'alert-notifications') return item.created_at
   if (detail === 'usage-records') return item.day
   if (detail === 'jobs' || detail === 'deliveries') return item.updated_at
   if (detail === 'traces') return item.started_at
@@ -118,6 +130,9 @@ function rowKey(detail: DetailViewId, item: any, index: number): string {
       ?? item.turn_id
       ?? item.media_id
       ?? item.source_id
+      ?? item.event_id
+      ?? item.notification_id
+      ?? item.incident_key
       ?? item.fingerprint
       ?? `${detail}-${index}`,
   )
@@ -130,6 +145,33 @@ function detailColumns(detail: DetailViewId, plane: Plane): DetailColumn[] {
     { label: '级别', render: (item) => <StatusBadge value={item.severity} /> },
     { label: '状态', render: (item) => <StatusBadge value={item.state} /> },
     { label: '来源', render: (item) => item.instance || item.job || '-' },
+  ]
+  if (detail === 'alert-events') return [
+    { label: '首次出现', render: (item) => fmtTime(item.first_seen_at) },
+    { label: '恢复时间', render: (item) => item.resolved_at ? fmtTime(item.resolved_at) : '-' },
+    { label: '告警', render: (item) => <><strong>{item.name}</strong><small className="cell-sub">{item.summary || item.description || '-'}</small></> },
+    { label: '事故', render: (item) => <code>{item.incident_key}</code> },
+    { label: '级别', render: (item) => <StatusBadge value={item.severity} /> },
+    { label: '状态', render: (item) => <StatusBadge value={item.status} /> },
+    { label: '通知', render: (item) => item.suppressed ? '已合并压制' : '代表事件' },
+  ]
+  if (detail === 'alert-incidents') return [
+    { label: '最后变化', render: (item) => fmtTime(item.last_seen_at) },
+    { label: '事故', render: (item) => <><code>{item.incident_key}</code><small className="cell-sub">{item.summary || item.name}</small></> },
+    { label: '级别', render: (item) => <StatusBadge value={item.severity} /> },
+    { label: '状态', render: (item) => <StatusBadge value={item.status} /> },
+    { label: '关联告警', render: (item) => `${fmtNumber(item.event_count)} 条` },
+    { label: '仍在活动', render: (item) => `${fmtNumber(item.active_event_count)} 条` },
+    { label: '首次出现', render: (item) => fmtTime(item.first_seen_at) },
+    { label: '恢复时间', render: (item) => item.resolved_at ? fmtTime(item.resolved_at) : '-' },
+  ]
+  if (detail === 'alert-notifications') return [
+    { label: '通知时间', render: (item) => fmtTime(item.created_at) },
+    { label: '事故', render: (item) => <code>{item.incident_key}</code> },
+    { label: '类型', render: (item) => <StatusBadge value={item.kind} /> },
+    { label: '级别', render: (item) => <StatusBadge value={item.severity} /> },
+    { label: '合并告警', render: (item) => `${fmtNumber(item.alert_count)} 条` },
+    { label: '内容', className: 'detail-message', render: (item) => item.message || '-' },
   ]
   if (detail === 'usage-records') return [
     { label: '统计日期', render: (item) => item.day },

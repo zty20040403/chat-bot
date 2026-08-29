@@ -1,6 +1,7 @@
 export type ResourceName =
   | 'overview'
   | 'observability'
+  | 'alerts'
   | 'deliveries'
   | 'usage'
   | 'tasks'
@@ -30,6 +31,7 @@ export interface RealtimeEvent {
 export const RESOURCE_PATHS: Record<ResourceName, string> = {
   overview: '/overview',
   observability: '/observability',
+  alerts: '/alerts?days=1&limit=200',
   deliveries: '/deliveries',
   usage: '/usage?days=90',
   tasks: '/tasks',
@@ -50,6 +52,7 @@ export const RESOURCE_PATHS: Record<ResourceName, string> = {
 export const EVENT_RESOURCES: Record<string, ResourceName[]> = {
   overview: ['overview'],
   observability: ['observability', 'traces'],
+  alerts: ['alerts', 'observability'],
   deliveries: ['deliveries'],
   usage: ['usage'],
   tasks: ['tasks'],

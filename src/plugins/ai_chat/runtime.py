@@ -11,6 +11,7 @@ from typing import Protocol
 from src.bot_storage import DatabaseError, PostgresDatabase
 from src.bot_storage.schema import HEAD_REVISION
 
+from .alert_history import AlertEventStore
 from .bridges import (
     BlueBubblesClient,
     BridgeManager,
@@ -125,6 +126,7 @@ class AppContext:
     media_cleanup: LegacyMediaCleanup | None = None
     vision_worker: VisionWorker | None = None
     cold_archive: ColdArchiveService | None = None
+    alert_store: AlertEventStore | None = None
     _closed: bool = field(default=False, init=False, repr=False)
 
     async def shutdown(self) -> None:
@@ -283,6 +285,7 @@ def build_app_context(
             logger.error(f"Canonical message ledger could not be opened: {exc}")
 
     source_store = ContentSourceStore(database) if database is not None else None
+    alert_store = AlertEventStore(database) if database is not None else None
 
     context_store: ContextStore | None = None
     if settings.context_lifecycle_enabled and message_ledger is not None:
@@ -759,4 +762,5 @@ def build_app_context(
         media_cleanup=media_cleanup,
         vision_worker=vision_worker,
         cold_archive=cold_archive,
+        alert_store=alert_store,
     )

@@ -86,6 +86,7 @@ def register_http_surfaces(
                 turn_journal=context.turn_journal,
                 database=context.database,
                 telemetry=telemetry,
+                alert_store=context.alert_store,
             ),
             path=settings.admin_path,
             token=settings.admin_token,
