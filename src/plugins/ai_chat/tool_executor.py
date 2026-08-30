@@ -66,21 +66,16 @@ from .config import (
 from .context_policy import (
     choose_context_policy,
 )
-from .context_store import estimate_tokens
 from .context_pipeline import (
     TurnContextPlan,
     assess_evidence,
-    build_hybrid_recall,
-    fit_token_budget,
-    route_recall,
+    rule_recall_route,
 )
-from .context_pipeline.ranking import combine_budgeted_sections
 from .deepseek import (
     AgentLoopEvent,
     DeepSeekTrace,
     DeepSeekConfigError,
     FinalStreamState,
-    ask_deepseek_json,
     ask_deepseek_with_tools,
 )
 from .long_term_memory import (
@@ -318,38 +313,14 @@ async def _ask_ai(
             )
     except (OSError, RuntimeError, ValueError, sqlite3.Error, DatabaseError) as exc:
         logger.warning(f"Group reference resolution failed softly: {exc}")
-    async def classify_recall(payload: dict[str, object]) -> dict[str, Any]:
-        router_profile = (
-            model_profiles.try_resolve(settings.recall_router_profile)
-            or selected_profile
-        )
-        return await asyncio.wait_for(
-            ask_deepseek_json(
-                "你是上下文召回路由器，只分类，不回答用户。"
-                "route 只能是 direct、follow_up、recent_group、old_topic、"
-                "user_memory、group_memory、no_recall。"
-                "complexity 只能是 simple、normal、complex。"
-                "输出 JSON：route、confidence、complexity、reason。"
-                "明确引用选 direct；模糊追问选 follow_up；最近群聊选 recent_group；"
-                "旧聊天选 old_topic；当前用户偏好选 user_memory；群公共决定选"
-                "group_memory；独立问题选 no_recall。",
-                json.dumps(payload, ensure_ascii=False),
-                profile=router_profile,
-                trace=turn_trace,
-            ),
-            timeout=settings.recall_router_timeout_seconds,
-        )
-
     with telemetry.stage("context.route"):
-        recall_decision = await route_recall(
+        # MAX-style context keeps the live conversation chronological.  The
+        # lightweight route is retained for memory budgets and observability,
+        # but it must never pre-select or remove recent group messages.
+        recall_decision = rule_recall_route(
             user_text,
             context_plan,
             is_group=isinstance(event, GroupMessageEvent),
-            classifier=(
-                classify_recall
-                if settings.recall_router_model_enabled
-                else None
-            ),
         )
     context_policy = choose_context_policy(
         user_text,
@@ -359,53 +330,12 @@ async def _ask_ai(
         configured_max_tokens=settings.context_input_budget_tokens,
         model_max_input_tokens=selected_profile.max_input_tokens,
     )
-    hybrid_recall = None
     group_memory_scope, user_memory_scope = _memory_scopes(event)
-    if message_ledger is not None:
-        automatic_semantic_recall = (
-            semantic_recall
-            if recall_decision.include_semantic
-            else None
-        )
-        try:
-            with telemetry.stage("context.rerank"):
-                hybrid_recall = await build_hybrid_recall(
-                    ledger=message_ledger,
-                    scope=scope_from_event(event),
-                    plan=context_plan,
-                    user_text=user_text,
-                    group_memory_scope=group_memory_scope,
-                    user_memory_scope=user_memory_scope,
-                    memory_store=long_term_memory,
-                    context_store=context_store,
-                    topic_graph_store=topic_graph_store,
-                    semantic_recall=automatic_semantic_recall,
-                    pin_store=pin_store,
-                    source_store=source_store,
-                    media_library=media_library,
-                    recall_decision=recall_decision,
-                    current_native_user_id=event.user_id,
-                    include_group_memory=context_policy.include_group_memory,
-                    include_user_memory=context_policy.include_user_memory,
-                    fallback_group_memory=context_policy.fallback_group_memory,
-                    fallback_user_memory=context_policy.fallback_user_memory,
-                    budget=context_policy.token_budget,
-                    now=event.time,
-                )
-        except (
-            OSError,
-            RuntimeError,
-            TypeError,
-            ValueError,
-            sqlite3.Error,
-            DatabaseError,
-        ) as exc:
-            logger.warning(f"Hybrid context recall failed softly: {exc}")
     evidence_assessment = assess_evidence(
         user_text,
         recall_decision,
         context_plan,
-        hybrid_recall,
+        None,
         conversation_scope=scope_from_event(event).key,
         group_memory_scope=group_memory_scope,
         user_memory_scope=user_memory_scope,
@@ -418,6 +348,9 @@ async def _ask_ai(
         try:
             payload = context_plan.journal_payload()
             payload["recall_route"] = recall_decision.journal_payload()
+            payload["recall_route"]["context_strategy"] = (
+                "chronological_projection"
+            )
             payload["adaptive_budget"] = {
                 "focus": context_policy.token_budget.focus,
                 "timeline": context_policy.token_budget.timeline,
@@ -428,27 +361,6 @@ async def _ask_ai(
                 "total": context_policy.token_budget.total,
             }
             payload["evidence_guard"] = evidence_assessment.journal_payload()
-            if hybrid_recall is not None:
-                used_tokens = {
-                    "focus": estimate_tokens(hybrid_recall.focus_context),
-                    "timeline": estimate_tokens(hybrid_recall.timeline_context),
-                    "semantic": estimate_tokens(hybrid_recall.recall_context),
-                    "group_memory": estimate_tokens(
-                        hybrid_recall.group_memory_context
-                    ),
-                    "user_memory": estimate_tokens(
-                        hybrid_recall.user_memory_context
-                    ),
-                }
-                used_tokens["total"] = sum(used_tokens.values())
-                payload["adaptive_budget"]["used"] = used_tokens
-                payload["recall_candidates"] = (
-                    hybrid_recall.journal_decisions()
-                )
-                payload["candidates"] = [
-                    *payload["candidates"],
-                    *hybrid_recall.journal_candidates(),
-                ]
             turn_journal.record_context_plan(
                 journal_turn_id,
                 payload,
@@ -1482,12 +1394,6 @@ async def _ask_ai(
             context_parts.append(skill_index)
         if turn_context:
             context_parts.append(turn_context)
-        if evidence_assessment.sufficient:
-            context_parts.append(
-                evidence_assessment.prompt_contract(
-                    current_user=_current_user_identity(event)
-                )
-            )
         if replay_prefix:
             context_parts.append(
                 "[host replay status]\n"
@@ -1501,8 +1407,12 @@ async def _ask_ai(
             )
         if turn_journal is not None or context_store is not None:
             context_parts.append(
-                "旧聊天或旧任务细节按需先用 context_search，再用 context_expand；"
-                "不要猜测不存在的句柄。"
+                "当前群上下文按时间顺序给出：先读连续的近期原文，再结合当前消息"
+                "判断省略的主语和对象；不要因为某条旧消息曾经 @ 过机器人就擅自把"
+                "它当成当前话题。明确引用的 [quoted context] 优先级最高。"
+                "遇到 [image#消息.段] 且用户要求评价或分析这张图时，调用 "
+                "view_image 并完整照抄对应 msg# 句柄。旧聊天或旧任务细节按需先用 "
+                "context_search，再用 context_expand；不要猜测不存在的句柄。"
             )
         agent_tool_context = ""
         if sandbox_tools_enabled:
@@ -1545,82 +1455,105 @@ async def _ask_ai(
         if agent_tool_context:
             context_parts.append(agent_tool_context)
 
-        focused_message_ids: tuple[int, ...] = ()
-        if context_plan is not None:
-            focused_message_ids = tuple(
-                message_id
-                for message_id in (
-                    context_plan.focus_message_id,
-                    *context_plan.related_message_ids,
+        group_prompt_context = ""
+        if isinstance(event, GroupMessageEvent) and message_ledger is not None:
+            scope = scope_from_event(event)
+            replied_native_id = reply_message_id(event.original_message)
+            replied_canonical_id = (
+                message_ledger.canonical_id_for_native(scope, replied_native_id)
+                if replied_native_id is not None
+                else None
+            )
+            protected_ids = (
+                (replied_canonical_id,)
+                if replied_canonical_id is not None
+                else ()
+            )
+            sections: list[str] = []
+            projection_built = False
+            if pin_store is not None:
+                pinned = pin_store.render(
+                    message_ledger,
+                    scope,
+                    max_chars=2400,
                 )
-                if message_id is not None
+                if pinned:
+                    sections.append(
+                        "[pinned messages - long-lived current-group facts]\n"
+                        + pinned
+                    )
+            if context_store is not None:
+                try:
+                    projection = context_store.build_projection(
+                        message_ledger,
+                        scope,
+                        exclude_native_message_id=event.message_id,
+                        protected_message_ids=protected_ids,
+                        exclude_canonical_message_ids=(
+                            replay_covered_message_ids
+                        ),
+                        materialize=False,
+                    )
+                except (
+                    OSError,
+                    RuntimeError,
+                    ValueError,
+                    sqlite3.Error,
+                    DatabaseError,
+                ) as exc:
+                    logger.warning(
+                        "Chronological context projection failed softly: "
+                        f"{exc}"
+                    )
+                else:
+                    projection_built = True
+                    if projection.text:
+                        sections.append(projection.text)
+            if not projection_built:
+                fallback = message_ledger.render_recent(
+                    scope,
+                    max_messages=settings.group_context_messages,
+                    max_chars=max(settings.group_context_chars, 12000),
+                    exclude_native_message_id=event.message_id,
+                    exclude_canonical_message_ids=(
+                        replay_covered_message_ids
+                    ),
+                )
+                if fallback:
+                    sections.append("[protected live tail]\n" + fallback)
+            if source_store is not None:
+                try:
+                    recent_sources = source_store.render_recent(scope)
+                except (OSError, RuntimeError, ValueError, DatabaseError) as exc:
+                    logger.warning(f"Recent shared-source context failed: {exc}")
+                else:
+                    if recent_sources:
+                        sections.append(
+                            "[recent shared sources - inspect with source#/msg#]\n"
+                            + recent_sources
+                        )
+            if replied_canonical_id is not None:
+                replied = message_ledger.get_in_scope(
+                    scope,
+                    replied_canonical_id,
+                )
+                if replied is not None:
+                    sections.append(
+                        "[quoted context - explicit reply target, highest priority]\n"
+                        f"[msg#{replied.canonical_message_id} | "
+                        f"{replied.sender_display}] {replied.prompt_text}"
+                    )
+            group_prompt_context = "\n\n".join(sections)
+        else:
+            group_prompt_context = _current_group_context(
+                event,
+                policy=context_policy,
+                exclude_canonical_message_ids=replay_covered_message_ids,
             )
-        excluded_context_ids = tuple(
-            dict.fromkeys(
-                (*replay_covered_message_ids, *focused_message_ids)
-            )
-        )
-        raw_group_context = _current_group_context(
+        memory_prompt_context = _current_long_term_memory(
             event,
-            policy=context_policy,
-            exclude_canonical_message_ids=excluded_context_ids,
-            suppress_recalled_sections=hybrid_recall is not None,
-        )
-        focus_prompt_context = (
-            hybrid_recall.focus_context
-            if hybrid_recall is not None and hybrid_recall.focus_context
-            else context_plan.rendered_context
-            if context_plan is not None
-            else ""
-        )
-        timeline_prompt_context = "\n\n".join(
-            item
-            for item in (
-                hybrid_recall.timeline_context
-                if hybrid_recall is not None
-                else "",
-                raw_group_context,
-            )
-            if item
-        )
-        group_prompt_context = combine_budgeted_sections(
-            [
-                (
-                    "focus",
-                    focus_prompt_context,
-                    context_policy.token_budget.focus,
-                ),
-                (
-                    "semantic",
-                    hybrid_recall.recall_context
-                    if hybrid_recall is not None
-                    else "",
-                    context_policy.token_budget.semantic,
-                ),
-                (
-                    "timeline",
-                    timeline_prompt_context,
-                    context_policy.token_budget.timeline,
-                ),
-            ],
-            total_budget=(
-                context_policy.token_budget.focus
-                + context_policy.token_budget.semantic
-                + context_policy.token_budget.timeline
-            ),
-        )
-        memory_prompt_context = (
-            hybrid_recall.memory_context
-            if hybrid_recall is not None
-            else fit_token_budget(
-                _current_long_term_memory(
-                    event,
-                    user_text,
-                    context_policy,
-                ),
-                context_policy.token_budget.group_memory
-                + context_policy.token_budget.user_memory,
-            )
+            user_text,
+            context_policy,
         )
         answer = await ask_deepseek_with_tools(
             user_text,

@@ -15,6 +15,7 @@ from src.plugins.ai_chat.context_pipeline import (
     ReferenceResolver,
     build_hybrid_recall,
 )
+from src.plugins.ai_chat.context_store import ContextStore
 from src.plugins.ai_chat.conversation_scope import ConversationScope
 from src.plugins.ai_chat.ledger import MessageLedger
 from src.plugins.ai_chat.message_ir import MessageBody, MentionNode, TextNode
@@ -49,30 +50,26 @@ class ContextAccuracyEvaluationTests(unittest.TestCase):
         ]
         self.assertGreaterEqual(len(expanded), 100)
 
-        focus_total = 0
-        focus_correct = 0
+        timeline_total = 0
+        timeline_covered = 0
         recall_total = 0
         recall_hits = 0
-        irrelevant_injections = 0
         leakage_count = 0
 
         for seed, prompt in expanded:
             with self.subTest(case=seed["name"], prompt=prompt):
                 result = self._evaluate(seed, prompt)
-                focus_total += 1
-                focus_correct += int(result["focus_correct"])
+                timeline_total += 1
+                timeline_covered += int(result["timeline_covered"])
                 recall_total += int(result["recall_evaluated"])
                 recall_hits += int(result["recall_hit"])
-                irrelevant_injections += int(result["irrelevant"])
                 leakage_count += int(result["leaked"])
 
-        focus_accuracy = focus_correct / max(focus_total, 1)
+        timeline_coverage = timeline_covered / max(timeline_total, 1)
         recall_at_five = recall_hits / max(recall_total, 1)
-        irrelevant_rate = irrelevant_injections / max(len(expanded), 1)
-        self.assertGreaterEqual(focus_accuracy, 0.90)
+        self.assertGreaterEqual(timeline_coverage, 0.99)
         self.assertGreaterEqual(recall_at_five, 0.90)
         self.assertEqual(leakage_count, 0)
-        self.assertLess(irrelevant_rate, 0.05)
 
     def _evaluate(self, seed: dict[str, object], prompt: str) -> dict[str, bool]:
         ledger = MessageLedger(":memory:")
@@ -99,15 +96,18 @@ class ContextAccuracyEvaluationTests(unittest.TestCase):
             current_native_user_id=current_item["user"],
             now=current.occurred_at,
         )
-        expected_native = seed.get("expected_focus")
-        expected_focus = (
-            native_to_canonical[int(expected_native)]
-            if expected_native is not None
-            else None
+        context = ContextStore(
+            ":memory:",
+            input_budget_tokens=6000,
+            historian_managed=True,
         )
-        rendered = plan.rendered_context
-        forbidden = [str(item) for item in seed.get("forbidden", [])]
-        irrelevant = any(item in rendered for item in forbidden)
+        self.addCleanup(context.close)
+        rendered = context.build_projection(
+            ledger,
+            scope,
+            exclude_native_message_id=current.native_message_id,
+            materialize=False,
+        ).text
         leaked = any(
             marker in rendered
             for marker in seed.get("leak_markers", ["另一个群的机密"])
@@ -162,25 +162,13 @@ class ContextAccuracyEvaluationTests(unittest.TestCase):
                 item.candidate.scope_key == other_scope.key
                 for item in recalled.candidates
             )
-            irrelevant = irrelevant or any(
-                item in (recalled.group_context + recalled.memory_context)
-                for item in forbidden
-            )
-
-        for required in seed.get("required", []):
-            if str(required) not in rendered and not recall_evaluated:
-                return {
-                    "focus_correct": False,
-                    "recall_evaluated": bool(recall_evaluated),
-                    "recall_hit": recall_hit,
-                    "irrelevant": True,
-                    "leaked": leaked,
-                }
+        timeline_covered = all(
+            str(required) in rendered for required in seed.get("required", [])
+        )
         return {
-            "focus_correct": plan.focus_message_id == expected_focus,
+            "timeline_covered": timeline_covered,
             "recall_evaluated": bool(recall_evaluated),
             "recall_hit": recall_hit,
-            "irrelevant": irrelevant,
             "leaked": leaked,
         }
 

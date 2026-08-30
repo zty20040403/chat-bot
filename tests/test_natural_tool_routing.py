@@ -24,6 +24,7 @@ from src.plugins.ai_chat.ai_tools import (
     MEMORY_REMOVE_TOOL_NAME,
     SEND_QQ_FACE_TOOL_NAME,
     SEND_STICKER_TOOL_NAME,
+    VIEW_IMAGE_TOOL_NAME,
 )
 from src.plugins.ai_chat.media_library import MediaRecord
 
@@ -112,6 +113,108 @@ class NaturalToolRoutingTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("基于群聊现场回答", answer)
         self.assertEqual(captured_history, [])
+
+    async def test_group_prompt_uses_unranked_chronological_projection(self) -> None:
+        captured: dict[str, object] = {}
+        ledger = Mock()
+        ledger.principal_label_for_native.return_value = None
+        context_store = Mock()
+        context_store.build_projection.return_value = SimpleNamespace(
+            text=(
+                "[protected live tail]\n"
+                "[msg#11 | Alice] 我看 h310 一直寄\n"
+                "[msg#12 | Bob] 今晚吃什么\n"
+                "[msg#13 | Alice] 这机器网络还是不稳定"
+            )
+        )
+
+        async def fake_deepseek(
+            user_text,
+            history,
+            tools,
+            execute_tool,
+            **kwargs,
+        ) -> str:
+            del user_text, history, tools, execute_tool
+            captured.update(kwargs)
+            return "按上面的 h310 现场锐评"
+
+        import src.plugins.ai_chat as ai_chat
+
+        with (
+            patch.object(ai_chat, "message_ledger", ledger),
+            patch.object(ai_chat, "context_store", context_store),
+            patch.object(ai_chat, "pin_store", None),
+            patch.object(ai_chat, "source_store", None),
+            patch.object(ai_chat, "_group_turn_context_plan", return_value=None),
+            patch.object(ai_chat, "_current_long_term_memory", return_value=""),
+            patch.object(ai_chat, "ask_deepseek_with_tools", new=fake_deepseek),
+            patch.object(ai_chat.memory, "append_turn"),
+        ):
+            answer = await ai_chat._ask_ai(
+                AsyncMock(),
+                _group_event(),
+                "你锐评一下",
+                available_image_sources=[],
+            )
+
+        group_prompt = str(captured["group_context"])
+        self.assertIn("我看 h310 一直寄", group_prompt)
+        self.assertIn("这机器网络还是不稳定", group_prompt)
+        self.assertLess(
+            group_prompt.index("我看 h310 一直寄"),
+            group_prompt.index("这机器网络还是不稳定"),
+        )
+        self.assertIn("按上面的 h310 现场锐评", answer)
+
+    async def test_recent_image_handle_reaches_model_and_view_tool(self) -> None:
+        captured: dict[str, object] = {}
+        ledger = Mock()
+        ledger.principal_label_for_native.return_value = None
+        context_store = Mock()
+        context_store.build_projection.return_value = SimpleNamespace(
+            text=(
+                "[protected live tail]\n"
+                "[msg#21 | Alice] [image#21.0: 一张待分析图片]"
+            )
+        )
+
+        async def fake_deepseek(
+            user_text,
+            history,
+            tools,
+            execute_tool,
+            **kwargs,
+        ) -> str:
+            del user_text, history, execute_tool
+            captured["group_context"] = kwargs["group_context"]
+            captured["tool_names"] = {
+                tool["function"]["name"] for tool in tools
+            }
+            return "已看图"
+
+        import src.plugins.ai_chat as ai_chat
+
+        with (
+            patch.object(ai_chat, "message_ledger", ledger),
+            patch.object(ai_chat, "context_store", context_store),
+            patch.object(ai_chat, "pin_store", None),
+            patch.object(ai_chat, "source_store", None),
+            patch.object(ai_chat, "vision_worker", object()),
+            patch.object(ai_chat, "_group_turn_context_plan", return_value=None),
+            patch.object(ai_chat, "_current_long_term_memory", return_value=""),
+            patch.object(ai_chat, "ask_deepseek_with_tools", new=fake_deepseek),
+            patch.object(ai_chat.memory, "append_turn"),
+        ):
+            await ai_chat._ask_ai(
+                AsyncMock(),
+                _group_event(),
+                "锐评下这个",
+                available_image_sources=[],
+            )
+
+        self.assertIn("[image#21.0", str(captured["group_context"]))
+        self.assertIn(VIEW_IMAGE_TOOL_NAME, captured["tool_names"])
 
     async def test_natural_request_uses_auto_tool_choice(self) -> None:
         captured_tool_names: set[str] = set()
