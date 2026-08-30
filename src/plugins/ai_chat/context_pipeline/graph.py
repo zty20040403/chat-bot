@@ -1,9 +1,20 @@
 from __future__ import annotations
 
 import re
+import json
+import sqlite3
+import threading
+import time
 from collections import deque
+from contextlib import contextmanager
+from dataclasses import dataclass
+from typing import Iterator, Mapping
 
+from src.bot_storage import DatabaseSource, PostgresDatabase, open_store_connection
+
+from ..conversation_scope import ConversationScope
 from ..ledger import CanonicalMessage
+from ..message_ir import MentionNode
 
 
 _LOW_INFORMATION = re.compile(
@@ -14,6 +25,149 @@ _LOW_INFORMATION = re.compile(
 _DEICTIC_CONTINUATION = re.compile(
     r"^(?:这个|那个|这|那|它|他|她|上面|前面|然后|所以|确实|但是|不过)"
 )
+_ANSWER_CONTINUATION = re.compile(
+    r"^(?:可能|因为|原因|应该|建议|可以|不能|需要|看起来|我觉得|我认为|"
+    r"大概|估计|确实|不是|是)"
+)
+_QUESTION_MARKERS = ("?", "？", "吗", "么", "什么", "怎么", "为什么", "咋")
+
+
+@dataclass(frozen=True)
+class TopicEdge:
+    source_message_id: int
+    target_message_id: int
+    relation: str
+    weight: float
+    evidence: dict[str, object]
+
+
+class TopicGraphStore:
+    """Durable, scope-local evidence for why two messages share a topic."""
+
+    def __init__(self, source: DatabaseSource) -> None:
+        self._legacy_sqlite = not isinstance(source, PostgresDatabase)
+        self.path, self._connection = open_store_connection(source)
+        self._lock = threading.RLock()
+        if self._legacy_sqlite:
+            self._configure()
+            self._migrate()
+
+    def close(self) -> None:
+        with self._lock:
+            self._connection.close()
+
+    def upsert(
+        self,
+        scope: ConversationScope,
+        edges: tuple[TopicEdge, ...] | list[TopicEdge],
+    ) -> int:
+        if not edges:
+            return 0
+        timestamp = int(time.time())
+        changed = 0
+        with self._transaction() as cursor:
+            for edge in edges:
+                if edge.source_message_id == edge.target_message_id:
+                    continue
+                cursor.execute(
+                    """
+                    INSERT INTO message_topic_edges (
+                        scope_key, source_message_id, target_message_id,
+                        relation, weight, evidence_json, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(
+                        scope_key, source_message_id, target_message_id, relation
+                    ) DO UPDATE SET
+                        weight = excluded.weight,
+                        evidence_json = excluded.evidence_json,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        scope.key,
+                        int(edge.source_message_id),
+                        int(edge.target_message_id),
+                        edge.relation[:80],
+                        min(max(float(edge.weight), 0.0), 1.0),
+                        json.dumps(
+                            edge.evidence,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+                changed += max(int(cursor.rowcount), 0)
+        return changed
+
+    def upsert_semantic(
+        self,
+        scope: ConversationScope,
+        source_message_id: int,
+        target_message_id: int,
+        score: float,
+        *,
+        model: str = "",
+    ) -> int:
+        if int(source_message_id) == int(target_message_id):
+            return 0
+        return self.upsert(
+            scope,
+            [
+                TopicEdge(
+                    int(source_message_id),
+                    int(target_message_id),
+                    "semantic_similarity",
+                    min(max(float(score), 0.0), 1.0),
+                    {"model": model, "score": round(float(score), 4)},
+                )
+            ],
+        )
+
+    def _configure(self) -> None:
+        with self._lock:
+            self._connection.execute("PRAGMA busy_timeout = 10000")
+            if self.path is not None:
+                self._connection.execute("PRAGMA journal_mode = WAL")
+            self._connection.execute("PRAGMA synchronous = NORMAL")
+
+    def _migrate(self) -> None:
+        with self._transaction() as cursor:
+            cursor.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS message_topic_edges (
+                    edge_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    scope_key TEXT NOT NULL,
+                    source_message_id INTEGER NOT NULL,
+                    target_message_id INTEGER NOT NULL,
+                    relation TEXT NOT NULL,
+                    weight REAL NOT NULL,
+                    evidence_json TEXT NOT NULL DEFAULT '{}',
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    UNIQUE(scope_key, source_message_id, target_message_id, relation)
+                );
+                CREATE INDEX IF NOT EXISTS idx_topic_edges_source
+                    ON message_topic_edges(scope_key, source_message_id, weight);
+                CREATE INDEX IF NOT EXISTS idx_topic_edges_target
+                    ON message_topic_edges(scope_key, target_message_id, weight);
+                """
+            )
+
+    @contextmanager
+    def _transaction(self) -> Iterator[sqlite3.Cursor]:
+        with self._lock:
+            cursor = self._connection.cursor()
+            try:
+                cursor.execute("BEGIN IMMEDIATE")
+                yield cursor
+            except Exception:
+                self._connection.rollback()
+                raise
+            else:
+                self._connection.commit()
+            finally:
+                cursor.close()
 
 
 def topic_terms(text: str) -> set[str]:
@@ -43,24 +197,165 @@ def topic_terms(text: str) -> set[str]:
 
 
 class MessageReferenceGraph:
-    """A scope-local graph built from immutable reply relationships."""
+    """A scope-local weighted graph over immutable message nodes."""
 
-    def __init__(self, messages: list[CanonicalMessage]) -> None:
+    def __init__(
+        self,
+        messages: list[CanonicalMessage],
+        *,
+        semantic_scores: Mapping[tuple[int, int], float] | None = None,
+    ) -> None:
         self.messages = {
             message.canonical_message_id: message for message in messages
         }
         self.parents: dict[int, int] = {}
         self.children: dict[int, list[int]] = {}
-        for message in messages:
+        self._edges: dict[tuple[int, int, str], TopicEdge] = {}
+        ordered = sorted(messages, key=lambda item: item.canonical_message_id)
+        previous_by_sender: dict[str, CanonicalMessage] = {}
+        for index, message in enumerate(ordered):
             parent = message.reply_to_canonical_message_id
-            if parent is None or parent not in self.messages:
-                continue
-            self.parents[message.canonical_message_id] = parent
-            self.children.setdefault(parent, []).append(
-                message.canonical_message_id
+            if parent is not None and parent in self.messages:
+                self.parents[message.canonical_message_id] = parent
+                self.children.setdefault(parent, []).append(
+                    message.canonical_message_id
+                )
+                relation = "bot_reply" if message.direction == "outbound" else "reply"
+                self._add_edge(message, self.messages[parent], relation, 1.0)
+
+            sender_key = (
+                f"principal:{message.sender_principal_id}"
+                if message.sender_principal_id is not None
+                else f"native:{message.sender_native_user_id}"
             )
+            previous_sender = previous_by_sender.get(sender_key)
+            if (
+                previous_sender is not None
+                and message.occurred_at - previous_sender.occurred_at <= 900
+            ):
+                self._add_edge(
+                    message,
+                    previous_sender,
+                    "same_sender_continuation",
+                    0.58,
+                )
+            previous_by_sender[sender_key] = message
+
+            if index:
+                previous = ordered[index - 1]
+                gap = max(message.occurred_at - previous.occurred_at, 0)
+                if gap <= 120:
+                    self._add_edge(
+                        message,
+                        previous,
+                        "temporal_proximity",
+                        max(0.18, 0.38 - gap / 600),
+                        {"gap_seconds": gap},
+                    )
+
+            for mentioned_principal in self._mentioned_principals(message):
+                target = next(
+                    (
+                        item
+                        for item in reversed(ordered[:index])
+                        if item.sender_principal_id == mentioned_principal
+                    ),
+                    None,
+                )
+                if target is not None:
+                    self._add_edge(
+                        message,
+                        target,
+                        "mention",
+                        0.88,
+                        {"mentioned_principal_id": mentioned_principal},
+                    )
+
+            message_terms = topic_terms(message.prompt_text)
+            for candidate in reversed(ordered[max(0, index - 12) : index]):
+                gap = max(message.occurred_at - candidate.occurred_at, 0)
+                if gap > 1800:
+                    break
+                candidate_terms = topic_terms(candidate.prompt_text)
+                union = message_terms | candidate_terms
+                similarity = (
+                    len(message_terms & candidate_terms) / len(union)
+                    if union
+                    else 0.0
+                )
+                if similarity >= 0.18:
+                    self._add_edge(
+                        message,
+                        candidate,
+                        "lexical_topic",
+                        min(0.35 + similarity * 0.55, 0.85),
+                        {"jaccard": round(similarity, 4)},
+                    )
+                if (
+                    self._is_question(candidate.prompt_text)
+                    and not self._is_question(message.prompt_text)
+                    and message.sender_native_user_id
+                    != candidate.sender_native_user_id
+                    and gap <= 300
+                    and (
+                        similarity >= 0.1
+                        or bool(
+                            _DEICTIC_CONTINUATION.match(
+                                message.prompt_text.strip()
+                            )
+                        )
+                        or bool(
+                            _ANSWER_CONTINUATION.match(
+                                message.prompt_text.strip()
+                            )
+                        )
+                        or message.reply_to_canonical_message_id
+                        == candidate.canonical_message_id
+                    )
+                ):
+                    self._add_edge(
+                        message,
+                        candidate,
+                        "question_answer",
+                        0.66,
+                        {"gap_seconds": gap},
+                    )
+
+        for pair, score in (semantic_scores or {}).items():
+            source = self.messages.get(int(pair[0]))
+            target = self.messages.get(int(pair[1]))
+            if source is not None and target is not None and float(score) >= 0.5:
+                self._add_edge(
+                    source,
+                    target,
+                    "semantic_similarity",
+                    float(score),
+                    {"score": round(float(score), 4)},
+                )
         for children in self.children.values():
             children.sort()
+
+    @property
+    def edges(self) -> tuple[TopicEdge, ...]:
+        return tuple(self._edges.values())
+
+    def connection_score(self, message_id: int) -> tuple[float, tuple[str, ...]]:
+        related = [
+            edge
+            for edge in self._edges.values()
+            if int(message_id) in {edge.source_message_id, edge.target_message_id}
+        ]
+        if not related:
+            return 0.0, ()
+        weights = sorted((edge.weight for edge in related), reverse=True)
+        score = min(weights[0] + sum(weights[1:4]) * 0.18, 1.0)
+        relations = tuple(
+            dict.fromkeys(
+                edge.relation
+                for edge in sorted(related, key=lambda item: item.weight, reverse=True)
+            )
+        )
+        return score, relations[:5]
 
     def root(self, message_id: int) -> int:
         current = int(message_id)
@@ -121,6 +416,23 @@ class MessageReferenceGraph:
             ),
         ]
         selected = set(hard_links)
+        graph_neighbors: dict[int, float] = {}
+        for edge in self._edges.values():
+            if edge.source_message_id == focus_message_id:
+                neighbor = edge.target_message_id
+            elif edge.target_message_id == focus_message_id:
+                neighbor = edge.source_message_id
+            else:
+                continue
+            if neighbor >= current_message_id or edge.weight < 0.45:
+                continue
+            graph_neighbors[neighbor] = max(graph_neighbors.get(neighbor, 0.0), edge.weight)
+        for message_id, _weight in sorted(
+            graph_neighbors.items(),
+            key=lambda item: (item[1], item[0]),
+            reverse=True,
+        )[:limit]:
+            selected.add(message_id)
         focus_terms = topic_terms(focus.prompt_text)
         chronological = sorted(
             (
@@ -142,8 +454,7 @@ class MessageReferenceGraph:
             terms = topic_terms(message.prompt_text)
             overlap = bool(focus_terms.intersection(terms))
             continuation = bool(
-                _LOW_INFORMATION.fullmatch(message.prompt_text.strip())
-                or _DEICTIC_CONTINUATION.match(message.prompt_text.strip())
+                _DEICTIC_CONTINUATION.match(message.prompt_text.strip())
             )
             if age <= 300 and (overlap or continuation):
                 selected.add(message.canonical_message_id)
@@ -156,6 +467,47 @@ class MessageReferenceGraph:
             if message_id != focus_message_id
         ]
         return tuple(ordered[-max(int(limit), 0) :])
+
+    def _add_edge(
+        self,
+        source: CanonicalMessage,
+        target: CanonicalMessage,
+        relation: str,
+        weight: float,
+        evidence: dict[str, object] | None = None,
+    ) -> None:
+        if source.canonical_message_id == target.canonical_message_id:
+            return
+        key = (
+            source.canonical_message_id,
+            target.canonical_message_id,
+            relation,
+        )
+        edge = TopicEdge(
+            source.canonical_message_id,
+            target.canonical_message_id,
+            relation,
+            min(max(float(weight), 0.0), 1.0),
+            dict(evidence or {}),
+        )
+        existing = self._edges.get(key)
+        if existing is None or edge.weight > existing.weight:
+            self._edges[key] = edge
+
+    @staticmethod
+    def _mentioned_principals(message: CanonicalMessage) -> tuple[int, ...]:
+        return tuple(
+            dict.fromkeys(
+                int(node.principal_id)
+                for node in message.body.nodes
+                if isinstance(node, MentionNode) and node.principal_id is not None
+            )
+        )
+
+    @staticmethod
+    def _is_question(text: str) -> bool:
+        compact = " ".join(str(text).split()).casefold()
+        return any(marker in compact for marker in _QUESTION_MARKERS)
 
     def topic_query(
         self,

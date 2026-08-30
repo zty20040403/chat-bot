@@ -137,12 +137,45 @@ class MessageLedger:
             )
         ]
 
+    def visible_messages_by_ids(self, scope, message_ids):
+        if scope.key != "onebot-v11:group:930690526":
+            return []
+        messages = {
+            10: SimpleNamespace(
+                canonical_message_id=10,
+                native_message_id="native-10",
+                sender_native_user_id="2291939848",
+                sender_principal_id=2,
+                sender_display="群友",
+                direction="inbound",
+                prompt_text="这个部署方案怎么样？",
+                occurred_at=120,
+                reply_to_canonical_message_id=None,
+            ),
+            12: SimpleNamespace(
+                canonical_message_id=12,
+                native_message_id="native-12",
+                sender_native_user_id="3526452465",
+                sender_principal_id=3,
+                sender_display="Kenneth",
+                direction="inbound",
+                prompt_text="你觉得呢",
+                occurred_at=123,
+                reply_to_canonical_message_id=None,
+            ),
+        }
+        return [messages[item] for item in message_ids if item in messages]
+
 
 class TurnJournal:
+    def __init__(self):
+        self.feedback = None
+
     def recent_context_plans(self, limit=100):
         del limit
         return [
             {
+                "turn_id": 3,
                 "turn_handle": "t#3",
                 "scope_key": "onebot-v11:group:930690526",
                 "current_message_id": 12,
@@ -151,15 +184,55 @@ class TurnJournal:
                 "reason_codes": ["recent_question", "same_scope"],
                 "related_message_ids": [11],
                 "candidates": [{"message_id": 10, "score": 89.0}],
+                "recall_route": {"mode": "follow_up", "confidence": 0.95},
+                "adaptive_budget": {
+                    "focus": 330,
+                    "used": {"focus": 72, "total": 72},
+                },
+                "evidence_guard": {"sufficient": True, "confidence": 0.87},
+                "topic_id": 10,
+                "topic_message_ids": [10],
+                "topic_query": "这个部署方案",
+                "recall_candidates": [
+                    {
+                        "handle": "msg#10",
+                        "source": "relation_graph",
+                        "selected": True,
+                        "raw_score": 0.91,
+                        "adjusted_score": 0.91,
+                        "decision_codes": ["selected"],
+                        "evidence_ids": [10],
+                    }
+                ],
                 "resolver_version": "reference-rules-v1",
                 "context_hash": "abc123",
                 "objective": "你觉得呢",
                 "status": "succeeded",
                 "model": "model-a",
                 "profile": "main",
+                "feedback": self.feedback,
                 "created_at": 123,
             }
         ]
+
+    def set_context_feedback(
+        self,
+        turn_id,
+        *,
+        verdict,
+        note,
+        actor,
+        resource_version,
+    ):
+        self.feedback = {
+            "turn_id": turn_id,
+            "verdict": verdict,
+            "note": note,
+            "actor": actor,
+            "resource_version": resource_version,
+            "updated_at": 130,
+        }
+        return dict(self.feedback)
 
     def recent_trace_summaries(self, limit=50):
         del limit
@@ -430,6 +503,23 @@ class AdminTests(unittest.TestCase):
                     "/bot-admin/api/context-plans",
                     headers={"Authorization": "Bearer secret"},
                 )
+                context_debug = await client.get(
+                    "/bot-admin/api/v1/context-debug",
+                    headers={"Authorization": "Bearer secret"},
+                )
+                context_detail = await client.get(
+                    "/bot-admin/api/v1/context-debug/3",
+                    headers={"Authorization": "Bearer secret"},
+                )
+                context_feedback = await client.put(
+                    "/bot-admin/api/v1/context-debug/3/feedback",
+                    headers={
+                        "Authorization": "Bearer secret",
+                        "If-Match": '"0"',
+                        "X-Admin-Actor": "Kenneth",
+                    },
+                    json={"verdict": "off_topic", "note": "应该关联上一条"},
+                )
                 databases = await client.get(
                     "/bot-admin/api/databases",
                     headers={"Authorization": "Bearer secret"},
@@ -454,6 +544,9 @@ class AdminTests(unittest.TestCase):
                     media,
                     sources,
                     context_plans,
+                    context_debug,
+                    context_detail,
+                    context_feedback,
                     databases,
                     observability,
                     alerts,
@@ -471,6 +564,9 @@ class AdminTests(unittest.TestCase):
             media,
             sources,
             context_plans,
+            context_debug,
+            context_detail,
+            context_feedback,
             databases,
             observability,
             alerts,
@@ -512,6 +608,20 @@ class AdminTests(unittest.TestCase):
         self.assertEqual(media.json()["vision_profile"], "gpt-5.6-luna")
         self.assertEqual(sources.json()["items"][0]["source_id"], 3)
         self.assertEqual(context_plans.json()["items"][0]["focus_message_id"], 10)
+        self.assertEqual(
+            context_debug.json()["items"][0]["current_topic"],
+            "这个部署方案",
+        )
+        self.assertEqual(context_debug.json()["items"][0]["context_tokens"], 72)
+        self.assertEqual(
+            context_detail.json()["item"]["evidence_messages"][0]["message_id"],
+            10,
+        )
+        self.assertEqual(context_feedback.status_code, 200)
+        self.assertEqual(
+            context_feedback.json()["feedback"]["verdict"],
+            "off_topic",
+        )
         self.assertEqual(databases.json()["writable_node"], "h610")
         self.assertEqual(
             [node["name"] for node in databases.json()["nodes"]],

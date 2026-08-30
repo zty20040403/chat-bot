@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import re
+import sqlite3
 from datetime import datetime
+
+from src.bot_storage import DatabaseError
 
 from ..conversation_scope import ConversationScope
 from ..ledger import CanonicalMessage, MessageLedger
-from .graph import MessageReferenceGraph
+from .graph import MessageReferenceGraph, TopicGraphStore
 from .models import ContextCandidate, TurnContextPlan
 
 
@@ -13,7 +16,7 @@ _FOLLOW_UP_PATTERNS = (
     r"你(?:怎么|咋)看",
     r"你觉得(?:呢|怎么样)?",
     r"你认为(?:呢|怎么样)?",
-    r"^(?:那|这个|那个|这件事|这话|上面)(?:呢|怎么样|怎么说|啥意思)?[？?]?$",
+    r"^(?:那|这|这个|那个|这件事|这话|上面|上面那个)(?:呢|怎么样|怎么说|啥意思)?[？?]?$",
     r"^(?:为什么|为啥|然后呢|后来呢|真的吗|是吗|对吗|咋办|怎么办)[？?]?$",
     r"^(?:怎么说|你说呢|评价一下|锐评|细说|展开说说|接着说)[吧呢？?]*$",
 )
@@ -55,8 +58,8 @@ _LOW_INFORMATION = re.compile(
     re.IGNORECASE,
 )
 _DEICTIC_FOLLOW_UP = re.compile(
-    r"^(?:这个|那个|这|那|它|他|她|上面|前面)(?:呢|怎么样|怎么说|咋样|"
-    r"是什么|啥意思)?[？?]?$",
+    r"^(?:(?:这个|那个|这|那|它|他|她|上面|上面那个|前面)(?:呢|怎么样|"
+    r"怎么说|咋样|是什么|啥意思)?|评价一下|锐评|细说|展开说说)[？?]?$",
     re.IGNORECASE,
 )
 
@@ -67,9 +70,11 @@ class ReferenceResolver:
         *,
         candidate_limit: int = 40,
         related_limit: int = 8,
+        graph_store: TopicGraphStore | None = None,
     ) -> None:
         self.candidate_limit = min(max(int(candidate_limit), 8), 100)
         self.related_limit = min(max(int(related_limit), 2), 20)
+        self.graph_store = graph_store
 
     def resolve(
         self,
@@ -95,6 +100,19 @@ class ReferenceResolver:
         if current is not None:
             graph_messages.append(current)
         graph = MessageReferenceGraph(graph_messages)
+        if self.graph_store is not None:
+            try:
+                self.graph_store.upsert(
+                    scope,
+                    tuple(
+                        edge
+                        for edge in graph.edges
+                        if current_message_id
+                        in {edge.source_message_id, edge.target_message_id}
+                    ),
+                )
+            except (OSError, RuntimeError, sqlite3.Error, DatabaseError):
+                pass
         explicit_target = (
             ledger.get_in_scope(scope, current.reply_to_canonical_message_id)
             if current is not None
@@ -211,6 +229,9 @@ class ReferenceResolver:
         )
         scored: list[tuple[CanonicalMessage, ContextCandidate]] = []
         for distance, message in enumerate(reversed(recent)):
+            graph_score, graph_relations = graph.connection_score(
+                message.canonical_message_id
+            )
             score, reasons, components = self._score(
                 message,
                 distance=distance,
@@ -226,6 +247,8 @@ class ReferenceResolver:
                         limit=3,
                     )
                 ),
+                graph_score=graph_score,
+                graph_relations=graph_relations,
             )
             if score <= 0:
                 continue
@@ -335,6 +358,8 @@ class ReferenceResolver:
         deictic_follow_up: bool,
         reply_count: int,
         topic_support_count: int,
+        graph_score: float,
+        graph_relations: tuple[str, ...],
     ) -> tuple[float, list[str], dict[str, float]]:
         text = " ".join(message.prompt_text.split()).strip()
         score = max(42.0 - distance * 6.0, 4.0)
@@ -374,6 +399,9 @@ class ReferenceResolver:
         if topic_support_count:
             score += min(topic_support_count * 14, 28)
             reasons.append("established_topic")
+        if graph_score:
+            score += min(graph_score * 18, 18)
+            reasons.extend(f"graph:{relation}" for relation in graph_relations[:3])
         if deictic_follow_up:
             if distance == 0:
                 score += 34
@@ -386,6 +414,7 @@ class ReferenceResolver:
             + (0.2 if message.reply_to_canonical_message_id is not None else 0.0)
             + min(reply_count * 0.15, 0.3)
             + min(topic_support_count * 0.15, 0.3)
+            + min(graph_score * 0.25, 0.25)
             + (0.35 if deictic_follow_up and distance == 0 else 0.0),
             1.0,
         )

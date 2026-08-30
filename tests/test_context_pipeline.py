@@ -6,10 +6,11 @@ import nonebot
 
 nonebot.init()
 
-from src.plugins.ai_chat.context_pipeline import ReferenceResolver
+from src.plugins.ai_chat.context_pipeline import ReferenceResolver, TopicGraphStore
+from src.plugins.ai_chat.context_pipeline.graph import MessageReferenceGraph
 from src.plugins.ai_chat.conversation_scope import ConversationScope
 from src.plugins.ai_chat.ledger import MessageLedger
-from src.plugins.ai_chat.message_ir import MessageBody, TextNode
+from src.plugins.ai_chat.message_ir import MentionNode, MessageBody, TextNode
 
 
 class ReferenceResolverTests(unittest.TestCase):
@@ -222,6 +223,55 @@ class ReferenceResolverTests(unittest.TestCase):
 
         self.assertIsNone(plan.focus_message_id)
         self.assertEqual(plan.reason_codes, ("standalone_message",))
+
+    def test_topic_graph_records_reply_mention_sender_time_and_semantic_edges(self) -> None:
+        alice = self.record(
+            self.group_a,
+            1,
+            7,
+            "Alice",
+            "控制台要不要用 SSE 实时更新？",
+        )
+        principal = self.ledger.principal_id_for_native("onebot-v11", "7")
+        mentioned = self.ledger.record_message(
+            self.group_a,
+            native_message_id="2",
+            sender_native_user_id="8",
+            sender_display="Bob",
+            body=MessageBody(
+                (
+                    TextNode(0, "这个 SSE 方案可以"),
+                    MentionNode(1, "7", "Alice", principal),
+                )
+            ),
+            occurred_at=1002,
+            reply_to_native_message_id="1",
+        )
+        follow = self.record(
+            self.group_a,
+            3,
+            8,
+            "Bob",
+            "这样下拉框不会被刷新关闭",
+        )
+        graph = MessageReferenceGraph(
+            [alice, mentioned, follow],
+            semantic_scores={(follow.canonical_message_id, alice.canonical_message_id): 0.91},
+        )
+        relations = {edge.relation for edge in graph.edges}
+        self.assertTrue(
+            {
+                "reply",
+                "mention",
+                "same_sender_continuation",
+                "temporal_proximity",
+                "question_answer",
+                "semantic_similarity",
+            }.issubset(relations)
+        )
+        store = TopicGraphStore(":memory:")
+        self.addCleanup(store.close)
+        self.assertGreater(store.upsert(self.group_a, graph.edges), 0)
 
 
 if __name__ == "__main__":

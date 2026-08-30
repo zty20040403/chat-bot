@@ -74,12 +74,14 @@ from .context_policy import (
     choose_context_policy,
     proactive_context_policy,
 )
-from .context_store import CaptureCandidate
+from .context_store import CaptureCandidate, estimate_tokens
 from .context_pipeline import (
+    assess_evidence,
     ReferenceResolver,
     TurnContextPlan,
     build_hybrid_recall,
     fit_token_budget,
+    route_recall,
 )
 from .context_pipeline.ranking import combine_budgeted_sections
 from .conversation_scope import ConversationScope
@@ -219,7 +221,7 @@ from . import onebot_delivery as _onebot_delivery
 SEND_RETRY_DELAY_SECONDS = 2.0
 SEND_RETRY_MAX_CHARS = 800
 TURN_PROMPT_VERSION = "qqbot-turn-v11"
-BOT_VERSION = "0.8.1"
+BOT_VERSION = "0.9.0"
 EMPTY_MENTION_FOLLOW_UP = "你觉得呢"
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 proactive_check_gate = ProactiveCheckGate()
@@ -252,6 +254,7 @@ model_profiles = app_context.model_catalog
 model_gateway = app_context.llm_gateway
 message_ledger = app_context.message_ledger
 context_store = app_context.context_store
+topic_graph_store = app_context.topic_graph_store
 pin_store = app_context.pin_store
 self_source = app_context.self_source
 skill_registry = app_context.skill_registry
@@ -271,7 +274,7 @@ dream_service = app_context.dream_service
 turn_journal = app_context.turn_journal
 recent_images = app_context.recent_images
 recent_voices = app_context.recent_voices
-reference_resolver = ReferenceResolver()
+reference_resolver = ReferenceResolver(graph_store=topic_graph_store)
 sandbox_manager = app_context.sandbox_manager
 browser_manager = app_context.browser_manager
 rich_renderer = app_context.rich_renderer

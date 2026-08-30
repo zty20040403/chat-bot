@@ -36,7 +36,7 @@ ToolState = Literal[
     "compensated",
     "handed-off",
 ]
-TURN_SCHEMA_VERSION = 3
+TURN_SCHEMA_VERSION = 5
 SEND_LOOP_SEQUENCE_BASE = 1_000_000
 
 
@@ -227,8 +227,11 @@ class TurnJournal:
                     turn_id, scope_key, current_message_id,
                     current_principal_id, focus_message_id, confidence,
                     reason_codes_json, related_message_ids_json,
-                    candidates_json, resolver_version, context_hash, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    candidates_json, recall_route_json, adaptive_budget_json,
+                    evidence_guard_json, topic_id, topic_message_ids_json,
+                    topic_query, recall_candidates_json, resolver_version,
+                    context_hash, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(turn_id) DO UPDATE SET
                     scope_key = excluded.scope_key,
                     current_message_id = excluded.current_message_id,
@@ -238,6 +241,13 @@ class TurnJournal:
                     reason_codes_json = excluded.reason_codes_json,
                     related_message_ids_json = excluded.related_message_ids_json,
                     candidates_json = excluded.candidates_json,
+                    recall_route_json = excluded.recall_route_json,
+                    adaptive_budget_json = excluded.adaptive_budget_json,
+                    evidence_guard_json = excluded.evidence_guard_json,
+                    topic_id = excluded.topic_id,
+                    topic_message_ids_json = excluded.topic_message_ids_json,
+                    topic_query = excluded.topic_query,
+                    recall_candidates_json = excluded.recall_candidates_json,
                     resolver_version = excluded.resolver_version,
                     context_hash = excluded.context_hash,
                     created_at = excluded.created_at
@@ -252,6 +262,13 @@ class TurnJournal:
                     _safe_json(payload.get("reason_codes") or [], 2000),
                     _safe_json(payload.get("related_message_ids") or [], 4000),
                     _safe_json(payload.get("candidates") or [], 8000),
+                    _safe_json(payload.get("recall_route") or {}, 4000),
+                    _safe_json(payload.get("adaptive_budget") or {}, 4000),
+                    _safe_json(payload.get("evidence_guard") or {}, 4000),
+                    payload.get("topic_id"),
+                    _safe_json(payload.get("topic_message_ids") or [], 8000),
+                    _safe_text(str(payload.get("topic_query") or ""), 1000),
+                    _safe_json(payload.get("recall_candidates") or [], 64000),
                     _safe_text(str(payload.get("resolver_version") or ""), 100),
                     _safe_text(str(payload.get("context_hash") or ""), 64),
                     now,
@@ -264,11 +281,18 @@ class TurnJournal:
             rows = self._connection.execute(
                 """
                 SELECT plan.*, turn.turn_ordinal, turn.objective,
-                       turn.status, turn.model, turn.profile
+                       turn.status, turn.model, turn.profile,
+                       feedback.verdict AS feedback_verdict,
+                       feedback.note AS feedback_note,
+                       feedback.resource_version AS feedback_resource_version,
+                       feedback.actor AS feedback_actor,
+                       feedback.updated_at AS feedback_updated_at
                 FROM turn_context_plans AS plan
                 JOIN agent_turns AS turn ON turn.turn_id = plan.turn_id
                 JOIN turn_visibility AS visibility
                   ON visibility.scope_key = turn.scope_key
+                LEFT JOIN turn_context_feedback AS feedback
+                  ON feedback.turn_id = plan.turn_id
                 WHERE turn.turn_ordinal >= visibility.min_turn_ordinal
                 ORDER BY plan.created_at DESC, plan.turn_id DESC
                 LIMIT ?
@@ -297,16 +321,107 @@ class TurnJournal:
                     row["related_message_ids_json"]
                 ),
                 "candidates": _json_list(row["candidates_json"]),
+                "recall_route": _json_object(row["recall_route_json"]),
+                "adaptive_budget": _json_object(row["adaptive_budget_json"]),
+                "evidence_guard": _json_object(row["evidence_guard_json"]),
+                "topic_id": (
+                    int(row["topic_id"]) if row["topic_id"] is not None else None
+                ),
+                "topic_message_ids": _json_list(
+                    row["topic_message_ids_json"]
+                ),
+                "topic_query": str(row["topic_query"]),
+                "recall_candidates": _json_list(
+                    row["recall_candidates_json"]
+                ),
                 "resolver_version": str(row["resolver_version"]),
                 "context_hash": str(row["context_hash"]),
                 "objective": str(row["objective"]),
                 "status": str(row["status"]),
                 "model": str(row["model"]),
                 "profile": str(row["profile"]),
+                "feedback": (
+                    {
+                        "verdict": str(row["feedback_verdict"]),
+                        "note": str(row["feedback_note"]),
+                        "resource_version": int(
+                            row["feedback_resource_version"]
+                        ),
+                        "actor": str(row["feedback_actor"]),
+                        "updated_at": int(row["feedback_updated_at"]),
+                    }
+                    if row["feedback_verdict"] is not None
+                    else None
+                ),
                 "created_at": int(row["created_at"]),
             }
             for row in rows
         ]
+
+    def set_context_feedback(
+        self,
+        turn_id: int,
+        *,
+        verdict: str,
+        note: str,
+        actor: str,
+        resource_version: int,
+        updated_at: int | None = None,
+    ) -> dict[str, object]:
+        normalized_verdict = str(verdict).strip().casefold()
+        if normalized_verdict not in {"correct", "off_topic"}:
+            raise ValueError("context feedback verdict is invalid")
+        normalized_actor = _safe_text(" ".join(str(actor).split()), 160)
+        if not normalized_actor:
+            normalized_actor = "admin-console"
+        normalized_note = _safe_text(str(note), 1000)
+        now = int(updated_at or time.time())
+        with self._transaction() as cursor:
+            visible = cursor.execute(
+                """
+                SELECT 1
+                FROM turn_context_plans AS plan
+                JOIN agent_turns AS turn ON turn.turn_id = plan.turn_id
+                JOIN turn_visibility AS visibility
+                  ON visibility.scope_key = turn.scope_key
+                WHERE plan.turn_id = ?
+                  AND turn.turn_ordinal >= visibility.min_turn_ordinal
+                """,
+                (int(turn_id),),
+            ).fetchone()
+            if visible is None:
+                raise ValueError("context plan is not visible")
+            cursor.execute(
+                """
+                INSERT INTO turn_context_feedback (
+                    turn_id, verdict, note, resource_version, actor,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(turn_id) DO UPDATE SET
+                    verdict = excluded.verdict,
+                    note = excluded.note,
+                    resource_version = excluded.resource_version,
+                    actor = excluded.actor,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    int(turn_id),
+                    normalized_verdict,
+                    normalized_note,
+                    int(resource_version),
+                    normalized_actor,
+                    now,
+                    now,
+                ),
+            )
+        return {
+            "turn_id": int(turn_id),
+            "verdict": normalized_verdict,
+            "note": normalized_note,
+            "resource_version": int(resource_version),
+            "actor": normalized_actor,
+            "updated_at": now,
+        }
 
     def recent_trace_summaries(self, *, limit: int = 50) -> list[dict[str, object]]:
         """Return recent operational trace metadata without conversation content."""
@@ -1487,9 +1602,26 @@ class TurnJournal:
                     reason_codes_json TEXT NOT NULL DEFAULT '[]',
                     related_message_ids_json TEXT NOT NULL DEFAULT '[]',
                     candidates_json TEXT NOT NULL DEFAULT '[]',
+                    recall_route_json TEXT NOT NULL DEFAULT '{}',
+                    adaptive_budget_json TEXT NOT NULL DEFAULT '{}',
+                    evidence_guard_json TEXT NOT NULL DEFAULT '{}',
+                    topic_id INTEGER,
+                    topic_message_ids_json TEXT NOT NULL DEFAULT '[]',
+                    topic_query TEXT NOT NULL DEFAULT '',
+                    recall_candidates_json TEXT NOT NULL DEFAULT '[]',
                     resolver_version TEXT NOT NULL,
                     context_hash TEXT NOT NULL,
                     created_at INTEGER NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS turn_context_feedback (
+                    turn_id INTEGER PRIMARY KEY REFERENCES agent_turns(turn_id) ON DELETE CASCADE,
+                    verdict TEXT NOT NULL CHECK(verdict IN ('correct', 'off_topic')),
+                    note TEXT NOT NULL DEFAULT '',
+                    resource_version INTEGER NOT NULL,
+                    actor TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_agent_turns_scope_time
@@ -1504,8 +1636,42 @@ class TurnJournal:
                     ON turn_archives(expires_at);
                 CREATE INDEX IF NOT EXISTS idx_turn_context_plans_scope_time
                     ON turn_context_plans(scope_key, created_at, turn_id);
+                CREATE INDEX IF NOT EXISTS idx_turn_context_feedback_updated
+                    ON turn_context_feedback(updated_at, turn_id);
                 """
             )
+            existing_context_columns = {
+                str(item[1])
+                for item in cursor.execute(
+                    "PRAGMA table_info(turn_context_plans)"
+                ).fetchall()
+            }
+            json_object_columns = (
+                "recall_route_json",
+                "adaptive_budget_json",
+                "evidence_guard_json",
+            )
+            for column in json_object_columns:
+                if column not in existing_context_columns:
+                    cursor.execute(
+                        f"ALTER TABLE turn_context_plans ADD COLUMN {column} "
+                        "TEXT NOT NULL DEFAULT '{}'"
+                    )
+            for column in ("topic_message_ids_json", "recall_candidates_json"):
+                if column not in existing_context_columns:
+                    cursor.execute(
+                        f"ALTER TABLE turn_context_plans ADD COLUMN {column} "
+                        "TEXT NOT NULL DEFAULT '[]'"
+                    )
+            if "topic_id" not in existing_context_columns:
+                cursor.execute(
+                    "ALTER TABLE turn_context_plans ADD COLUMN topic_id INTEGER"
+                )
+            if "topic_query" not in existing_context_columns:
+                cursor.execute(
+                    "ALTER TABLE turn_context_plans ADD COLUMN topic_query "
+                    "TEXT NOT NULL DEFAULT ''"
+                )
             row = cursor.execute(
                 """
                 SELECT value FROM turn_journal_meta

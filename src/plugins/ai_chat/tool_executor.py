@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+import asyncio
 from typing import (
     Any,
     Awaitable,
@@ -65,10 +66,13 @@ from .config import (
 from .context_policy import (
     choose_context_policy,
 )
+from .context_store import estimate_tokens
 from .context_pipeline import (
     TurnContextPlan,
+    assess_evidence,
     build_hybrid_recall,
     fit_token_budget,
+    route_recall,
 )
 from .context_pipeline.ranking import combine_budgeted_sections
 from .deepseek import (
@@ -76,6 +80,7 @@ from .deepseek import (
     DeepSeekTrace,
     DeepSeekConfigError,
     FinalStreamState,
+    ask_deepseek_json,
     ask_deepseek_with_tools,
 )
 from .long_term_memory import (
@@ -313,25 +318,53 @@ async def _ask_ai(
             )
     except (OSError, RuntimeError, ValueError, sqlite3.Error, DatabaseError) as exc:
         logger.warning(f"Group reference resolution failed softly: {exc}")
+    async def classify_recall(payload: dict[str, object]) -> dict[str, Any]:
+        router_profile = (
+            model_profiles.try_resolve(settings.recall_router_profile)
+            or selected_profile
+        )
+        return await asyncio.wait_for(
+            ask_deepseek_json(
+                "你是上下文召回路由器，只分类，不回答用户。"
+                "route 只能是 direct、follow_up、recent_group、old_topic、"
+                "user_memory、group_memory、no_recall。"
+                "complexity 只能是 simple、normal、complex。"
+                "输出 JSON：route、confidence、complexity、reason。"
+                "明确引用选 direct；模糊追问选 follow_up；最近群聊选 recent_group；"
+                "旧聊天选 old_topic；当前用户偏好选 user_memory；群公共决定选"
+                "group_memory；独立问题选 no_recall。",
+                json.dumps(payload, ensure_ascii=False),
+                profile=router_profile,
+                trace=turn_trace,
+            ),
+            timeout=settings.recall_router_timeout_seconds,
+        )
+
+    with telemetry.stage("context.route"):
+        recall_decision = await route_recall(
+            user_text,
+            context_plan,
+            is_group=isinstance(event, GroupMessageEvent),
+            classifier=(
+                classify_recall
+                if settings.recall_router_model_enabled
+                else None
+            ),
+        )
     context_policy = choose_context_policy(
         user_text,
         context_plan,
         is_group=isinstance(event, GroupMessageEvent),
+        recall_decision=recall_decision,
+        configured_max_tokens=settings.context_input_budget_tokens,
+        model_max_input_tokens=selected_profile.max_input_tokens,
     )
     hybrid_recall = None
+    group_memory_scope, user_memory_scope = _memory_scopes(event)
     if message_ledger is not None:
-        group_memory_scope, user_memory_scope = _memory_scopes(event)
         automatic_semantic_recall = (
             semantic_recall
-            if (
-                (
-                    context_plan is not None
-                    and context_plan.focus_message_id is not None
-                )
-                or context_policy.mode == "expanded"
-                or context_policy.fallback_group_memory
-                or context_policy.fallback_user_memory
-            )
+            if recall_decision.include_semantic
             else None
         )
         try:
@@ -345,7 +378,13 @@ async def _ask_ai(
                     user_memory_scope=user_memory_scope,
                     memory_store=long_term_memory,
                     context_store=context_store,
+                    topic_graph_store=topic_graph_store,
                     semantic_recall=automatic_semantic_recall,
+                    pin_store=pin_store,
+                    source_store=source_store,
+                    media_library=media_library,
+                    recall_decision=recall_decision,
+                    current_native_user_id=event.user_id,
                     include_group_memory=context_policy.include_group_memory,
                     include_user_memory=context_policy.include_user_memory,
                     fallback_group_memory=context_policy.fallback_group_memory,
@@ -362,25 +401,63 @@ async def _ask_ai(
             DatabaseError,
         ) as exc:
             logger.warning(f"Hybrid context recall failed softly: {exc}")
-        if (
-            hybrid_recall is not None
-            and context_plan is not None
-            and turn_journal is not None
-            and journal_turn_id is not None
-        ):
-            try:
-                payload = context_plan.journal_payload()
+    evidence_assessment = assess_evidence(
+        user_text,
+        recall_decision,
+        context_plan,
+        hybrid_recall,
+        conversation_scope=scope_from_event(event).key,
+        group_memory_scope=group_memory_scope,
+        user_memory_scope=user_memory_scope,
+    )
+    if (
+        context_plan is not None
+        and turn_journal is not None
+        and journal_turn_id is not None
+    ):
+        try:
+            payload = context_plan.journal_payload()
+            payload["recall_route"] = recall_decision.journal_payload()
+            payload["adaptive_budget"] = {
+                "focus": context_policy.token_budget.focus,
+                "timeline": context_policy.token_budget.timeline,
+                "semantic": context_policy.token_budget.semantic,
+                "group_memory": context_policy.token_budget.group_memory,
+                "user_memory": context_policy.token_budget.user_memory,
+                "tool_reserve": context_policy.token_budget.tool_reserve,
+                "total": context_policy.token_budget.total,
+            }
+            payload["evidence_guard"] = evidence_assessment.journal_payload()
+            if hybrid_recall is not None:
+                used_tokens = {
+                    "focus": estimate_tokens(hybrid_recall.focus_context),
+                    "timeline": estimate_tokens(hybrid_recall.timeline_context),
+                    "semantic": estimate_tokens(hybrid_recall.recall_context),
+                    "group_memory": estimate_tokens(
+                        hybrid_recall.group_memory_context
+                    ),
+                    "user_memory": estimate_tokens(
+                        hybrid_recall.user_memory_context
+                    ),
+                }
+                used_tokens["total"] = sum(used_tokens.values())
+                payload["adaptive_budget"]["used"] = used_tokens
+                payload["recall_candidates"] = (
+                    hybrid_recall.journal_decisions()
+                )
                 payload["candidates"] = [
                     *payload["candidates"],
                     *hybrid_recall.journal_candidates(),
                 ]
-                turn_journal.record_context_plan(
-                    journal_turn_id,
-                    payload,
-                    created_at=event.time,
-                )
-            except (OSError, RuntimeError, ValueError, sqlite3.Error, DatabaseError):
-                pass
+            turn_journal.record_context_plan(
+                journal_turn_id,
+                payload,
+                created_at=event.time,
+            )
+        except (OSError, RuntimeError, ValueError, sqlite3.Error, DatabaseError):
+            pass
+    if settings.evidence_guard_enabled and not evidence_assessment.sufficient:
+        return evidence_assessment.clarification or "你指的是刚才哪个问题？"
 
     async def _execute_tool_impl(name: str, arguments: dict[str, object]) -> str:
         nonlocal visual_reply_segment, voice_reply_segment, voice_reply_text
@@ -737,10 +814,14 @@ async def _ask_ai(
                 if folded_query in entry.content.casefold()
             ][:limit]
             semantic_hits = []
+            allowed_context_scopes = {
+                scope.key,
+                *_memory_scope_keys(event),
+            }
             if semantic_recall is not None:
                 try:
                     semantic_hits = await semantic_recall.search(
-                        [scope.key, *_memory_scope_keys(event)],
+                        sorted(allowed_context_scopes),
                         query,
                         limit=limit * 2,
                     )
@@ -810,6 +891,7 @@ async def _ask_ai(
                         }
                         for hit in semantic_hits
                         if hit.source_handle not in lexical_handles
+                        and str(hit.scope_key) in allowed_context_scopes
                     ][:limit],
                 },
                 ensure_ascii=False,
@@ -1396,6 +1478,12 @@ async def _ask_ai(
             context_parts.append(skill_index)
         if turn_context:
             context_parts.append(turn_context)
+        if evidence_assessment.sufficient:
+            context_parts.append(
+                evidence_assessment.prompt_contract(
+                    current_user=_current_user_identity(event)
+                )
+            )
         if replay_prefix:
             context_parts.append(
                 "[host replay status]\n"
@@ -1472,22 +1560,42 @@ async def _ask_ai(
             event,
             policy=context_policy,
             exclude_canonical_message_ids=excluded_context_ids,
+            suppress_recalled_sections=hybrid_recall is not None,
+        )
+        focus_prompt_context = (
+            hybrid_recall.focus_context
+            if hybrid_recall is not None and hybrid_recall.focus_context
+            else context_plan.rendered_context
+            if context_plan is not None
+            else ""
+        )
+        timeline_prompt_context = "\n\n".join(
+            item
+            for item in (
+                hybrid_recall.timeline_context
+                if hybrid_recall is not None
+                else "",
+                raw_group_context,
+            )
+            if item
         )
         group_prompt_context = combine_budgeted_sections(
             [
                 (
                     "focus",
-                    context_plan.rendered_context if context_plan is not None else "",
+                    focus_prompt_context,
                     context_policy.token_budget.focus,
                 ),
                 (
                     "semantic",
-                    hybrid_recall.group_context if hybrid_recall is not None else "",
+                    hybrid_recall.recall_context
+                    if hybrid_recall is not None
+                    else "",
                     context_policy.token_budget.semantic,
                 ),
                 (
                     "timeline",
-                    raw_group_context,
+                    timeline_prompt_context,
                     context_policy.token_budget.timeline,
                 ),
             ],

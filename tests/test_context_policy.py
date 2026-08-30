@@ -29,7 +29,7 @@ def _plan(
 
 
 class ContextPolicyTests(unittest.TestCase):
-    def test_standalone_group_question_uses_minimal_context(self) -> None:
+    def test_standalone_group_question_skips_recall(self) -> None:
         policy = choose_context_policy(
             "NixOS 怎么更新？",
             _plan(focus_message_id=None, reason_codes=("standalone_message",)),
@@ -37,9 +37,10 @@ class ContextPolicyTests(unittest.TestCase):
         )
 
         self.assertEqual(policy.mode, "minimal")
-        self.assertTrue(policy.include_recent_group)
-        self.assertEqual(policy.max_messages, 6)
-        self.assertEqual(policy.max_chars, 900)
+        self.assertEqual(policy.route, "no_recall")
+        self.assertFalse(policy.include_recent_group)
+        self.assertEqual(policy.max_messages, 0)
+        self.assertEqual(policy.max_chars, 0)
         self.assertFalse(policy.include_roster)
         self.assertFalse(policy.include_pins)
 
@@ -51,7 +52,12 @@ class ContextPolicyTests(unittest.TestCase):
         )
 
         self.assertEqual(policy.mode, "focused")
-        self.assertFalse(policy.include_recent_group)
+        self.assertEqual(policy.route, "follow_up")
+        self.assertTrue(policy.include_recent_group)
+        self.assertGreater(
+            policy.token_budget.focus,
+            policy.token_budget.timeline,
+        )
 
     def test_unresolved_or_group_reference_expands_recent_context(self) -> None:
         unresolved = choose_context_policy(
@@ -66,7 +72,7 @@ class ContextPolicyTests(unittest.TestCase):
         )
 
         self.assertEqual(unresolved.mode, "expanded")
-        self.assertEqual(unresolved.max_messages, 12)
+        self.assertGreaterEqual(unresolved.max_messages, 4)
         self.assertEqual(roster.mode, "expanded")
         self.assertTrue(roster.include_roster)
 
@@ -85,6 +91,24 @@ class ContextPolicyTests(unittest.TestCase):
         self.assertTrue(personal.fallback_user_memory)
         self.assertFalse(personal.fallback_group_memory)
         self.assertTrue(group.fallback_group_memory)
+
+    def test_complex_question_gets_more_budget_but_respects_model_window(self) -> None:
+        simple = choose_context_policy(
+            "刚才说啥",
+            None,
+            is_group=True,
+            configured_max_tokens=6000,
+        )
+        complex_policy = choose_context_policy(
+            "仔细分析刚才大家讨论的数据库方案，对比风险并给出完整实施步骤",
+            None,
+            is_group=True,
+            configured_max_tokens=6000,
+            model_max_input_tokens=8000,
+        )
+
+        self.assertGreater(complex_policy.token_budget.total, simple.token_budget.total)
+        self.assertLessEqual(complex_policy.token_budget.total, 1760)
 
 
 if __name__ == "__main__":

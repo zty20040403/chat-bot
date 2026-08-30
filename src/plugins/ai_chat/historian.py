@@ -6,7 +6,7 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Iterator, Sequence
+from typing import Any, Awaitable, Callable, Iterator, Mapping, Sequence
 
 from src.bot_storage import DatabaseSource, PostgresDatabase, open_store_connection
 
@@ -14,6 +14,7 @@ from .context_store import CaptureCandidate, ContextStore
 from .conversation_scope import ConversationScope
 from .ledger import MessageLedger
 from .long_term_memory import LongTermMemoryError, LongTermMemoryStore, MemoryEntry
+from .storage.jobs import DurableJob, DurableJobStore
 
 
 @dataclass(frozen=True)
@@ -28,6 +29,12 @@ class HistorianResult:
     summary_p2: str
     summary_p3: str
     memories: tuple[MemoryProposal, ...] = ()
+    summary_p4: str = ""
+    topic: str = ""
+    importance: float = 0.5
+    confidence: float = 0.5
+    participants: tuple[str, ...] = ()
+    evidence_ids: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -57,64 +64,234 @@ class HistorianService:
         self.generator = generator
         self.protected_provider = protected_provider
 
+    def schedule_due(
+        self,
+        job_store: DurableJobStore,
+        *,
+        idle_seconds: int = 600,
+        max_scopes: int = 20,
+        max_attempts: int = 4,
+        now: int | None = None,
+    ) -> int:
+        timestamp = int(time.time() if now is None else now)
+        idle_cutoff = timestamp - max(int(idle_seconds), 60)
+        scheduled = 0
+        for scope in self.ledger.list_scopes()[: max(int(max_scopes), 1)]:
+            recent = self.ledger.recent_in_scope(scope, 1)
+            if not recent or recent[-1].occurred_at > idle_cutoff:
+                continue
+            candidate = self.context_store.capture_candidate(
+                self.ledger,
+                scope,
+                protected_message_ids=self._protected(scope),
+                settled=True,
+            )
+            if candidate is None:
+                continue
+            payload = {
+                "scope": {
+                    "platform": scope.platform,
+                    "kind": scope.kind,
+                    "native_conversation_id": scope.native_conversation_id,
+                },
+                "expected_cursor": candidate.expected_cursor,
+                "source_message_ids": [
+                    item.canonical_message_id for item in candidate.messages
+                ],
+                "source_hash": candidate.source_hash,
+                "last_activity_at": recent[-1].occurred_at,
+                "scheduled_at": timestamp,
+            }
+            _job, created = job_store.enqueue(
+                kind="context.historian_capture",
+                idempotency_key=(
+                    f"context.historian:{scope.key}:"
+                    f"{candidate.expected_cursor}:{candidate.source_hash}"
+                ),
+                scope_key=scope.key,
+                payload=payload,
+                priority=30,
+                max_attempts=max_attempts,
+                now=timestamp,
+            )
+            scheduled += int(created)
+        return scheduled
+
+    async def handle_job(self, job: DurableJob) -> Mapping[str, Any]:
+        candidate, scope = self._candidate_from_job(job)
+        generation_mode = "historian"
+        try:
+            generated = await self.generator(candidate)
+            self._validate(candidate, generated)
+        except Exception:
+            if job.attempts < job.max_attempts:
+                raise
+            generated = self._fallback(candidate)
+            generation_mode = "fallback"
+        compartment, memories_added = self._publish_result(
+            scope,
+            candidate,
+            generated,
+            generation_mode=generation_mode,
+        )
+        return {
+            "episode_handle": compartment.expand_handle,
+            "generation_mode": generation_mode,
+            "start_message_id": compartment.start_message_id,
+            "end_message_id": compartment.end_message_id,
+            "source_hash": compartment.source_hash,
+            "memories_added": memories_added,
+        }
+
     async def run_once(self, *, max_scopes: int = 20) -> HistorianRun:
         published = 0
         memories_added = 0
         failures: list[str] = []
         for scope in self.ledger.list_scopes()[: max(int(max_scopes), 1)]:
-            protected = tuple(
-                int(item)
-                for item in (
-                    self.protected_provider(scope)
-                    if self.protected_provider is not None
-                    else ()
-                )
-            )
             candidate = self.context_store.capture_candidate(
                 self.ledger,
                 scope,
-                protected_message_ids=protected,
+                protected_message_ids=self._protected(scope),
             )
             if candidate is None:
                 continue
             try:
                 generated = await self.generator(candidate)
                 self._validate(candidate, generated)
-                self.context_store.publish_generated(
+                _compartment, added = self._publish_result(
+                    scope,
                     candidate,
-                    (
-                        generated.summary_p1,
-                        generated.summary_p2,
-                        generated.summary_p3,
-                    ),
+                    generated,
+                    generation_mode="historian",
                 )
                 published += 1
-                if scope.kind == "group":
-                    memory_scope = _group_memory_scope(scope)
-                    allowed_ids = {
-                        item.canonical_message_id for item in candidate.messages
-                    }
-                    for proposal in generated.memories[:10]:
-                        if proposal.source_message_id not in allowed_ids:
-                            continue
-                        if _looks_like_secret(proposal.content):
-                            continue
-                        try:
-                            _entry, created = self.memory_store.add(
-                                memory_scope,
-                                "group",
-                                proposal.content,
-                                creator_user_id=0,
-                                creator_principal_id=0,
-                                source_message_id=proposal.source_message_id,
-                                reason="historian proposal",
-                            )
-                        except LongTermMemoryError:
-                            continue
-                        memories_added += int(created)
+                memories_added += added
             except Exception as exc:
                 failures.append(f"{scope.key}: {exc}")
         return HistorianRun(published, memories_added, tuple(failures))
+
+    def _publish_result(
+        self,
+        scope: ConversationScope,
+        candidate: CaptureCandidate,
+        generated: HistorianResult,
+        *,
+        generation_mode: str,
+    ):
+        evidence_ids = generated.evidence_ids or tuple(
+            item.canonical_message_id for item in candidate.messages
+        )
+        participants = generated.participants or tuple(
+            dict.fromkeys(
+                item.sender_display
+                for item in candidate.messages
+                if item.sender_display.strip()
+            )
+        )
+        summary_p4 = generated.summary_p4.strip() or generated.summary_p3.strip()
+        topic = generated.topic.strip() or generated.summary_p3.strip()[:120]
+        compartment = self.context_store.publish_generated(
+            candidate,
+            (
+                generated.summary_p1,
+                generated.summary_p2,
+                generated.summary_p3,
+            ),
+            summary_p4=summary_p4,
+            topic=topic,
+            importance=generated.importance,
+            confidence=generated.confidence,
+            participants=participants,
+            evidence_ids=evidence_ids,
+            generation_mode=generation_mode,
+        )
+        memories_added = 0
+        if scope.kind != "group" or generation_mode == "fallback":
+            return compartment, memories_added
+        memory_scope = _group_memory_scope(scope)
+        allowed_ids = {
+            item.canonical_message_id for item in candidate.messages
+        }
+        for proposal in generated.memories[:10]:
+            if proposal.source_message_id not in allowed_ids:
+                continue
+            if _looks_like_secret(proposal.content):
+                continue
+            try:
+                _entry, created = self.memory_store.add(
+                    memory_scope,
+                    "group",
+                    proposal.content,
+                    creator_user_id=0,
+                    creator_principal_id=0,
+                    source_message_id=proposal.source_message_id,
+                    reason="historian proposal",
+                )
+            except LongTermMemoryError:
+                continue
+            memories_added += int(created)
+        return compartment, memories_added
+
+    def _candidate_from_job(
+        self,
+        job: DurableJob,
+    ) -> tuple[CaptureCandidate, ConversationScope]:
+        raw_scope = job.payload.get("scope")
+        if not isinstance(raw_scope, dict):
+            raise ValueError("historian job has no conversation scope")
+        scope = ConversationScope(
+            str(raw_scope.get("platform") or ""),
+            str(raw_scope.get("kind") or ""),  # type: ignore[arg-type]
+            str(raw_scope.get("native_conversation_id") or ""),
+        )
+        if scope.key != job.scope_key:
+            raise ValueError("historian job scope does not match its lease")
+        raw_ids = job.payload.get("source_message_ids")
+        if not isinstance(raw_ids, list):
+            raise ValueError("historian job has no evidence range")
+        source_ids = tuple(int(item) for item in raw_ids)
+        candidate = self.context_store.restore_capture_candidate(
+            self.ledger,
+            scope,
+            expected_cursor=int(job.payload.get("expected_cursor") or 0),
+            source_message_ids=source_ids,
+            source_hash=str(job.payload.get("source_hash") or ""),
+        )
+        return candidate, scope
+
+    def _protected(self, scope: ConversationScope) -> tuple[int, ...]:
+        return tuple(
+            int(item)
+            for item in (
+                self.protected_provider(scope)
+                if self.protected_provider is not None
+                else ()
+            )
+        )
+
+    def _fallback(self, candidate: CaptureCandidate) -> HistorianResult:
+        p1, p2, p3 = self.context_store._summaries(list(candidate.messages))
+        participants = tuple(
+            dict.fromkeys(
+                item.sender_display
+                for item in candidate.messages
+                if item.sender_display.strip()
+            )
+        )
+        evidence = tuple(
+            item.canonical_message_id for item in candidate.messages
+        )
+        return HistorianResult(
+            summary_p1=p1,
+            summary_p2=p2,
+            summary_p3=p3,
+            summary_p4=p3[:300],
+            topic=p3[:120],
+            importance=0.35,
+            confidence=0.35,
+            participants=participants,
+            evidence_ids=evidence,
+        )
 
     @staticmethod
     def _validate(
@@ -131,6 +308,12 @@ class HistorianService:
         if len(summaries[0]) > 3200 or len(summaries[1]) > 1600:
             raise ValueError("historian summary exceeds the publication budget")
         allowed = {message.canonical_message_id for message in candidate.messages}
+        if generated.evidence_ids and not set(generated.evidence_ids).issubset(allowed):
+            raise ValueError("historian summary cites evidence outside its capture")
+        if not 0 <= generated.importance <= 1:
+            raise ValueError("historian importance is outside 0..1")
+        if not 0 <= generated.confidence <= 1:
+            raise ValueError("historian confidence is outside 0..1")
         for proposal in generated.memories:
             if proposal.source_message_id not in allowed:
                 raise ValueError("historian memory cites evidence outside its capture")
@@ -304,10 +487,36 @@ def parse_historian_payload(payload: dict[str, object]) -> HistorianResult:
             content = " ".join(str(raw.get("content") or "").split())
             if source_message_id > 0 and content:
                 memories.append(MemoryProposal(content[:300], source_message_id))
+    raw_participants = payload.get("participants")
+    participants = (
+        tuple(
+            " ".join(str(item).split())[:120]
+            for item in raw_participants[:32]
+            if str(item).strip()
+        )
+        if isinstance(raw_participants, list)
+        else ()
+    )
+    raw_evidence = payload.get("evidence_ids")
+    evidence_ids: list[int] = []
+    if isinstance(raw_evidence, list):
+        for item in raw_evidence:
+            try:
+                value = int(item)
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                evidence_ids.append(value)
     return HistorianResult(
         summary_p1=str(payload.get("summary_p1") or "").strip(),
         summary_p2=str(payload.get("summary_p2") or "").strip(),
         summary_p3=str(payload.get("summary_p3") or "").strip(),
+        summary_p4=str(payload.get("summary_p4") or "").strip(),
+        topic=" ".join(str(payload.get("topic") or "").split())[:300],
+        importance=_bounded_number(payload.get("importance"), 0.5),
+        confidence=_bounded_number(payload.get("confidence"), 0.5),
+        participants=tuple(dict.fromkeys(participants)),
+        evidence_ids=tuple(dict.fromkeys(evidence_ids)),
         memories=tuple(memories),
     )
 
@@ -369,3 +578,11 @@ def _looks_like_secret(content: str) -> bool:
             content,
         )
     )
+
+
+def _bounded_number(value: object, default: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = default
+    return min(max(number, 0.0), 1.0)

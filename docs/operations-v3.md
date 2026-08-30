@@ -197,6 +197,8 @@ AI_HISTORIAN_ENABLED=true
 AI_HISTORIAN_PROFILE=
 AI_HISTORIAN_MODEL=
 AI_HISTORIAN_CHECK_SECONDS=60
+AI_HISTORIAN_IDLE_SECONDS=600
+AI_HISTORIAN_MAX_ATTEMPTS=4
 AI_DREAM_ENABLED=true
 AI_DREAM_PROFILE=
 AI_DREAM_MODEL=
@@ -205,12 +207,40 @@ AI_DREAM_MIN_ENTRIES=15
 ```
 
 profile 留空时使用默认 profile；`AI_HISTORIAN_MODEL` 和 `AI_DREAM_MODEL` 只用于在所选
-profile 内兼容覆盖真实模型 ID。Historian 只总结一段连续、哈希确定的旧消息，
-并要求每条长期记忆建议引用该 capture 内的 `msg#`；发布时 cursor 已变化则 CAS 失败，
-不会覆盖新状态。Dream 每天在指定小时做一次长期记忆整理，更新必须携带当前版本，
+profile 内兼容覆盖真实模型 ID。群聊安静 10 分钟后，Historian 把连续且哈希确定的
+消息范围写入持久任务队列。任务带租约，进程重启后会继续；模型连续失败到最后一次
+才发布可追溯的规则摘要兜底。P1/P2/P3、P4 检索锚点、话题、重要性、置信度、参与者
+和证据消息均随章节保存。Historian 独占章节游标，聊天请求不会抢先机械压缩；发布时
+cursor 已变化则 CAS 失败，不会覆盖新状态。Dream 每天在指定小时做一次长期记忆整理，更新必须携带当前版本，
 因此群聊过程中刚被人修改的记录不会被后台静默覆盖。
 
 两者都会额外消耗模型额度，建议先只开 Historian，观察管理页用量后再开 Dream。
+
+### 6.1 Recall Router、Reranker 与证据检查
+
+```text
+AI_RECALL_ROUTER_MODEL_ENABLED=true
+AI_RECALL_ROUTER_PROFILE=deepseek
+AI_RECALL_ROUTER_TIMEOUT_SECONDS=8
+AI_EVIDENCE_GUARD_ENABLED=true
+```
+
+每轮先由规则选择 `direct`、`follow_up`、`recent_group`、`old_topic`、
+`user_memory`、`group_memory` 或 `no_recall`。高置信度规则不会调用模型；只有短而
+模糊的消息才使用路由 profile 做一次小型 JSON 分类。`no_recall` 不读取群历史或
+长期记忆，减少无关 Token 和话题串味。
+
+候选统一经过 Scope 硬过滤和混合 Reranker。相对最高分达到阈值的互补证据可以一起
+保留，不会永远只选一条；重复、话题冲突和用户归属风险会扣分。上下文预算再按问题
+复杂度、模型 `max_input_tokens` 和 `AI_CONTEXT_INPUT_BUDGET_TOKENS` 动态分给焦点、
+时间线、旧消息、群记忆、个人记忆与工具结果。
+
+Evidence Guard 在主模型生成前检查话题、证据、用户归属和明显时间冲突。模糊追问
+没有可靠焦点时直接请求引用，而不是让模型带着错误上下文自信回答。每轮路由、预算、
+候选分数和检查结果都写入 `turn_context_plans`，供 Trace 和管理端审计。
+管理台“上下文调试”页会按回答还原上述决策，同时展示最终证据原消息、各分区实际
+Token、群记忆与个人记忆来源，以及 Historian 的积压、重试和失败任务。管理员反馈
+通过 `turn_context_feedback` 持久化，并使用控制面资源版本和审计日志防止并发覆盖。
 
 ## 7. 持久浏览器与富消息截图
 

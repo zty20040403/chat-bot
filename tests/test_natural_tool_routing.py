@@ -107,7 +107,7 @@ class NaturalToolRoutingTests(unittest.IsolatedAsyncioTestCase):
             answer = await _ask_ai(
                 AsyncMock(),
                 _group_event(user_id=320),
-                "你觉得呢",
+                "PostgreSQL 主库怎么选",
             )
 
         self.assertIn("基于群聊现场回答", answer)

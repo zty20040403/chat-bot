@@ -176,6 +176,7 @@ def _current_group_context(
     *,
     policy: ContextPolicy | None = None,
     exclude_canonical_message_ids: tuple[int, ...] = (),
+    suppress_recalled_sections: bool = False,
 ) -> str:
     policy = policy or proactive_context_policy()
     sections: list[str] = []
@@ -186,7 +187,7 @@ def _current_group_context(
             if isinstance(event, GroupMessageEvent) and policy.include_roster
             else ""
         )
-        if policy.include_recent_group:
+        if policy.include_recent_group and not suppress_recalled_sections:
             recent_messages = message_ledger.render_recent(
                 scope,
                 max_messages=policy.max_messages,
@@ -204,11 +205,14 @@ def _current_group_context(
         )
         recent_messages = (
             group_context.render(event.group_id)
-            if isinstance(event, GroupMessageEvent) and policy.include_recent_group
+            if isinstance(event, GroupMessageEvent)
+            and policy.include_recent_group
+            and not suppress_recalled_sections
             else ""
         )
     if (
         policy.include_pins
+        and not suppress_recalled_sections
         and message_ledger is not None
         and pin_store is not None
     ):
@@ -229,7 +233,12 @@ def _current_group_context(
             "[当前群近期消息：只用于理解指代和延续现场；当前问题主题明确时，"
             "不要被旧话题带偏]\n" + recent_messages
         )
-    if source_store is not None and isinstance(event, GroupMessageEvent):
+    if (
+        source_store is not None
+        and isinstance(event, GroupMessageEvent)
+        and policy.include_shared_sources
+        and not suppress_recalled_sections
+    ):
         try:
             recent_sources = source_store.render_recent(scope_from_event(event))
         except (OSError, RuntimeError, ValueError, DatabaseError) as exc:

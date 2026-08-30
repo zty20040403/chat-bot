@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.8.1-22c55e?style=for-the-badge">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.9.0-22c55e?style=for-the-badge">
   <img alt="Python" src="https://img.shields.io/badge/Python-3.12-3776ab?style=for-the-badge&amp;logo=python&amp;logoColor=white">
   <img alt="NoneBot2" src="https://img.shields.io/badge/NoneBot2-OneBot_V11-ea5252?style=for-the-badge">
   <img alt="PostgreSQL" src="https://img.shields.io/badge/PostgreSQL-Durable-4169e1?style=for-the-badge&amp;logo=postgresql&amp;logoColor=white">
@@ -384,6 +384,7 @@ http://127.0.0.1:8080/bot-admin
 - 每个群的启用开关、自动识图开关和成员单独覆盖。
 - 当前沙箱、执行任务、媒体审核、识图队列和分享内容状态。
 - Token 用量、Agent 回合、工具调用、Trace 和投递状态。
+- 上下文调试：查看当前话题、关联原消息、候选分数与淘汰原因、Token 分区、群/个人记忆和 Historian 队列；可标记“答对了”或“答非所问”。
 - 工具权限开关；停用后下一轮模型请求不会再看到对应 Tool Call。
 - PostgreSQL 持久审计、资源版本和乐观并发冲突保护。
 

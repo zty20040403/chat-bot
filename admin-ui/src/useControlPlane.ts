@@ -25,6 +25,7 @@ const INITIAL_RESOURCES: ResourceName[] = [
   'tools',
   'traces',
   'contextPlans',
+  'contextDebug',
   'audit',
   'versions',
 ]
@@ -140,7 +141,7 @@ export function useControlPlane(runtime: KennethbotAdminRuntime) {
   useEffect(() => {
     if (!authenticated) return
     const timer = window.setInterval(() => {
-      void refreshMany(['overview', 'observability', 'alerts', 'databases', 'usage'])
+      void refreshMany(['overview', 'observability', 'alerts', 'databases', 'usage', 'contextDebug'])
     }, 30000)
     return () => window.clearInterval(timer)
   }, [authenticated, refreshMany])

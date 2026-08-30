@@ -24,6 +24,7 @@ from .cold_archive import ColdArchiveService
 from .config import Settings
 from .content_sources import ContentSourceStore
 from .context_store import CaptureCandidate, ContextStore
+from .context_pipeline import TopicGraphStore
 from .delivery import DeliveryStore
 from .historian import (
     DreamOperation,
@@ -105,6 +106,7 @@ class AppContext:
     bridge_router: MirrorRouter
     message_ledger: MessageLedger | None = None
     context_store: ContextStore | None = None
+    topic_graph_store: TopicGraphStore | None = None
     pin_store: PinStore | None = None
     reminder_store: ReminderStore | None = None
     delivery_store: DeliveryStore | None = None
@@ -163,6 +165,7 @@ class AppContext:
             ("mirror state", self.mirror_state),
             ("message ledger", self.message_ledger),
             ("context store", self.context_store),
+            ("topic graph store", self.topic_graph_store),
             ("pin store", self.pin_store),
             ("reminder store", self.reminder_store),
             ("delivery store", self.delivery_store),
@@ -265,6 +268,10 @@ def build_app_context(
             ) from exc
     if settings.historian_enabled and settings.historian_profile:
         model_catalog.resolve(settings.historian_profile)
+    if settings.historian_enabled and not settings.durable_jobs_enabled:
+        raise RuntimeError(
+            "AI_HISTORIAN_ENABLED requires AI_DURABLE_JOBS_ENABLED=true"
+        )
     if settings.dream_enabled and settings.dream_profile:
         model_catalog.resolve(settings.dream_profile)
     llm_gateway = LLMGateway(
@@ -300,9 +307,19 @@ def build_app_context(
                 ),
                 raw_tail_min_messages=settings.context_raw_tail_min_messages,
                 max_compartments=settings.context_max_compartments,
+                historian_managed=settings.historian_enabled,
             )
         except (OSError, RuntimeError, sqlite3.Error, DatabaseError) as exc:
             logger.error(f"Context store could not be opened: {exc}")
+
+    topic_graph_store: TopicGraphStore | None = None
+    if message_ledger is not None:
+        try:
+            topic_graph_store = TopicGraphStore(
+                store_source("topic_graph.sqlite3")
+            )
+        except (OSError, RuntimeError, sqlite3.Error, DatabaseError) as exc:
+            logger.error(f"Topic graph store could not be opened: {exc}")
 
     pin_store: PinStore | None = None
     if message_ledger is not None:
@@ -706,6 +723,12 @@ def build_app_context(
                 timeout_seconds=330,
                 compensator=compensate_sandbox_job,
             )
+            if historian_service is not None:
+                job_worker.register(
+                    "context.historian_capture",
+                    historian_service.handle_job,
+                    timeout_seconds=240,
+                )
             if job_store.recovered_jobs:
                 logger.warning(
                     f"Recovered {job_store.recovered_jobs} expired durable job lease(s)."
@@ -741,6 +764,7 @@ def build_app_context(
         bridge_router=bridge_router,
         message_ledger=message_ledger,
         context_store=context_store,
+        topic_graph_store=topic_graph_store,
         pin_store=pin_store,
         reminder_store=reminder_store,
         delivery_store=delivery_store,

@@ -395,6 +395,65 @@ class ContentSourceStore:
                 break
         return "\n".join(lines)
 
+    def search_visible(
+        self,
+        scope: ConversationScope,
+        query: str,
+        *,
+        limit: int = 6,
+    ) -> list[ContentSource]:
+        """Search only sources previously linked inside the current conversation."""
+
+        bounded = min(max(int(limit), 1), 20)
+        connection = self.database.store_connection()
+        try:
+            rows = connection.execute(
+                """
+                SELECT source.*, MAX(link.created_at) AS scope_last_seen_at
+                FROM message_sources AS link
+                JOIN content_sources AS source ON source.source_id = link.source_id
+                WHERE link.scope_key = ?
+                GROUP BY source.source_id
+                ORDER BY scope_last_seen_at DESC, source.source_id DESC
+                LIMIT 200
+                """,
+                (scope.key,),
+            ).fetchall()
+        finally:
+            connection.close()
+        query_terms = _source_terms(query)
+        ranked: list[tuple[float, int, ContentSource]] = []
+        for row in rows:
+            source = _row_to_source(row)
+            searchable = " ".join(
+                (
+                    source.platform,
+                    source.content_kind,
+                    source.title,
+                    source.author,
+                    source.summary,
+                    source.body_text[:4000],
+                )
+            )
+            terms = _source_terms(searchable)
+            overlap = (
+                len(query_terms.intersection(terms)) / max(len(query_terms), 1)
+                if query_terms
+                else 0.0
+            )
+            if query_terms and overlap <= 0:
+                continue
+            readiness = 0.15 if source.status == "ready" else 0.0
+            ranked.append(
+                (
+                    overlap + readiness,
+                    int(row["scope_last_seen_at"] or 0),
+                    source,
+                )
+            )
+        ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return [item[2] for item in ranked[:bounded]]
+
     def admin_snapshot(self, *, limit: int = 100) -> dict[str, object]:
         connection = self.database.store_connection()
         try:
@@ -815,6 +874,17 @@ def _row_to_source(row: Any) -> ContentSource:
         first_seen_at=int(row["first_seen_at"]),
         last_seen_at=int(row["last_seen_at"]),
     )
+
+
+def _source_terms(value: str) -> set[str]:
+    folded = str(value).casefold()
+    terms = set(re.findall(r"[a-z0-9][a-z0-9_.+#/-]{1,}", folded))
+    for run in re.findall(r"[\u3400-\u9fff]+", folded):
+        if len(run) == 1:
+            terms.add(run)
+        else:
+            terms.update(run[index : index + 2] for index in range(len(run) - 1))
+    return terms
 
 
 def _compact_text(value: str, limit: int) -> str:

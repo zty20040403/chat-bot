@@ -49,9 +49,9 @@ export function Section({
 export function StatusBadge({ value, label }: { value: unknown; label?: string }) {
   const text = String(label ?? value ?? 'unknown')
   const normalized = String(value ?? '').toLowerCase()
-  const tone = ['active', 'healthy', 'online', 'ready', 'succeeded', 'safe', 'approved', 'configured'].includes(normalized)
+  const tone = ['active', 'healthy', 'online', 'ready', 'succeeded', 'safe', 'approved', 'configured', 'correct'].includes(normalized)
     ? 'success'
-    : ['failed', 'offline', 'blocked', 'rejected', 'critical', 'error'].includes(normalized)
+    : ['failed', 'offline', 'blocked', 'rejected', 'critical', 'error', 'off_topic'].includes(normalized)
       ? 'danger'
       : ['running', 'pending', 'degraded', 'warning', 'review', 'medium'].includes(normalized)
         ? 'warning'

@@ -158,6 +158,32 @@ class TurnJournalTests(unittest.TestCase):
                         "reason_codes": ["recent_question"],
                     }
                 ],
+                "recall_route": {"mode": "follow_up", "confidence": 0.95},
+                "adaptive_budget": {"focus": 330, "timeline": 275},
+                "evidence_guard": {"sufficient": True, "confidence": 0.87},
+                "topic_id": 10,
+                "topic_message_ids": [10, 11],
+                "topic_query": "这个部署方案",
+                "recall_candidates": [
+                    {
+                        "handle": "msg#10",
+                        "source": "relation_graph",
+                        "selected": True,
+                        "raw_score": 0.91,
+                        "adjusted_score": 0.91,
+                        "decision_codes": ["selected"],
+                        "evidence_ids": [10],
+                    },
+                    {
+                        "handle": "msg#9",
+                        "source": "group_timeline",
+                        "selected": False,
+                        "raw_score": 0.31,
+                        "adjusted_score": 0.31,
+                        "decision_codes": ["below_source_threshold"],
+                        "evidence_ids": [9],
+                    },
+                ],
                 "resolver_version": "reference-rules-v1",
                 "context_hash": "abc123",
             },
@@ -168,6 +194,24 @@ class TurnJournalTests(unittest.TestCase):
         self.assertEqual(item["scope_key"], self.group_a.key)
         self.assertEqual(item["focus_message_id"], 10)
         self.assertEqual(item["reason_codes"], ["recent_question", "same_scope"])
+        self.assertEqual(item["recall_route"]["mode"], "follow_up")
+        self.assertEqual(item["adaptive_budget"]["focus"], 330)
+        self.assertTrue(item["evidence_guard"]["sufficient"])
+        self.assertEqual(item["topic_query"], "这个部署方案")
+        self.assertEqual(item["topic_message_ids"], [10, 11])
+        self.assertTrue(item["recall_candidates"][0]["selected"])
+        feedback = self.journal.set_context_feedback(
+            turn.turn_id,
+            verdict="off_topic",
+            note="应该关联 msg#11",
+            actor="Kenneth",
+            resource_version=3,
+            updated_at=130,
+        )
+        self.assertEqual(feedback["verdict"], "off_topic")
+        refreshed = self.journal.recent_context_plans()[0]
+        self.assertEqual(refreshed["feedback"]["note"], "应该关联 msg#11")
+        self.assertEqual(refreshed["feedback"]["resource_version"], 3)
         with self.assertRaises(ValueError):
             self.journal.record_context_plan(
                 turn.turn_id,

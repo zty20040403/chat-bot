@@ -19,7 +19,7 @@ from .ledger import CanonicalMessage, MessageLedger
 from .message_ir import body_to_json
 
 
-CONTEXT_SCHEMA_VERSION = 1
+CONTEXT_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -38,6 +38,13 @@ class CompartmentRecord:
     summary_p2: str
     summary_p3: str
     created_at: int
+    summary_p4: str = ""
+    topic: str = ""
+    importance: float = 0.5
+    confidence: float = 0.5
+    participants: tuple[str, ...] = ()
+    evidence_ids: tuple[int, ...] = ()
+    generation_mode: str = "legacy"
 
 
 @dataclass(frozen=True)
@@ -71,6 +78,7 @@ class ContextStore:
         compartment_target_tokens: int = 1200,
         raw_tail_min_messages: int = 8,
         max_compartments: int = 12,
+        historian_managed: bool = False,
     ) -> None:
         self._legacy_sqlite = not isinstance(path, PostgresDatabase)
         self.path, self._connection = open_store_connection(path)
@@ -89,6 +97,7 @@ class ContextStore:
         )
         self.raw_tail_min_messages = max(int(raw_tail_min_messages), 1)
         self.max_compartments = min(max(int(max_compartments), 1), 50)
+        self.historian_managed = bool(historian_managed)
         self._lock = threading.RLock()
         if self._legacy_sqlite:
             self._configure()
@@ -116,7 +125,7 @@ class ContextStore:
                 scope,
                 set(int(item) for item in protected_message_ids),
             )
-            if materialize
+            if materialize and not self.historian_managed
             else 0
         )
         cursor = self._cursor(scope.key, floor)
@@ -266,6 +275,8 @@ class ContextStore:
                     str(row["summary_p1"]),
                     str(row["summary_p2"]),
                     str(row["summary_p3"]),
+                    str(_row_value(row, "summary_p4", "")),
+                    str(_row_value(row, "topic", "")),
                 )
             ).casefold()
         ]
@@ -290,20 +301,25 @@ class ContextStore:
         scope: ConversationScope,
         *,
         protected_message_ids: tuple[int, ...] = (),
+        settled: bool = False,
     ) -> CaptureCandidate | None:
         floor = ledger.visible_message_floor(scope)
         self._sync_visibility(scope.key, floor)
         cursor = self._cursor(scope.key, floor)
         messages = ledger.visible_messages_after(scope, cursor, limit=5000)
-        if len(messages) <= self.raw_tail_min_messages:
+        if not messages:
             return None
         total_tokens = sum(
             estimate_tokens(self._message_line(message))
             for message in messages
         )
-        if total_tokens <= self.high_watermark_tokens:
+        if not settled and total_tokens <= self.high_watermark_tokens:
             return None
-        maximum = len(messages) - self.raw_tail_min_messages
+        maximum = (
+            len(messages)
+            if settled
+            else len(messages) - self.raw_tail_min_messages
+        )
         protected = {int(item) for item in protected_message_ids}
         first_protected = next(
             (
@@ -337,6 +353,14 @@ class ContextStore:
         self,
         candidate: CaptureCandidate,
         summaries: tuple[str, str, str],
+        *,
+        summary_p4: str = "",
+        topic: str = "",
+        importance: float = 0.5,
+        confidence: float = 0.5,
+        participants: tuple[str, ...] = (),
+        evidence_ids: tuple[int, ...] = (),
+        generation_mode: str = "historian",
     ) -> CompartmentRecord:
         normalized = tuple(" ".join(item.split()).strip() for item in summaries)
         if len(normalized) != 3 or any(not item for item in normalized):
@@ -348,6 +372,23 @@ class ContextStore:
             candidate.expected_cursor,
             list(candidate.messages),
             summaries=(normalized[0][:3200], normalized[1][:1600], normalized[2][:800]),
+            summary_p4=" ".join(summary_p4.split())[:300],
+            topic=" ".join(topic.split())[:300],
+            importance=_bounded_score(importance),
+            confidence=_bounded_score(confidence),
+            participants=tuple(
+                dict.fromkeys(
+                    " ".join(item.split())[:120]
+                    for item in participants
+                    if item.strip()
+                )
+            )[:32],
+            evidence_ids=tuple(dict.fromkeys(int(item) for item in evidence_ids)),
+            generation_mode=(
+                generation_mode
+                if generation_mode in {"historian", "fallback", "legacy"}
+                else "historian"
+            ),
         )
         with self._lock:
             row = self._connection.execute(
@@ -357,6 +398,33 @@ class ContextStore:
         if row is None:
             raise RuntimeError("historian compartment publication disappeared")
         return self._row_to_compartment(row)
+
+    def restore_capture_candidate(
+        self,
+        ledger: MessageLedger,
+        scope: ConversationScope,
+        *,
+        expected_cursor: int,
+        source_message_ids: tuple[int, ...],
+        source_hash: str,
+    ) -> CaptureCandidate:
+        floor = ledger.visible_message_floor(scope)
+        self._sync_visibility(scope.key, floor)
+        if self._cursor(scope.key, floor) != int(expected_cursor):
+            raise RuntimeError("historian capture cursor is stale")
+        messages = ledger.visible_messages_by_ids(scope, source_message_ids)
+        actual_ids = tuple(item.canonical_message_id for item in messages)
+        if actual_ids != tuple(int(item) for item in source_message_ids):
+            raise RuntimeError("historian capture evidence is no longer visible")
+        actual_hash = self._source_hash(messages)
+        if actual_hash != str(source_hash):
+            raise RuntimeError("historian capture source hash changed")
+        return CaptureCandidate(
+            scope_key=scope.key,
+            expected_cursor=int(expected_cursor),
+            messages=tuple(messages),
+            source_hash=actual_hash,
+        )
 
     def hide_history(self, scope: ConversationScope, ledger_floor: int) -> int:
         with self._transaction() as cursor:
@@ -485,6 +553,13 @@ class ContextStore:
         messages: list[CanonicalMessage],
         *,
         summaries: tuple[str, str, str] | None = None,
+        summary_p4: str = "",
+        topic: str = "",
+        importance: float = 0.5,
+        confidence: float = 0.5,
+        participants: tuple[str, ...] = (),
+        evidence_ids: tuple[int, ...] = (),
+        generation_mode: str = "legacy",
     ) -> int:
         source_ids = tuple(
             message.canonical_message_id for message in messages
@@ -518,8 +593,10 @@ class ContextStore:
                     source_message_ids_json, source_hash,
                     message_count, token_estimate,
                     summary_p1, summary_p2, summary_p3,
+                    summary_p4, topic, importance, confidence,
+                    participants_json, evidence_ids_json, generation_mode,
                     active, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
                 """,
                 (
                     scope_key,
@@ -537,6 +614,20 @@ class ContextStore:
                     generated[0],
                     generated[1],
                     generated[2],
+                    summary_p4,
+                    topic,
+                    _bounded_score(importance),
+                    _bounded_score(confidence),
+                    json.dumps(
+                        participants,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                    json.dumps(
+                        evidence_ids or source_ids,
+                        separators=(",", ":"),
+                    ),
+                    generation_mode,
                     int(time.time()),
                 ),
             )
@@ -658,10 +749,17 @@ class ContextStore:
         compartment: CompartmentRecord,
         summary: str,
     ) -> str:
+        details = ""
+        if compartment.topic:
+            details = (
+                f" | topic:{compartment.topic} | "
+                f"importance:{compartment.importance:.2f} | "
+                f"confidence:{compartment.confidence:.2f}"
+            )
         return (
             f"[episode#{compartment.expand_handle} | "
             f"msg#{compartment.start_message_id}..msg#{compartment.end_message_id} | "
-            f"{compartment.message_count} messages]\n{summary}"
+            f"{compartment.message_count} messages{details}]\n{summary}"
         )
 
     @staticmethod
@@ -762,6 +860,12 @@ class ContextStore:
         except json.JSONDecodeError:
             raw_ids = []
         ids = tuple(int(item) for item in raw_ids if isinstance(item, int))
+        participants = _json_text_tuple(
+            _row_value(row, "participants_json", "[]")
+        )
+        evidence_ids = _json_int_tuple(
+            _row_value(row, "evidence_ids_json", "[]")
+        )
         return CompartmentRecord(
             compartment_id=int(row["compartment_id"]),
             scope_key=str(row["scope_key"]),
@@ -777,6 +881,15 @@ class ContextStore:
             summary_p2=str(row["summary_p2"]),
             summary_p3=str(row["summary_p3"]),
             created_at=int(row["created_at"]),
+            summary_p4=str(_row_value(row, "summary_p4", "")),
+            topic=str(_row_value(row, "topic", "")),
+            importance=_bounded_score(_row_value(row, "importance", 0.5)),
+            confidence=_bounded_score(_row_value(row, "confidence", 0.5)),
+            participants=participants,
+            evidence_ids=evidence_ids or ids,
+            generation_mode=str(
+                _row_value(row, "generation_mode", "legacy")
+            ),
         )
 
     def _configure(self) -> None:
@@ -818,6 +931,13 @@ class ContextStore:
                     summary_p1 TEXT NOT NULL,
                     summary_p2 TEXT NOT NULL,
                     summary_p3 TEXT NOT NULL,
+                    summary_p4 TEXT NOT NULL DEFAULT '',
+                    topic TEXT NOT NULL DEFAULT '',
+                    importance REAL NOT NULL DEFAULT 0.5,
+                    confidence REAL NOT NULL DEFAULT 0.5,
+                    participants_json TEXT NOT NULL DEFAULT '[]',
+                    evidence_ids_json TEXT NOT NULL DEFAULT '[]',
+                    generation_mode TEXT NOT NULL DEFAULT 'legacy',
                     active INTEGER NOT NULL DEFAULT 1,
                     created_at INTEGER NOT NULL,
                     UNIQUE(scope_key, ordinal)
@@ -829,6 +949,27 @@ class ContextStore:
                     ON context_compartments(scope_key, start_message_id, end_message_id);
                 """
             )
+            columns = {
+                str(item[1])
+                for item in cursor.execute(
+                    "PRAGMA table_info(context_compartments)"
+                ).fetchall()
+            }
+            additions = {
+                "summary_p4": "TEXT NOT NULL DEFAULT ''",
+                "topic": "TEXT NOT NULL DEFAULT ''",
+                "importance": "REAL NOT NULL DEFAULT 0.5",
+                "confidence": "REAL NOT NULL DEFAULT 0.5",
+                "participants_json": "TEXT NOT NULL DEFAULT '[]'",
+                "evidence_ids_json": "TEXT NOT NULL DEFAULT '[]'",
+                "generation_mode": "TEXT NOT NULL DEFAULT 'legacy'",
+            }
+            for name, definition in additions.items():
+                if name not in columns:
+                    cursor.execute(
+                        f"ALTER TABLE context_compartments "
+                        f"ADD COLUMN {name} {definition}"
+                    )
             row = cursor.execute(
                 "SELECT value FROM context_meta WHERE key = 'schema_version'"
             ).fetchone()
@@ -864,6 +1005,38 @@ def estimate_tokens(text: str) -> int:
     for character in text:
         units += 1.0 if ord(character) > 127 else 0.25
     return max(int(units + 0.999), 1) if text else 0
+
+
+def _row_value(row: sqlite3.Row, key: str, default: object) -> object:
+    return row[key] if key in row.keys() else default
+
+
+def _json_text_tuple(value: object) -> tuple[str, ...]:
+    try:
+        decoded = json.loads(str(value))
+    except (TypeError, json.JSONDecodeError):
+        return ()
+    if not isinstance(decoded, list):
+        return ()
+    return tuple(str(item) for item in decoded if str(item).strip())
+
+
+def _json_int_tuple(value: object) -> tuple[int, ...]:
+    try:
+        decoded = json.loads(str(value))
+    except (TypeError, json.JSONDecodeError):
+        return ()
+    if not isinstance(decoded, list):
+        return ()
+    return tuple(int(item) for item in decoded if isinstance(item, int))
+
+
+def _bounded_score(value: object) -> float:
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        score = 0.5
+    return min(max(score, 0.0), 1.0)
 
 
 def _keywords(text: str, limit: int = 8) -> list[str]:

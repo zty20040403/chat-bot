@@ -15,11 +15,13 @@ import {
   Menu,
   PanelLeftClose,
   RefreshCw,
+  ScanSearch,
   Users,
   Wrench,
   X,
 } from 'lucide-react'
 import { StatusBadge } from './components'
+import { ContextDebugView } from './ContextDebugView'
 import { DETAIL_META, DetailView, type DetailViewId } from './detailViews'
 import { useControlPlane } from './useControlPlane'
 import {
@@ -44,7 +46,7 @@ const runtime = window.__KENNETHBOT_ADMIN__ ?? {
   requiresToken: false,
 }
 
-type ViewId = 'overview' | 'observability' | 'usage' | 'groups' | 'tasks' | 'tools' | 'traces' | 'databases' | 'sandboxes' | 'media' | 'audit' | 'help'
+type ViewId = 'overview' | 'observability' | 'usage' | 'groups' | 'tasks' | 'tools' | 'traces' | 'context-debug' | 'databases' | 'sandboxes' | 'media' | 'audit' | 'help'
 
 const NAVIGATION: Array<{ id: ViewId; label: string; description: string; group: string; icon: ComponentType<{ size?: number }> }> = [
   { id: 'overview', label: '概览', description: '服务状态、Token 趋势与最近投递', group: '运行', icon: Gauge },
@@ -52,6 +54,7 @@ const NAVIGATION: Array<{ id: ViewId; label: string; description: string; group:
   { id: 'tasks', label: '任务与投递', description: 'Agent、持久任务和 QQ 消息回执', group: '运行', icon: ListChecks },
   { id: 'usage', label: '模型用量', description: '按日期、会话和来源统计 Token', group: '运行', icon: BarChart3 },
   { id: 'traces', label: 'Trace 与上下文', description: '回放回答链路与上下文选择过程', group: '运行', icon: BrainCircuit },
+  { id: 'context-debug', label: '上下文调试', description: '查看话题、原消息、候选评分、Token 和人工反馈', group: '运行', icon: ScanSearch },
   { id: 'sandboxes', label: '沙盒', description: '临时容器、命令和资源使用情况', group: '资源', icon: Boxes },
   { id: 'media', label: '媒体审核', description: '表情候选、识图和分享内容记录', group: '资源', icon: Image },
   { id: 'groups', label: '模型与群友', description: '配置群开关、统一模型和个人模型', group: '配置', icon: Users },
@@ -162,6 +165,7 @@ export function App() {
               {active === 'usage' && <UsageView plane={plane} onOpenDetail={openDetail} />}
               {active === 'tools' && <ToolsView plane={plane} />}
               {active === 'traces' && <TracesView plane={plane} onOpenDetail={openDetail} />}
+              {active === 'context-debug' && <ContextDebugView plane={plane} />}
               {active === 'databases' && <DatabasesView plane={plane} />}
               {active === 'sandboxes' && <SandboxesView plane={plane} />}
               {active === 'media' && <MediaView plane={plane} onOpenDetail={openDetail} />}

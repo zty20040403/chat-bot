@@ -25,6 +25,7 @@ class ContextTokenBudget:
     group_memory: int
     user_memory: int
     semantic: int
+    tool_reserve: int = 0
 
     @property
     def total(self) -> int:
@@ -34,6 +35,7 @@ class ContextTokenBudget:
             + self.group_memory
             + self.user_memory
             + self.semantic
+            + self.tool_reserve
         )
 
 

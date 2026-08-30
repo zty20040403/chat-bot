@@ -221,11 +221,17 @@ class Settings:
     embedding_timeout_seconds: int
     semantic_index_seconds: int
     semantic_batch_size: int
+    recall_router_model_enabled: bool
+    recall_router_profile: str
+    recall_router_timeout_seconds: float
+    evidence_guard_enabled: bool
     historian_enabled: bool
     historian_profile: str
     historian_model: str
     historian_check_seconds: int
     historian_max_scopes: int
+    historian_idle_seconds: int
+    historian_max_attempts: int
     dream_enabled: bool
     dream_profile: str
     dream_model: str
@@ -693,6 +699,22 @@ class Settings:
                 max(_get_int("AI_SEMANTIC_BATCH_SIZE", 32), 1),
                 100,
             ),
+            recall_router_model_enabled=_get_bool(
+                "AI_RECALL_ROUTER_MODEL_ENABLED",
+                True,
+            ),
+            recall_router_profile=os.getenv(
+                "AI_RECALL_ROUTER_PROFILE",
+                "deepseek",
+            ).strip(),
+            recall_router_timeout_seconds=min(
+                max(_get_float("AI_RECALL_ROUTER_TIMEOUT_SECONDS", 8.0), 1.0),
+                30.0,
+            ),
+            evidence_guard_enabled=_get_bool(
+                "AI_EVIDENCE_GUARD_ENABLED",
+                True,
+            ),
             historian_enabled=_get_bool("AI_HISTORIAN_ENABLED", False),
             historian_profile=os.getenv("AI_HISTORIAN_PROFILE", "").strip(),
             historian_model=os.getenv("AI_HISTORIAN_MODEL", "").strip(),
@@ -703,6 +725,14 @@ class Settings:
             historian_max_scopes=min(
                 max(_get_int("AI_HISTORIAN_MAX_SCOPES", 20), 1),
                 200,
+            ),
+            historian_idle_seconds=max(
+                _get_int("AI_HISTORIAN_IDLE_SECONDS", 600),
+                60,
+            ),
+            historian_max_attempts=min(
+                max(_get_int("AI_HISTORIAN_MAX_ATTEMPTS", 4), 2),
+                10,
             ),
             dream_enabled=_get_bool("AI_DREAM_ENABLED", False),
             dream_profile=os.getenv("AI_DREAM_PROFILE", "").strip(),

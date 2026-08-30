@@ -4,35 +4,31 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-from .context_pipeline import ContextTokenBudget, TurnContextPlan
+from .context_pipeline.models import ContextTokenBudget, TurnContextPlan
+from .context_pipeline.router import (
+    QuestionComplexity,
+    RecallDecision,
+    RecallMode,
+    rule_recall_route,
+)
 
 
 ContextMode = Literal["minimal", "focused", "expanded"]
 
-_GROUP_REFERENCE = re.compile(
-    r"(?:群里|群友|大家|他们|她们|刚才|前面|上面|上一条|前[几两]条|"
-    r"之前(?:说|聊|问)|有人说|谁说|这条消息|那条消息)"
-)
 _ROSTER_REFERENCE = re.compile(
     r"(?:@|艾特|群里谁|谁说|群友|群成员|大家|他们|她们|有人)"
-)
-_USER_MEMORY_REFERENCE = re.compile(
-    r"(?:你还记得(?:我|我的|咱们|我们)|记得我|我(?:之前|上次|以前|一直|"
-    r"通常|平时|喜欢|不喜欢|偏好)|关于我|我的(?:偏好|习惯|喜好|身份|配置)|"
-    r"长期记忆|个人记忆|忘记我)"
-)
-_GROUP_MEMORY_REFERENCE = re.compile(
-    r"(?:群规|群记忆|这个群(?:以前|之前)|群里(?:以前|之前)|"
-    r"大家(?:以前|之前)|我们(?:以前|之前|上次)|固定消息|置顶消息)"
 )
 
 
 @dataclass(frozen=True)
 class ContextPolicy:
     mode: ContextMode
+    route: RecallMode
+    complexity: QuestionComplexity
     include_recent_group: bool
     include_roster: bool
     include_pins: bool
+    include_shared_sources: bool
     include_group_memory: bool
     include_user_memory: bool
     fallback_group_memory: bool = False
@@ -49,6 +45,7 @@ class ContextPolicy:
         group_memory=0,
         user_memory=0,
         semantic=0,
+        tool_reserve=0,
     )
 
 
@@ -57,91 +54,79 @@ def choose_context_policy(
     plan: TurnContextPlan | None,
     *,
     is_group: bool,
+    recall_decision: RecallDecision | None = None,
+    configured_max_tokens: int = 6000,
+    model_max_input_tokens: int = 0,
 ) -> ContextPolicy:
     normalized = " ".join(str(text).split())
-    user_memory_reference = bool(_USER_MEMORY_REFERENCE.search(normalized))
-    group_memory_reference = bool(
-        is_group and _GROUP_MEMORY_REFERENCE.search(normalized)
+    decision = recall_decision or rule_recall_route(
+        normalized,
+        plan,
+        is_group=is_group,
     )
-
-    if not is_group:
-        return ContextPolicy(
-            mode="minimal",
-            include_recent_group=False,
-            include_roster=False,
-            include_pins=False,
-            include_group_memory=False,
-            include_user_memory=True,
-            fallback_user_memory=user_memory_reference,
-            token_budget=ContextTokenBudget(
-                focus=0,
-                timeline=0,
-                group_memory=0,
-                user_memory=500,
-                semantic=400,
-            ),
-        )
-
+    budget = _adaptive_budget(
+        decision,
+        configured_max_tokens=configured_max_tokens,
+        model_max_input_tokens=model_max_input_tokens,
+    )
     has_focus = plan is not None and plan.focus_message_id is not None
-    unresolved_follow_up = bool(
-        plan is not None and "no_reliable_focus" in plan.reason_codes
-    )
-    group_reference = bool(_GROUP_REFERENCE.search(normalized))
-
-    if has_focus:
+    if decision.mode in {"direct", "follow_up"} and has_focus:
         mode: ContextMode = "focused"
-    elif unresolved_follow_up or group_reference:
-        mode = "expanded"
-    else:
+    elif decision.mode == "no_recall":
         mode = "minimal"
+    else:
+        mode = "expanded"
 
+    max_messages = (
+        min(max(budget.timeline // 70, 4), 30)
+        if decision.include_recent_timeline and budget.timeline > 0
+        else 0
+    )
+    max_chars = min(max(budget.timeline * 4, 400), 8000) if max_messages else 0
+    include_roster = bool(
+        is_group
+        and (
+            _ROSTER_REFERENCE.search(normalized)
+            or decision.mode == "recent_group" and "谁" in normalized
+        )
+    )
     return ContextPolicy(
         mode=mode,
-        include_recent_group=mode in {"minimal", "expanded"},
-        include_roster=bool(_ROSTER_REFERENCE.search(normalized)),
-        include_pins=mode == "expanded" or group_memory_reference,
-        include_group_memory=True,
-        include_user_memory=True,
-        fallback_group_memory=group_memory_reference,
-        fallback_user_memory=user_memory_reference,
-        max_messages=12 if mode == "expanded" else 6 if mode == "minimal" else 0,
-        max_chars=1800 if mode == "expanded" else 900 if mode == "minimal" else 0,
-        roster_limit=12,
-        pin_max_chars=800,
-        token_budget=(
-            ContextTokenBudget(
-                focus=760,
-                timeline=260,
-                group_memory=220,
-                user_memory=180,
-                semantic=380,
-            )
-            if mode == "focused"
-            else ContextTokenBudget(
-                focus=500,
-                timeline=900,
-                group_memory=300,
-                user_memory=260,
-                semantic=500,
-            )
-            if mode == "expanded"
-            else ContextTokenBudget(
-                focus=0,
-                timeline=500,
-                group_memory=220,
-                user_memory=180,
-                semantic=300,
-            )
+        route=decision.mode,
+        complexity=decision.complexity,
+        include_recent_group=bool(is_group and decision.include_recent_timeline),
+        include_roster=include_roster,
+        include_pins=bool(is_group and decision.include_pins),
+        include_shared_sources=bool(
+            is_group and decision.include_shared_sources
         ),
+        include_group_memory=bool(
+            is_group and decision.include_group_memory
+        ),
+        include_user_memory=decision.include_user_memory,
+        fallback_group_memory=decision.mode == "group_memory",
+        fallback_user_memory=decision.mode == "user_memory",
+        max_messages=max_messages,
+        max_chars=max_chars,
+        roster_limit=12 if include_roster else 0,
+        pin_max_chars=min(max(budget.semantic * 3, 400), 2400),
+        memory_max_entries_per_scope=(
+            8 if decision.complexity == "complex" else 4
+        ),
+        memory_max_chars=max(budget.group_memory + budget.user_memory, 0) * 4,
+        token_budget=budget,
     )
 
 
 def proactive_context_policy() -> ContextPolicy:
     return ContextPolicy(
         mode="expanded",
+        route="recent_group",
+        complexity="simple",
         include_recent_group=True,
         include_roster=False,
         include_pins=False,
+        include_shared_sources=False,
         include_group_memory=False,
         include_user_memory=False,
         max_messages=8,
@@ -152,5 +137,42 @@ def proactive_context_policy() -> ContextPolicy:
             group_memory=0,
             user_memory=0,
             semantic=0,
+            tool_reserve=100,
         ),
+    )
+
+
+def _adaptive_budget(
+    decision: RecallDecision,
+    *,
+    configured_max_tokens: int,
+    model_max_input_tokens: int,
+) -> ContextTokenBudget:
+    configured = min(max(int(configured_max_tokens), 600), 64000)
+    if model_max_input_tokens > 0:
+        configured = min(configured, max(int(model_max_input_tokens * 0.22), 600))
+    target = {
+        "simple": 1100,
+        "normal": 2600,
+        "complex": 4800,
+    }[decision.complexity]
+    total = min(configured, target)
+    weights: dict[RecallMode, tuple[float, float, float, float, float, float]] = {
+        # focus, timeline, semantic, group memory, user memory, tool reserve
+        "direct": (0.85, 0.10, 0.00, 0.00, 0.00, 0.05),
+        "follow_up": (0.30, 0.25, 0.20, 0.10, 0.10, 0.05),
+        "recent_group": (0.00, 0.55, 0.30, 0.10, 0.00, 0.05),
+        "old_topic": (0.10, 0.10, 0.65, 0.10, 0.00, 0.05),
+        "user_memory": (0.15, 0.00, 0.00, 0.00, 0.80, 0.05),
+        "group_memory": (0.05, 0.10, 0.30, 0.50, 0.00, 0.05),
+        "no_recall": (0.00, 0.00, 0.00, 0.00, 0.00, 0.05),
+    }
+    focus, timeline, semantic, group, user, tool = weights[decision.mode]
+    return ContextTokenBudget(
+        focus=int(total * focus),
+        timeline=int(total * timeline),
+        semantic=int(total * semantic),
+        group_memory=int(total * group),
+        user_memory=int(total * user),
+        tool_reserve=max(int(total * tool), 64),
     )

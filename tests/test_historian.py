@@ -22,6 +22,7 @@ from src.plugins.ai_chat.historian import (
 from src.plugins.ai_chat.ledger import MessageLedger
 from src.plugins.ai_chat.long_term_memory import LongTermMemoryStore
 from src.plugins.ai_chat.message_ir import MessageBody, TextNode
+from src.plugins.ai_chat.storage.jobs import DurableJobStore
 
 
 class HistorianTests(unittest.TestCase):
@@ -93,6 +94,91 @@ class HistorianTests(unittest.TestCase):
         self.assertEqual(run.published, 0)
         self.assertTrue(run.failures)
         self.assertIsNotNone(self.context.capture_candidate(self.ledger, self.scope))
+
+    def test_quiet_scope_schedules_exact_restart_safe_capture(self) -> None:
+        jobs = DurableJobStore(":memory:", default_max_attempts=4)
+        self.addCleanup(jobs.close)
+
+        async def generate(candidate):
+            evidence = tuple(item.canonical_message_id for item in candidate.messages)
+            return HistorianResult(
+                "详细摘要",
+                "关键结论",
+                "短摘要",
+                summary_p4="检索锚点",
+                topic="项目架构",
+                importance=0.82,
+                confidence=0.91,
+                participants=("Alice",),
+                evidence_ids=evidence,
+            )
+
+        service = HistorianService(
+            self.ledger,
+            self.context,
+            self.memories,
+            generate,
+        )
+        self.assertEqual(
+            service.schedule_due(jobs, idle_seconds=600, now=500),
+            0,
+        )
+        self.assertEqual(
+            service.schedule_due(jobs, idle_seconds=600, now=1000),
+            1,
+        )
+        self.assertEqual(
+            service.schedule_due(jobs, idle_seconds=600, now=1000),
+            0,
+        )
+        job = jobs.claim_due("test-worker", now=1000)[0]
+        result = asyncio.run(service.handle_job(job))
+        self.assertEqual(result["generation_mode"], "historian")
+        episode = self.context.active_compartments()[0]
+        self.assertEqual(episode.topic, "项目架构")
+        self.assertEqual(episode.summary_p4, "检索锚点")
+        self.assertEqual(episode.evidence_ids, tuple(job.payload["source_message_ids"]))
+
+    def test_final_historian_attempt_uses_deterministic_fallback(self) -> None:
+        jobs = DurableJobStore(":memory:", default_max_attempts=2)
+        self.addCleanup(jobs.close)
+
+        async def fail(_candidate):
+            raise RuntimeError("model unavailable")
+
+        service = HistorianService(
+            self.ledger,
+            self.context,
+            self.memories,
+            fail,
+        )
+        self.assertEqual(
+            service.schedule_due(
+                jobs,
+                idle_seconds=600,
+                max_attempts=2,
+                now=1000,
+            ),
+            1,
+        )
+        first = jobs.claim_due("test-worker", now=1000)[0]
+        with self.assertRaises(RuntimeError):
+            asyncio.run(service.handle_job(first))
+        jobs.mark_failed(
+            first.job_id,
+            "test-worker",
+            "model unavailable",
+            retryable=True,
+            retry_delay_seconds=0,
+            now=1000,
+        )
+        final = jobs.claim_due("test-worker", now=1000)[0]
+        result = asyncio.run(service.handle_job(final))
+        self.assertEqual(result["generation_mode"], "fallback")
+        self.assertEqual(
+            self.context.active_compartments()[0].generation_mode,
+            "fallback",
+        )
 
     def test_dream_uses_versioned_updates(self) -> None:
         entry, _ = self.memories.add(

@@ -15,6 +15,7 @@ export type ResourceName =
   | 'tools'
   | 'traces'
   | 'contextPlans'
+  | 'contextDebug'
   | 'audit'
   | 'versions'
 
@@ -45,6 +46,7 @@ export const RESOURCE_PATHS: Record<ResourceName, string> = {
   tools: '/tools',
   traces: '/traces',
   contextPlans: '/context-plans',
+  contextDebug: '/context-debug',
   audit: '/audit',
   versions: '/resource-versions',
 }
@@ -65,6 +67,7 @@ export const EVENT_RESOURCES: Record<string, ResourceName[]> = {
   groups: ['groups'],
   tools: ['tools'],
   traces: ['traces'],
+  'context-debug': ['contextDebug', 'contextPlans'],
   audit: ['audit'],
 }
 

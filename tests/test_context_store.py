@@ -129,6 +129,25 @@ class ContextStoreTests(unittest.TestCase):
                 ("再次摘要", "再次中等摘要", "再次短摘要"),
             )
 
+    def test_historian_managed_projection_never_advances_cursor(self) -> None:
+        managed = ContextStore(
+            ":memory:",
+            input_budget_tokens=1000,
+            high_watermark_tokens=180,
+            low_watermark_tokens=90,
+            compartment_target_tokens=70,
+            raw_tail_min_messages=3,
+            historian_managed=True,
+        )
+        self.addCleanup(managed.close)
+        self.seed()
+        projection = managed.build_projection(self.ledger, self.group_a)
+        self.assertEqual(projection.materialized_count, 0)
+        self.assertFalse(projection.compartment_handles)
+        self.assertIsNotNone(
+            managed.capture_candidate(self.ledger, self.group_a, settled=True)
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

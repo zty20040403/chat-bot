@@ -18,6 +18,7 @@ from src.plugins.ai_chat.context_pipeline.ranking import (
     combine_budgeted_sections,
     fit_token_budget,
 )
+from src.plugins.ai_chat.context_pipeline.router import rule_recall_route
 from src.plugins.ai_chat.context_store import estimate_tokens
 from src.plugins.ai_chat.conversation_scope import ConversationScope
 from src.plugins.ai_chat.ledger import MessageLedger
@@ -38,6 +39,38 @@ class _SemanticRecall:
 
 
 class HybridContextTests(unittest.IsolatedAsyncioTestCase):
+    async def test_no_recall_skips_embedding_and_memories(self) -> None:
+        ledger = MessageLedger(":memory:")
+        self.addCleanup(ledger.close)
+        scope = ConversationScope("onebot-v11", "group", "100")
+        directory = TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        memories = LongTermMemoryStore(Path(directory.name) / "memory.json")
+        memories.add(
+            "group:100:user:9",
+            "user",
+            "用户喜欢绿色主题",
+            creator_user_id=9,
+        )
+        semantic = _SemanticRecall([])
+        decision = rule_recall_route("快速排序怎么写", None, is_group=True)
+
+        result = await build_hybrid_recall(
+            ledger=ledger,
+            scope=scope,
+            plan=None,
+            user_text="快速排序怎么写",
+            group_memory_scope="group:100",
+            user_memory_scope="group:100:user:9",
+            memory_store=memories,
+            semantic_recall=semantic,
+            recall_decision=decision,
+            budget=ContextTokenBudget(0, 0, 0, 0, 0),
+        )
+
+        self.assertEqual(result.candidates, ())
+        self.assertEqual(semantic.scopes, [])
+
     async def test_recall_keeps_group_and_current_user_scopes_separate(self) -> None:
         ledger = MessageLedger(":memory:")
         self.addCleanup(ledger.close)
@@ -152,6 +185,101 @@ class HybridContextTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual([item.candidate.handle for item in ranked], ["memory#2"])
+
+    def test_reranker_records_selected_and_dropped_reasons(self) -> None:
+        result = HybridReranker().rerank_with_audit(
+            "PostgreSQL 主库延迟",
+            [
+                RecallCandidate(
+                    "msg#1",
+                    "relation_graph",
+                    "onebot-v11:group:100",
+                    "PostgreSQL 主库在 h610",
+                    relation_score=1.0,
+                    semantic_score=0.9,
+                ),
+                RecallCandidate(
+                    "memory#2",
+                    "user_memory",
+                    "group:100:user:9",
+                    "喜欢绿色主题",
+                    recency_score=1.0,
+                ),
+            ],
+        )
+
+        by_handle = {item.candidate.handle: item for item in result.decisions}
+        self.assertTrue(by_handle["msg#1"].selected)
+        self.assertIn("selected", by_handle["msg#1"].decision_codes)
+        self.assertFalse(by_handle["memory#2"].selected)
+        self.assertIn(
+            "below_source_threshold",
+            by_handle["memory#2"].decision_codes,
+        )
+
+    def test_relative_threshold_keeps_complementary_evidence(self) -> None:
+        ranked = HybridReranker().rerank(
+            "h610 数据库切换",
+            [
+                RecallCandidate(
+                    "msg#1",
+                    "relation_graph",
+                    "onebot-v11:group:100",
+                    "Alice: h610 是当前主库",
+                    relation_score=1.0,
+                    semantic_score=0.8,
+                    topic_score=0.8,
+                ),
+                RecallCandidate(
+                    "episode#12345678",
+                    "historian_episode",
+                    "onebot-v11:group:100",
+                    "切换前要确认复制延迟和备份恢复点",
+                    semantic_score=0.82,
+                    topic_score=0.65,
+                    importance_score=0.9,
+                ),
+                RecallCandidate(
+                    "memory#3",
+                    "user_memory",
+                    "group:100:user:9",
+                    "喜欢绿色主题",
+                    recency_score=1.0,
+                ),
+            ],
+            limit=5,
+        )
+
+        handles = [item.candidate.handle for item in ranked]
+        self.assertIn("msg#1", handles)
+        self.assertIn("episode#12345678", handles)
+        self.assertNotIn("memory#3", handles)
+
+    def test_duplicate_message_merges_graph_and_semantic_signals(self) -> None:
+        ranked = HybridReranker().rerank(
+            "PostgreSQL 主库",
+            [
+                RecallCandidate(
+                    "msg#1",
+                    "relation_graph",
+                    "onebot-v11:group:100",
+                    "Alice: PostgreSQL 主库在 h610",
+                    relation_score=1.0,
+                ),
+                RecallCandidate(
+                    "msg#1",
+                    "raw_history",
+                    "onebot-v11:group:100",
+                    "Alice: PostgreSQL 主库在 h610",
+                    semantic_score=0.95,
+                ),
+            ],
+        )
+
+        self.assertEqual(len(ranked), 1)
+        self.assertEqual(ranked[0].candidate.source, "relation_graph")
+        self.assertEqual(ranked[0].candidate.relation_score, 1.0)
+        self.assertEqual(ranked[0].candidate.semantic_score, 0.95)
 
     def test_token_partitions_enforce_source_and_total_limits(self) -> None:
         focus = fit_token_budget("焦点" * 200, 30)
