@@ -26,6 +26,7 @@ from src.plugins.ai_chat.ai_tools import (
     SEND_STICKER_TOOL_NAME,
     VIEW_IMAGE_TOOL_NAME,
 )
+from src.plugins.ai_chat.context_pipeline import TurnContextPlan
 from src.plugins.ai_chat.media_library import MediaRecord
 
 
@@ -166,6 +167,81 @@ class NaturalToolRoutingTests(unittest.IsolatedAsyncioTestCase):
             group_prompt.index("这机器网络还是不稳定"),
         )
         self.assertIn("按上面的 h310 现场锐评", answer)
+
+    async def test_chronological_projection_is_written_to_context_debug(self) -> None:
+        ledger = Mock()
+        ledger.principal_label_for_native.return_value = None
+        ledger.canonical_id_for_native.return_value = None
+        ledger.get_in_scope.return_value = SimpleNamespace(
+            canonical_message_id=11,
+            prompt_text="我看 h310 一直寄",
+        )
+        context_store = Mock()
+        context_store.build_projection.return_value = SimpleNamespace(
+            text="[protected live tail]\n[msg#11 | Alice] 我看 h310 一直寄",
+            token_estimate=77,
+            raw_message_ids=(11,),
+            compartment_handles=("chapter-1",),
+        )
+        journal = Mock()
+        journal.fork_parent.return_value = None
+        plan = TurnContextPlan(
+            scope_key="onebot-v11:group:789",
+            current_message_id=12,
+            current_principal_id=1,
+            focus_message_id=None,
+            confidence=0.0,
+            reason_codes=("standalone_message",),
+            related_message_ids=(),
+            candidates=(),
+            rendered_context="",
+            topic_query="你锐评一下",
+        )
+
+        async def fake_deepseek(
+            user_text,
+            history,
+            tools,
+            execute_tool,
+            **kwargs,
+        ) -> str:
+            del user_text, history, tools, execute_tool, kwargs
+            return "按时间线回答"
+
+        import src.plugins.ai_chat as ai_chat
+
+        with (
+            patch.object(ai_chat, "message_ledger", ledger),
+            patch.object(ai_chat, "context_store", context_store),
+            patch.object(ai_chat, "pin_store", None),
+            patch.object(ai_chat, "source_store", None),
+            patch.object(ai_chat, "turn_journal", journal),
+            patch.object(ai_chat, "_group_turn_context_plan", return_value=plan),
+            patch.object(ai_chat, "_current_long_term_memory", return_value=""),
+            patch.object(ai_chat, "ask_deepseek_with_tools", new=fake_deepseek),
+            patch.object(ai_chat.memory, "append_turn"),
+        ):
+            answer = await ai_chat._ask_ai(
+                AsyncMock(),
+                _group_event(),
+                "你锐评一下",
+                available_image_sources=[],
+                journal_turn_id=44,
+            )
+
+        self.assertIn("按时间线回答", answer)
+        self.assertEqual(journal.record_context_plan.call_count, 2)
+        final_payload = journal.record_context_plan.call_args_list[-1].args[1]
+        self.assertEqual(
+            final_payload["recall_route"]["mode"],
+            "chronological_projection",
+        )
+        self.assertEqual(final_payload["adaptive_budget"]["used"]["timeline"], 77)
+        self.assertEqual(
+            [item["handle"] for item in final_payload["recall_candidates"]],
+            ["msg#11", "episode#chapter-1"],
+        )
+        self.assertTrue(final_payload["context_hash"])
 
     async def test_recent_image_handle_reaches_model_and_view_tool(self) -> None:
         captured: dict[str, object] = {}

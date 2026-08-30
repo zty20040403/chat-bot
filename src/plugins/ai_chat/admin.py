@@ -1355,7 +1355,11 @@ def _context_debug_summary(plan: dict[str, Any]) -> dict[str, object]:
         "current_topic": str(
             plan.get("topic_query") or plan.get("objective") or "未识别话题"
         )[:1000],
-        "route": str(route.get("mode") or "legacy"),
+        "route": str(
+            route.get("effective_mode")
+            or route.get("mode")
+            or "legacy"
+        ),
         "route_confidence": float(route.get("confidence") or 0.0),
         "focus_message_id": plan.get("focus_message_id"),
         "confidence": float(plan.get("confidence") or 0.0),

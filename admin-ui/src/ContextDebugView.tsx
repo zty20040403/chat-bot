@@ -38,6 +38,17 @@ const SOURCE_LABELS: Record<string, string> = {
   audit_summary: '审计容量提示',
 }
 
+const ROUTE_LABELS: Record<string, string> = {
+  chronological_projection: '时间顺序上下文',
+  direct: '明确引用',
+  follow_up: '追问关联',
+  recent_group: '最近群聊',
+  old_topic: '旧话题召回',
+  user_memory: '个人记忆',
+  group_memory: '群记忆',
+  no_recall: '独立问题',
+}
+
 const REASON_LABELS: Record<string, string> = {
   selected: '综合得分通过，已放进上下文',
   source_threshold_pass: '达到该来源最低分',
@@ -54,6 +65,7 @@ const REASON_LABELS: Record<string, string> = {
   selected_by_reference_resolver: '引用解析器选中',
   not_selected_by_reference_resolver: '引用解析器未选中',
   audit_truncated: '候选过多，其余低分记录已省略',
+  included_in_final_prompt: '实际送入模型',
 }
 
 function rows(value: unknown): any[] {
@@ -156,7 +168,7 @@ export function ContextDebugView({ plane }: { plane: Plane }) {
               >
                 <span className="context-turn-top"><strong>{item.turn_handle}</strong><time>{fmtTime(item.created_at)}</time></span>
                 <span className="context-turn-topic">{item.current_topic || '未识别话题'}</span>
-                <span className="context-turn-meta"><StatusBadge value={item.feedback?.verdict ?? item.status} label={item.feedback?.verdict === 'correct' ? '答对了' : item.feedback?.verdict === 'off_topic' ? '答非所问' : item.route} /><span>{fmtNumber(item.context_tokens)} Token</span><span>{item.selected_candidates}/{item.candidate_count} 条证据</span></span>
+                <span className="context-turn-meta"><StatusBadge value={item.feedback?.verdict ?? item.status} label={item.feedback?.verdict === 'correct' ? '答对了' : item.feedback?.verdict === 'off_topic' ? '答非所问' : ROUTE_LABELS[item.route] ?? item.route} /><span>{fmtNumber(item.context_tokens)} Token</span><span>{item.selected_candidates}/{item.candidate_count} 条证据</span></span>
               </button>
             ))}
             {!items.length && <EmptyState>还没有上下文决策记录</EmptyState>}
@@ -169,7 +181,7 @@ export function ContextDebugView({ plane }: { plane: Plane }) {
           {detail && (
             <>
               <div className="context-pane-heading inspector-title">
-                <div><span className="eyebrow">{detail.turn_handle} · {detail.scope_key}</span><h2>{detail.current_topic || '未识别话题'}</h2><p>路由：{detail.route} · 判断置信度 {percent(detail.confidence)} · {detail.profile}/{detail.model}</p></div>
+                <div><span className="eyebrow">{detail.turn_handle} · {detail.scope_key}</span><h2>{detail.current_topic || '未识别话题'}</h2><p>上下文方式：{ROUTE_LABELS[detail.route] ?? detail.route} · 原分类 {ROUTE_LABELS[detail.recall_route?.classifier_mode] ?? detail.recall_route?.classifier_mode ?? '无'} · {detail.profile}/{detail.model}</p></div>
                 <StatusBadge value={detail.evidence_guard?.sufficient ? 'succeeded' : 'warning'} label={detail.evidence_guard?.sufficient ? '证据充足' : '证据不足'} />
               </div>
 
@@ -193,7 +205,7 @@ export function ContextDebugView({ plane }: { plane: Plane }) {
                 </div>
               </Section>
 
-              <Section title="候选评分与取舍" description="先从多个来源找候选，再按相关性、时间、人物和串味风险统一评分">
+              <Section title="实际上下文与取舍" description="时间线模式展示真正送入模型的消息；检索模式同时展示评分和淘汰原因">
                 <DataTable><thead><tr><th>结果</th><th>候选</th><th>来源</th><th>原始分</th><th>最终分</th><th>为什么</th></tr></thead><tbody>{rows(detail.candidates).map((candidate, index) => <tr key={`${candidate.handle}-${index}`}><td>{candidate.selected ? <span className="decision-selected"><Check size={14} />选中</span> : <span className="decision-dropped"><CircleHelp size={14} />丢弃</span>}</td><td><code>{candidate.handle}</code><small className="cell-sub candidate-preview">{candidate.omitted_count ? `另有 ${fmtNumber(candidate.omitted_count)} 条低分候选未展开` : candidate.content_preview || '内容因隔离策略未展示'}</small></td><td>{SOURCE_LABELS[candidate.source] ?? candidate.source}</td><td>{Number(candidate.raw_score ?? 0).toFixed(3)}</td><td>{Number(candidate.adjusted_score ?? 0).toFixed(3)}</td><td><div className="decision-reasons">{rows(candidate.decision_codes).map((reason) => <span title={reason} key={reason}>{REASON_LABELS[reason] ?? reason}</span>)}</div></td></tr>)}</tbody></DataTable>
                 {!rows(detail.candidates).length && <EmptyState>这次回答没有产生召回候选</EmptyState>}
               </Section>

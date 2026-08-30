@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import re
 import sqlite3
 import time
 import asyncio
@@ -65,6 +67,9 @@ from .config import (
 )
 from .context_policy import (
     choose_context_policy,
+)
+from .context_store import (
+    estimate_tokens,
 )
 from .context_pipeline import (
     TurnContextPlan,
@@ -208,6 +213,15 @@ async def _ask_ai(
     replay_digest_prefix = ""
     replay_reason = ""
     context_plan: TurnContextPlan | None = None
+    context_plan_payload: dict[str, Any] | None = None
+    actual_context_candidates: list[dict[str, object]] = []
+    actual_context_usage = {
+        "focus": estimate_tokens(user_text),
+        "timeline": 0,
+        "semantic": 0,
+        "group_memory": 0,
+        "user_memory": 0,
+    }
 
     if available_image_sources is None and settings.ocr_enabled:
         available_image_sources = await _resolve_ocr_sources(bot, event)
@@ -361,6 +375,7 @@ async def _ask_ai(
                 "total": context_policy.token_budget.total,
             }
             payload["evidence_guard"] = evidence_assessment.journal_payload()
+            context_plan_payload = payload
             turn_journal.record_context_plan(
                 journal_turn_id,
                 payload,
@@ -1478,10 +1493,35 @@ async def _ask_ai(
                     max_chars=2400,
                 )
                 if pinned:
-                    sections.append(
+                    pinned_block = (
                         "[pinned messages - long-lived current-group facts]\n"
                         + pinned
                     )
+                    sections.append(pinned_block)
+                    actual_context_usage["timeline"] += estimate_tokens(
+                        pinned_block
+                    )
+                    for _pin, message in pin_store.messages(
+                        message_ledger,
+                        scope,
+                    ):
+                        handle = f"msg#{message.canonical_message_id}"
+                        if handle not in pinned:
+                            continue
+                        actual_context_candidates.append(
+                            {
+                                "handle": handle,
+                                "source": "pinned_message",
+                                "selected": True,
+                                "raw_score": 1.0,
+                                "adjusted_score": 1.0,
+                                "decision_codes": ["included_in_final_prompt"],
+                                "reason_codes": ["pinned_context"],
+                                "content_preview": message.prompt_text[:240],
+                                "scores": {},
+                                "evidence_ids": [message.canonical_message_id],
+                            }
+                        )
             if context_store is not None:
                 try:
                     projection = context_store.build_projection(
@@ -1509,6 +1549,59 @@ async def _ask_ai(
                     projection_built = True
                     if projection.text:
                         sections.append(projection.text)
+                        actual_context_usage["timeline"] += int(
+                            getattr(
+                                projection,
+                                "token_estimate",
+                                estimate_tokens(projection.text),
+                            )
+                        )
+                    for message_id in getattr(
+                        projection,
+                        "raw_message_ids",
+                        (),
+                    ):
+                        message = message_ledger.get_in_scope(
+                            scope,
+                            int(message_id),
+                        )
+                        actual_context_candidates.append(
+                            {
+                                "handle": f"msg#{int(message_id)}",
+                                "source": "group_timeline",
+                                "selected": True,
+                                "raw_score": 1.0,
+                                "adjusted_score": 1.0,
+                                "decision_codes": ["included_in_final_prompt"],
+                                "reason_codes": ["chronological_live_tail"],
+                                "content_preview": (
+                                    message.prompt_text[:240]
+                                    if message is not None
+                                    else ""
+                                ),
+                                "scores": {},
+                                "evidence_ids": [int(message_id)],
+                            }
+                        )
+                    for handle in getattr(
+                        projection,
+                        "compartment_handles",
+                        (),
+                    ):
+                        actual_context_candidates.append(
+                            {
+                                "handle": f"episode#{handle}",
+                                "source": "historian_episode",
+                                "selected": True,
+                                "raw_score": 1.0,
+                                "adjusted_score": 1.0,
+                                "decision_codes": ["included_in_final_prompt"],
+                                "reason_codes": ["chronological_compartment"],
+                                "content_preview": "Historian 时间线章节",
+                                "scores": {},
+                                "evidence_ids": [],
+                            }
+                        )
             if not projection_built:
                 fallback = message_ledger.render_recent(
                     scope,
@@ -1520,7 +1613,32 @@ async def _ask_ai(
                     ),
                 )
                 if fallback:
-                    sections.append("[protected live tail]\n" + fallback)
+                    fallback_block = "[protected live tail]\n" + fallback
+                    sections.append(fallback_block)
+                    actual_context_usage["timeline"] += estimate_tokens(
+                        fallback_block
+                    )
+                    for matched in re.finditer(r"\bmsg#([1-9][0-9]*)", fallback):
+                        message_id = int(matched.group(1))
+                        message = message_ledger.get_in_scope(scope, message_id)
+                        actual_context_candidates.append(
+                            {
+                                "handle": f"msg#{message_id}",
+                                "source": "group_timeline",
+                                "selected": True,
+                                "raw_score": 1.0,
+                                "adjusted_score": 1.0,
+                                "decision_codes": ["included_in_final_prompt"],
+                                "reason_codes": ["chronological_fallback"],
+                                "content_preview": (
+                                    message.prompt_text[:240]
+                                    if message is not None
+                                    else ""
+                                ),
+                                "scores": {},
+                                "evidence_ids": [message_id],
+                            }
+                        )
             if source_store is not None:
                 try:
                     recent_sources = source_store.render_recent(scope)
@@ -1528,20 +1646,57 @@ async def _ask_ai(
                     logger.warning(f"Recent shared-source context failed: {exc}")
                 else:
                     if recent_sources:
-                        sections.append(
+                        source_block = (
                             "[recent shared sources - inspect with source#/msg#]\n"
                             + recent_sources
                         )
+                        sections.append(source_block)
+                        actual_context_usage["semantic"] += estimate_tokens(
+                            source_block
+                        )
+                        for handle in dict.fromkeys(
+                            re.findall(r"\bsource#[1-9][0-9]*", recent_sources)
+                        ):
+                            actual_context_candidates.append(
+                                {
+                                    "handle": handle,
+                                    "source": "shared_source",
+                                    "selected": True,
+                                    "raw_score": 1.0,
+                                    "adjusted_score": 1.0,
+                                    "decision_codes": ["included_in_final_prompt"],
+                                    "reason_codes": ["recent_shared_source"],
+                                    "content_preview": "当前群近期分享内容",
+                                    "scores": {},
+                                    "evidence_ids": [],
+                                }
+                            )
             if replied_canonical_id is not None:
                 replied = message_ledger.get_in_scope(
                     scope,
                     replied_canonical_id,
                 )
                 if replied is not None:
-                    sections.append(
+                    quoted_block = (
                         "[quoted context - explicit reply target, highest priority]\n"
                         f"[msg#{replied.canonical_message_id} | "
                         f"{replied.sender_display}] {replied.prompt_text}"
+                    )
+                    sections.append(quoted_block)
+                    actual_context_usage["focus"] += estimate_tokens(quoted_block)
+                    actual_context_candidates.append(
+                        {
+                            "handle": f"msg#{replied.canonical_message_id}",
+                            "source": "relation_graph",
+                            "selected": True,
+                            "raw_score": 1.0,
+                            "adjusted_score": 1.0,
+                            "decision_codes": ["included_in_final_prompt"],
+                            "reason_codes": ["explicit_reply_target"],
+                            "content_preview": replied.prompt_text[:240],
+                            "scores": {},
+                            "evidence_ids": [replied.canonical_message_id],
+                        }
                     )
             group_prompt_context = "\n\n".join(sections)
         else:
@@ -1555,6 +1710,133 @@ async def _ask_ai(
             user_text,
             context_policy,
         )
+        for memory_block in memory_prompt_context.split("\n\n"):
+            if memory_block.startswith("[当前群相关长期记忆]"):
+                memory_source = "group_memory"
+            elif memory_block.startswith("[当前用户相关长期记忆]"):
+                memory_source = "user_memory"
+            else:
+                continue
+            actual_context_usage[memory_source] += estimate_tokens(memory_block)
+            for memory_id, preview in re.findall(
+                r"(?m)^- \[#([1-9][0-9]*)\] (.+)$",
+                memory_block,
+            ):
+                actual_context_candidates.append(
+                    {
+                        "handle": f"memory#{memory_id}",
+                        "source": memory_source,
+                        "selected": True,
+                        "raw_score": 1.0,
+                        "adjusted_score": 1.0,
+                        "decision_codes": ["included_in_final_prompt"],
+                        "reason_codes": ["relevant_long_term_memory"],
+                        "content_preview": preview[:240],
+                        "scores": {},
+                        "evidence_ids": [],
+                    }
+                )
+        if (
+            context_plan_payload is not None
+            and turn_journal is not None
+            and journal_turn_id is not None
+        ):
+            deduplicated: dict[str, dict[str, object]] = {}
+            source_priority = {
+                "relation_graph": 5,
+                "pinned_message": 4,
+                "group_timeline": 3,
+                "historian_episode": 2,
+                "group_memory": 2,
+                "user_memory": 2,
+                "shared_source": 1,
+            }
+            for candidate in actual_context_candidates:
+                handle = str(candidate.get("handle") or "")
+                current = deduplicated.get(handle)
+                if current is None or source_priority.get(
+                    str(candidate.get("source") or ""),
+                    0,
+                ) > source_priority.get(str(current.get("source") or ""), 0):
+                    deduplicated[handle] = candidate
+            actual_context_usage["total"] = sum(actual_context_usage.values())
+            route_payload = dict(context_plan_payload.get("recall_route") or {})
+            route_payload["classifier_mode"] = route_payload.get("mode", "")
+            route_payload["mode"] = "chronological_projection"
+            route_payload["context_strategy"] = "chronological_projection"
+            context_plan_payload["recall_route"] = route_payload
+            adaptive_budget = dict(
+                context_plan_payload.get("adaptive_budget") or {}
+            )
+            adaptive_budget["used"] = dict(actual_context_usage)
+            for key in (
+                "focus",
+                "timeline",
+                "semantic",
+                "group_memory",
+                "user_memory",
+            ):
+                adaptive_budget[key] = max(
+                    int(adaptive_budget.get(key) or 0),
+                    int(actual_context_usage[key]),
+                )
+            adaptive_budget["total"] = sum(
+                int(adaptive_budget.get(key) or 0)
+                for key in (
+                    "focus",
+                    "timeline",
+                    "semantic",
+                    "group_memory",
+                    "user_memory",
+                    "tool_reserve",
+                )
+            )
+            context_plan_payload["adaptive_budget"] = adaptive_budget
+            context_plan_payload["recall_candidates"] = list(
+                deduplicated.values()
+            )
+            context_plan_payload["related_message_ids"] = sorted(
+                {
+                    int(evidence_id)
+                    for candidate in deduplicated.values()
+                    for evidence_id in candidate.get("evidence_ids", [])
+                    if str(evidence_id).isdigit()
+                }
+            )
+            context_plan_payload["resolver_version"] = (
+                "chronological-projection-v1"
+            )
+            context_plan_payload["context_hash"] = hashlib.sha256(
+                (group_prompt_context + "\n\n" + memory_prompt_context).encode(
+                    "utf-8"
+                )
+            ).hexdigest()[:16]
+            evidence_payload = dict(
+                context_plan_payload.get("evidence_guard") or {}
+            )
+            if deduplicated:
+                evidence_payload.update(
+                    {
+                        "sufficient": True,
+                        "reason_codes": ["chronological_projection_visible"],
+                        "evidence_handles": list(deduplicated),
+                    }
+                )
+            context_plan_payload["evidence_guard"] = evidence_payload
+            try:
+                turn_journal.record_context_plan(
+                    journal_turn_id,
+                    context_plan_payload,
+                    created_at=event.time,
+                )
+            except (
+                OSError,
+                RuntimeError,
+                ValueError,
+                sqlite3.Error,
+                DatabaseError,
+            ) as exc:
+                logger.warning(f"Final context projection journal failed: {exc}")
         answer = await ask_deepseek_with_tools(
             user_text,
             (
