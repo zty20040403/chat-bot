@@ -62,6 +62,11 @@ _DEICTIC_FOLLOW_UP = re.compile(
     r"怎么说|咋样|是什么|啥意思)?|评价一下|锐评|细说|展开说说)[？?]?$",
     re.IGNORECASE,
 )
+_OPINION_FOLLOW_UP = re.compile(
+    r"^(?:你(?:觉得|认为)(?:呢|怎么样)?|你(?:怎么|咋)看|你说呢|"
+    r"评价一下|锐评|细说|展开说说)[吧呢？?]*$",
+    re.IGNORECASE,
+)
 
 
 class ReferenceResolver:
@@ -223,6 +228,51 @@ class ReferenceResolver:
             )
 
         timestamp = int(now if now is not None else current.occurred_at if current else 0)
+        latest_anchor_follow_up = bool(
+            _OPINION_FOLLOW_UP.fullmatch(" ".join(current_text.split()).strip())
+            or _DEICTIC_FOLLOW_UP.fullmatch(" ".join(current_text.split()).strip())
+        )
+        if latest_anchor_follow_up:
+            focus = self._latest_human_anchor(recent)
+            if focus is not None:
+                related = graph.strongly_related_ids(
+                    focus.canonical_message_id,
+                    current_message_id,
+                    limit=self.related_limit,
+                )
+                topic_id = graph.root(focus.canonical_message_id)
+                reasons = ("adjacent_human_anchor", "same_scope")
+                return TurnContextPlan(
+                    scope_key=scope.key,
+                    current_message_id=current_message_id,
+                    current_principal_id=current_principal_id,
+                    focus_message_id=focus.canonical_message_id,
+                    confidence=0.99,
+                    reason_codes=reasons,
+                    related_message_ids=related,
+                    candidates=(
+                        ContextCandidate(
+                            focus.canonical_message_id,
+                            160.0,
+                            reasons,
+                            relation_score=1.0,
+                            recency_score=1.0,
+                        ),
+                    ),
+                    rendered_context=self._render(
+                        focus,
+                        self._messages_by_ids(recent, related),
+                        ambiguous=False,
+                    ),
+                    topic_id=topic_id,
+                    topic_message_ids=tuple(
+                        dict.fromkeys((topic_id, focus.canonical_message_id, *related))
+                    ),
+                    topic_query=graph.topic_query(
+                        focus.canonical_message_id,
+                        related,
+                    ),
+                )
         query_terms = self._query_terms(current_text)
         deictic_follow_up = bool(
             _DEICTIC_FOLLOW_UP.fullmatch(" ".join(current_text.split()).strip())
@@ -230,7 +280,8 @@ class ReferenceResolver:
         scored: list[tuple[CanonicalMessage, ContextCandidate]] = []
         for distance, message in enumerate(reversed(recent)):
             graph_score, graph_relations = graph.connection_score(
-                message.canonical_message_id
+                message.canonical_message_id,
+                reference_message_id=current_message_id,
             )
             score, reasons, components = self._score(
                 message,
@@ -345,6 +396,23 @@ class ReferenceResolver:
             re.fullmatch(pattern, compact, re.IGNORECASE)
             for pattern in _FOLLOW_UP_PATTERNS
         )
+
+    @classmethod
+    def _latest_human_anchor(
+        cls,
+        recent: list[CanonicalMessage],
+    ) -> CanonicalMessage | None:
+        fallback: CanonicalMessage | None = None
+        for message in reversed(recent):
+            if message.direction != "inbound":
+                continue
+            text = " ".join(message.prompt_text.split()).strip()
+            if not text or _LOW_INFORMATION.fullmatch(text):
+                continue
+            fallback = fallback or message
+            if not cls._looks_like_follow_up(text):
+                return message
+        return fallback
 
     @classmethod
     def _score(

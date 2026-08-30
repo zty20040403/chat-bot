@@ -30,6 +30,7 @@ class ReferenceResolverTests(unittest.TestCase):
         text: str,
         *,
         reply_to: int | None = None,
+        direction: str = "inbound",
     ):
         return self.ledger.record_message(
             scope,
@@ -38,12 +39,13 @@ class ReferenceResolverTests(unittest.TestCase):
             sender_display=sender,
             body=MessageBody((TextNode(0, text),)),
             occurred_at=1_000 + native_id,
+            direction=direction,
             reply_to_native_message_id=(
                 str(reply_to) if reply_to is not None else None
             ),
         )
 
-    def test_follow_up_prefers_recent_question_from_other_member(self) -> None:
+    def test_opinion_follow_up_prefers_latest_human_statement(self) -> None:
         question = self.record(
             self.group_a,
             1,
@@ -69,10 +71,74 @@ class ReferenceResolverTests(unittest.TestCase):
             now=current.occurred_at,
         )
 
-        self.assertEqual(plan.focus_message_id, question.canonical_message_id)
-        self.assertIn(comment.canonical_message_id, plan.related_message_ids)
-        self.assertIn("recent_question", plan.reason_codes)
+        self.assertEqual(plan.focus_message_id, comment.canonical_message_id)
+        self.assertIn(question.canonical_message_id, plan.related_message_ids)
+        self.assertIn("adjacent_human_anchor", plan.reason_codes)
         self.assertIn("PostgreSQL", plan.rendered_context)
+
+    def test_bot_mention_does_not_override_unmentioned_latest_statement(self) -> None:
+        old_question = self.record(
+            self.group_a,
+            1,
+            7,
+            "Alice",
+            "h610 的数据库是不是坏了？",
+        )
+        bot_reply = self.record(
+            self.group_a,
+            2,
+            99,
+            "Bot",
+            "数据库目前正常。",
+            reply_to=1,
+            direction="outbound",
+        )
+        latest = self.record(
+            self.group_a,
+            3,
+            9,
+            "Kenneth",
+            "我觉得 h310 比 h610 屌",
+        )
+        bot_principal = self.ledger.principal_id_for_native("onebot-v11", "99")
+        current = self.ledger.record_message(
+            self.group_a,
+            native_message_id="4",
+            sender_native_user_id="9",
+            sender_display="Kenneth",
+            body=MessageBody(
+                (
+                    MentionNode(0, "99", "Bot", bot_principal),
+                    TextNode(1, "你觉得呢"),
+                )
+            ),
+            occurred_at=1_004,
+        )
+
+        plan = self.resolver.resolve(
+            self.ledger,
+            self.group_a,
+            current_message_id=current.canonical_message_id,
+            current_text="你觉得呢",
+            current_native_user_id=9,
+            now=current.occurred_at,
+        )
+
+        self.assertEqual(plan.focus_message_id, latest.canonical_message_id)
+        self.assertNotEqual(plan.focus_message_id, old_question.canonical_message_id)
+        self.assertNotIn(bot_reply.canonical_message_id, plan.related_message_ids)
+        self.assertEqual(plan.confidence, 0.99)
+        self.assertIn("我觉得 h310 比 h610 屌", plan.rendered_context)
+
+        graph = MessageReferenceGraph([old_question, bot_reply, latest, current])
+        self.assertFalse(
+            any(
+                edge.relation == "mention"
+                and bot_reply.canonical_message_id
+                in {edge.source_message_id, edge.target_message_id}
+                for edge in graph.edges
+            )
+        )
 
     def test_empty_mention_follow_up_prefers_recent_group_question(self) -> None:
         question = self.record(
@@ -94,7 +160,7 @@ class ReferenceResolverTests(unittest.TestCase):
         )
 
         self.assertEqual(plan.focus_message_id, question.canonical_message_id)
-        self.assertIn("recent_question", plan.reason_codes)
+        self.assertIn("adjacent_human_anchor", plan.reason_codes)
         self.assertIn("突然变慢", plan.rendered_context)
 
     def test_empty_mention_prefers_latest_human_message_over_older_question(self) -> None:

@@ -456,8 +456,12 @@ async def _ask_ai(
             )
         except (OSError, RuntimeError, ValueError, sqlite3.Error, DatabaseError):
             pass
-    if settings.evidence_guard_enabled and not evidence_assessment.sufficient:
-        return evidence_assessment.clarification or "你指的是刚才哪个问题？"
+    if (
+        settings.evidence_guard_enabled
+        and not evidence_assessment.sufficient
+        and "scope_violation" in evidence_assessment.reason_codes
+    ):
+        return "上下文范围校验没有通过，已停止使用可能串群或串用户的内容。"
 
     async def _execute_tool_impl(name: str, arguments: dict[str, object]) -> str:
         nonlocal visual_reply_segment, voice_reply_segment, voice_reply_text

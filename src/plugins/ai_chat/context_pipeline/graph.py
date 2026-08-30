@@ -262,7 +262,9 @@ class MessageReferenceGraph:
                     ),
                     None,
                 )
-                if target is not None:
+                # Mentioning the bot invokes it; it does not make the bot's last
+                # reply the subject of the new message.
+                if target is not None and target.direction != "outbound":
                     self._add_edge(
                         message,
                         target,
@@ -339,11 +341,21 @@ class MessageReferenceGraph:
     def edges(self) -> tuple[TopicEdge, ...]:
         return tuple(self._edges.values())
 
-    def connection_score(self, message_id: int) -> tuple[float, tuple[str, ...]]:
+    def connection_score(
+        self,
+        message_id: int,
+        *,
+        reference_message_id: int | None = None,
+    ) -> tuple[float, tuple[str, ...]]:
         related = [
             edge
             for edge in self._edges.values()
             if int(message_id) in {edge.source_message_id, edge.target_message_id}
+            and (
+                reference_message_id is None
+                or int(reference_message_id)
+                in {edge.source_message_id, edge.target_message_id}
+            )
         ]
         if not related:
             return 0.0, ()
@@ -356,6 +368,54 @@ class MessageReferenceGraph:
             )
         )
         return score, relations[:5]
+
+    def strongly_related_ids(
+        self,
+        focus_message_id: int,
+        current_message_id: int,
+        *,
+        limit: int = 8,
+    ) -> tuple[int, ...]:
+        """Return topical evidence without weak mention/time/sender-only links."""
+        selected = {
+            *self.ancestors(focus_message_id, limit=3),
+            *self.descendants(
+                focus_message_id,
+                before_message_id=current_message_id,
+                limit=limit,
+            ),
+        }
+        topical_relations = {
+            "reply",
+            "bot_reply",
+            "question_answer",
+            "lexical_topic",
+            "semantic_similarity",
+        }
+        neighbors: dict[int, float] = {}
+        for edge in self._edges.values():
+            if edge.relation not in topical_relations:
+                continue
+            if edge.source_message_id == focus_message_id:
+                neighbor = edge.target_message_id
+            elif edge.target_message_id == focus_message_id:
+                neighbor = edge.source_message_id
+            else:
+                continue
+            if neighbor >= current_message_id:
+                continue
+            neighbors[neighbor] = max(neighbors.get(neighbor, 0.0), edge.weight)
+        for message_id, _weight in sorted(
+            neighbors.items(),
+            key=lambda item: (item[1], item[0]),
+            reverse=True,
+        )[:limit]:
+            selected.add(message_id)
+        return tuple(
+            message_id
+            for message_id in sorted(selected)[-max(int(limit), 0) :]
+            if message_id != focus_message_id
+        )
 
     def root(self, message_id: int) -> int:
         current = int(message_id)

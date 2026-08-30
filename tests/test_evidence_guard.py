@@ -39,7 +39,7 @@ def _recall(*items: RankedRecall) -> HybridRecallContext:
 
 
 class EvidenceGuardTests(unittest.TestCase):
-    def test_ambiguous_follow_up_requests_clarification(self) -> None:
+    def test_ambiguous_follow_up_continues_without_clarification(self) -> None:
         plan = _plan(focus=None, confidence=0.0, reasons=("no_reliable_focus",))
         decision = rule_recall_route("你觉得呢", plan, is_group=True)
 
@@ -53,8 +53,9 @@ class EvidenceGuardTests(unittest.TestCase):
             user_memory_scope="group:100:user:9",
         )
 
-        self.assertFalse(result.sufficient)
-        self.assertIn("哪个问题", result.clarification)
+        self.assertTrue(result.sufficient)
+        self.assertIn("best_effort_follow_up", result.reason_codes)
+        self.assertEqual(result.clarification, "")
 
     def test_wrong_users_memory_is_blocked_even_when_high_scoring(self) -> None:
         decision = rule_recall_route("你还记得我的偏好吗", None, is_group=True)

@@ -116,12 +116,12 @@ def assess_evidence(
             or "no_reliable_focus" in plan.reason_codes
         )
         return EvidenceAssessment(
-            not ambiguous,
+            True,
             plan.confidence if plan is not None else 0.0,
-            ("topic_graph_focus",) if not ambiguous else ("ambiguous_topic",),
+            ("topic_graph_focus",) if not ambiguous else ("best_effort_follow_up",),
             handles,
             selected_topic,
-            "" if not ambiguous else "你指的是刚才哪个问题？可以引用一下那条消息。",
+            "",
             warnings,
         )
 
