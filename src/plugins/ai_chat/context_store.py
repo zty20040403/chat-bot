@@ -156,7 +156,6 @@ class ContextStore:
         raw_text, raw_ids, raw_tokens, degraded = self._fit_raw_tail(
             raw_messages,
             raw_lines,
-            protected_message_ids=set(protected_message_ids),
         )
         remaining = max(self.input_budget_tokens - raw_tokens, 0)
         chosen: list[tuple[CompartmentRecord, str]] = []
@@ -647,23 +646,21 @@ class ContextStore:
         self,
         messages: list[CanonicalMessage],
         lines: list[str],
-        *,
-        protected_message_ids: set[int],
     ) -> tuple[str, list[int], int, bool]:
         if not messages:
             return "", [], 0, False
-        chosen_indexes: set[int] = {
-            index
-            for index, message in enumerate(messages)
-            if message.canonical_message_id in protected_message_ids
-        }
-        used = sum(estimate_tokens(lines[index]) for index in chosen_indexes)
+        chosen_indexes: set[int] = set()
+        used = 0
         for index in range(len(messages) - 1, -1, -1):
             if index in chosen_indexes:
                 continue
             cost = estimate_tokens(lines[index])
             if chosen_indexes and used + cost > self.input_budget_tokens:
-                continue
+                # The live tail is a chronological suffix, not a bag of
+                # individually cheap messages. Skipping one line and then
+                # admitting older lines creates invisible holes that change
+                # the apparent conversation.
+                break
             chosen_indexes.add(index)
             used += cost
             if used >= self.input_budget_tokens:

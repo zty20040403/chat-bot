@@ -1425,6 +1425,8 @@ async def _ask_ai(
                 "当前群上下文按时间顺序给出：先读连续的近期原文，再结合当前消息"
                 "判断省略的主语和对象；不要因为某条旧消息曾经 @ 过机器人就擅自把"
                 "它当成当前话题。明确引用的 [quoted context] 优先级最高。"
+                "近期原文里有自然延续的笑点时可以简短回扣，但不要解释梗、复读梗，"
+                "也不要为了显得会聊天而把已经结束的旧话题硬拉回来。"
                 "遇到 [image#消息.段] 且用户要求评价或分析这张图时，调用 "
                 "view_image 并完整照抄对应 msg# 句柄。旧聊天或旧任务细节按需先用 "
                 "context_search，再用 context_expand；不要猜测不存在的句柄。"
@@ -1804,7 +1806,7 @@ async def _ask_ai(
                 }
             )
             context_plan_payload["resolver_version"] = (
-                "chronological-projection-v1"
+                "chronological-projection-v2"
             )
             context_plan_payload["context_hash"] = hashlib.sha256(
                 (group_prompt_context + "\n\n" + memory_prompt_context).encode(

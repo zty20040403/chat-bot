@@ -110,6 +110,33 @@ class ContextStoreTests(unittest.TestCase):
         valid, detail = self.context.verify_scope(self.ledger, self.group_a)
         self.assertTrue(valid, detail)
 
+    def test_raw_tail_does_not_skip_an_oversized_middle_message(self) -> None:
+        managed = ContextStore(
+            ":memory:",
+            input_budget_tokens=1000,
+            historian_managed=True,
+        )
+        self.addCleanup(managed.close)
+        for native_id, text in (
+            ("old", "old joke that must not jump across the gap"),
+            ("large", "x" * 5000),
+            ("new", "current live tail"),
+        ):
+            self.ledger.record_message(
+                self.group_a,
+                native_message_id=native_id,
+                sender_native_user_id="1000",
+                sender_display="User",
+                body=MessageBody((TextNode(0, text),)),
+                occurred_at=200,
+            )
+
+        projection = managed.build_projection(self.ledger, self.group_a)
+
+        self.assertIn("current live tail", projection.text)
+        self.assertNotIn("old joke", projection.text)
+        self.assertEqual(len(projection.raw_message_ids), 1)
+
     def test_historian_publication_uses_cursor_cas(self) -> None:
         self.seed()
         candidate = self.context.capture_candidate(self.ledger, self.group_a)
