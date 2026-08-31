@@ -63,6 +63,15 @@ class ModelPreferences:
     def get_group_default(self, group_id):
         return self.models.get(f"group:{group_id}:default")
 
+    def get_group_member_default(self, group_id):
+        return self.models.get(f"group:{group_id}:member-default")
+
+    def set_group_member_default(self, group_id, value):
+        self.models[f"group:{group_id}:member-default"] = value
+
+    def clear_group_member_default(self, group_id):
+        return self.clear(f"group:{group_id}:member-default")
+
     def set_group_default(self, group_id, profile):
         self.models[f"group:{group_id}:default"] = profile
 
@@ -97,6 +106,9 @@ class ModelPreferences:
 
     def set(self, conversation_id, profile):
         self.models[conversation_id] = profile
+
+    def get_explicit(self, conversation_id):
+        return self.models.get(conversation_id)
 
     def clear(self, conversation_id):
         return self.models.pop(conversation_id, None) is not None
@@ -662,12 +674,12 @@ class AdminTests(unittest.TestCase):
             json.dumps(
                 {
                     "main": {
-                        "provider": "test",
+                        "provider": "cliproxy",
                         "model": "model-a",
                         "api_key_required": False,
                     },
                     "alternate": {
-                        "provider": "test",
+                        "provider": "cliproxy",
                         "model": "model-b",
                         "api_key_required": False,
                     }
@@ -678,6 +690,8 @@ class AdminTests(unittest.TestCase):
         )
         preferences = ModelPreferences()
         preferences.models.clear()
+        reasoning = ModelPreferences()
+        reasoning.models.clear()
         app = FastAPI()
         register_admin(
             app,
@@ -686,6 +700,7 @@ class AdminTests(unittest.TestCase):
                 started_at=1,
                 model_catalog=models,
                 model_preferences=preferences,
+                reasoning_preferences=reasoning,
                 user_profiles=UserProfiles(),
                 message_ledger=MessageLedger(),
                 settings=Settings(),
@@ -720,6 +735,16 @@ class AdminTests(unittest.TestCase):
                     headers=headers,
                     json={"enabled": False},
                 )
+                group_effort = await client.put(
+                    "/bot-admin/api/group-models/930690526/reasoning-effort",
+                    headers=headers,
+                    json={"effort": "high"},
+                )
+                member_effort = await client.put(
+                    "/bot-admin/api/group-models/930690526/users/2291939848/reasoning-effort",
+                    headers=headers,
+                    json={"effort": "xhigh"},
+                )
                 snapshot = await client.get(
                     "/bot-admin/api/group-models",
                     headers=headers,
@@ -729,28 +754,54 @@ class AdminTests(unittest.TestCase):
                     headers=headers,
                     json={"profile": None},
                 )
+                reset_effort = await client.put(
+                    "/bot-admin/api/group-models/930690526/users/2291939848/reasoning-effort",
+                    headers=headers,
+                    json={"effort": None},
+                )
                 invalid = await client.put(
                     "/bot-admin/api/group-models/930690526/default",
                     headers=headers,
                     json={"profile": "missing"},
+                )
+                invalid_effort = await client.put(
+                    "/bot-admin/api/group-models/930690526/reasoning-effort",
+                    headers=headers,
+                    json={"effort": "absurd"},
                 )
                 return (
                     group,
                     member,
                     toggle,
                     vision_toggle,
+                    group_effort,
+                    member_effort,
                     snapshot,
                     reset,
+                    reset_effort,
                     invalid,
+                    invalid_effort,
                 )
 
-        group, member, toggle, vision_toggle, snapshot, reset, invalid = asyncio.run(
-            run()
-        )
+        (
+            group,
+            member,
+            toggle,
+            vision_toggle,
+            group_effort,
+            member_effort,
+            snapshot,
+            reset,
+            reset_effort,
+            invalid,
+            invalid_effort,
+        ) = asyncio.run(run())
         self.assertEqual(group.status_code, 200)
         self.assertEqual(member.status_code, 200)
         self.assertEqual(toggle.status_code, 200)
         self.assertEqual(vision_toggle.status_code, 200)
+        self.assertEqual(group_effort.status_code, 200)
+        self.assertEqual(member_effort.status_code, 200)
         row = next(
             item
             for item in snapshot.json()["items"]
@@ -767,16 +818,27 @@ class AdminTests(unittest.TestCase):
         )
         self.assertEqual(selected_admin["explicit_profile"], "main")
         self.assertEqual(selected_admin["effective_profile"], "main")
+        self.assertIsNone(selected_admin["effective_reasoning_effort"])
+        self.assertEqual(selected_admin["reasoning_effort_source"], "server")
         selected_member = next(
             item for item in row["members"] if item["user_id"] == 2291939848
         )
         self.assertEqual(selected_member["explicit_profile"], "main")
+        self.assertEqual(row["member_reasoning_effort"], "high")
+        self.assertEqual(selected_member["explicit_reasoning_effort"], "xhigh")
+        self.assertEqual(selected_member["effective_reasoning_effort"], "xhigh")
         self.assertEqual(reset.status_code, 200)
+        self.assertEqual(reset_effort.status_code, 200)
         self.assertNotIn(
             "group:930690526:user:2291939848",
             preferences.models,
         )
+        self.assertNotIn(
+            "group:930690526:user:2291939848",
+            reasoning.models,
+        )
         self.assertEqual(invalid.status_code, 422)
+        self.assertEqual(invalid_effort.status_code, 422)
 
     def test_admin_v1_versions_audits_and_rejects_stale_tool_updates(self) -> None:
         self.addCleanup(configure_tool_overrides, {})

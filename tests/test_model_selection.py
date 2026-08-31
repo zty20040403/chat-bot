@@ -190,6 +190,50 @@ class ModelSelectionTests(unittest.TestCase):
         self.assertEqual(selected.reasoning_effort, "")
         self.assertIsNone(reasoning.get_explicit("private:10"))
 
+    def test_group_member_effort_does_not_override_admin_lane(self) -> None:
+        catalog = ModelCatalog.from_json(
+            json.dumps(
+                {
+                    "main": {
+                        "provider": "cliproxy",
+                        "model": "gpt-test",
+                        "api_key_required": False,
+                        "reasoning_effort": "medium",
+                    }
+                }
+            ),
+            default_profile="main",
+            environ={},
+        )
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            models = ModelPreferenceStore(root / "models.json")
+            reasoning = ModelPreferenceStore(root / "reasoning.json")
+            reasoning.set_group_member_default(1, "high")
+            with (
+                patch.object(ai_chat, "model_profiles", catalog),
+                patch.object(ai_chat, "model_preferences", models),
+                patch.object(ai_chat, "reasoning_preferences", reasoning),
+                patch.object(
+                    ai_chat,
+                    "settings",
+                    SimpleNamespace(
+                        group_model_profiles={},
+                        admin_user_ids={10},
+                    ),
+                ),
+            ):
+                admin = ai_chat._preferred_model_profile("group:1:user:10")
+                member = ai_chat._preferred_model_profile("group:1:user:11")
+                reasoning.set("group:1:user:11", "xhigh")
+                overridden = ai_chat._preferred_model_profile(
+                    "group:1:user:11"
+                )
+
+        self.assertEqual(admin.reasoning_effort, "medium")
+        self.assertEqual(member.reasoning_effort, "high")
+        self.assertEqual(overridden.reasoning_effort, "xhigh")
+
 
 if __name__ == "__main__":
     unittest.main()

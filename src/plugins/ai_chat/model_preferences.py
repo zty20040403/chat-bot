@@ -50,6 +50,15 @@ class ModelPreferenceStore:
     def clear_group_default(self, group_id: int) -> bool:
         return self.clear(self.group_default_key(group_id))
 
+    def get_group_member_default(self, group_id: int) -> str | None:
+        return self.get_explicit(self.group_member_default_key(group_id))
+
+    def set_group_member_default(self, group_id: int, value: str) -> None:
+        self.set(self.group_member_default_key(group_id), value)
+
+    def clear_group_member_default(self, group_id: int) -> bool:
+        return self.clear(self.group_member_default_key(group_id))
+
     def get_group_enabled_override(self, group_id: int) -> bool | None:
         stored = self.get_explicit(self.group_enabled_key(group_id))
         if stored == "enabled":
@@ -87,6 +96,13 @@ class ModelPreferenceStore:
         if normalized <= 0:
             raise ValueError("group_id must be positive")
         return f"group:{normalized}:default"
+
+    @staticmethod
+    def group_member_default_key(group_id: int) -> str:
+        normalized = int(group_id)
+        if normalized <= 0:
+            raise ValueError("group_id must be positive")
+        return f"group:{normalized}:member-default"
 
     @staticmethod
     def group_enabled_key(group_id: int) -> str:

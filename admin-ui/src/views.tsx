@@ -34,6 +34,16 @@ import type { useControlPlane } from './useControlPlane'
 type Plane = ReturnType<typeof useControlPlane>
 type DetailOpener = (detail: DetailViewId) => void
 
+const REASONING_OPTIONS = [
+  { value: 'minimal', label: '最低' },
+  { value: 'low', label: '低' },
+  { value: 'medium', label: '中' },
+  { value: 'high', label: '高' },
+  { value: 'xhigh', label: '超高' },
+  { value: 'max', label: '最高' },
+  { value: 'none', label: '关闭推理' },
+]
+
 function rows(value: unknown): any[] {
   return Array.isArray(value) ? value : []
 }
@@ -122,12 +132,14 @@ export function GroupsView({ plane }: { plane: Plane }) {
   ]
   const setGroupModel = (groupId: number, profile: string) => plane.mutate('groups', `/group-models/${groupId}/default`, 'PUT', { profile: profile || null }, ['groups', 'overview'])
   const setUserModel = (groupId: number, userId: number, profile: string) => plane.mutate('groups', `/group-models/${groupId}/users/${userId}`, 'PUT', { profile: profile || null }, ['groups', 'overview'])
+  const setGroupEffort = (groupId: number, effort: string) => plane.mutate('groups', `/group-models/${groupId}/reasoning-effort`, 'PUT', { effort: effort || null }, ['groups', 'overview'])
+  const setUserEffort = (groupId: number, userId: number, effort: string) => plane.mutate('groups', `/group-models/${groupId}/users/${userId}/reasoning-effort`, 'PUT', { effort: effort || null }, ['groups', 'overview'])
   return (
     <>
       <PageHeader title="模型、群与用户" description="统一调配群友模型，同时保留管理员个人配置" action={<RefreshButton loading={plane.loading.has('groups')} onClick={() => void plane.refresh('groups')} />} />
       <Section title="可用模型" description="密钥只在服务端使用，控制台不会返回凭据">
         <div className="model-strip">
-          {profiles.map((profile) => <div className="model-item" key={profile.name}><div><strong>{profile.name}</strong><code>{profile.model}</code></div><StatusBadge value={profile.configured ? 'configured' : 'unconfigured'} label={profile.configured ? '可用' : '未配置'} /></div>)}
+          {profiles.map((profile) => <div className="model-item" key={profile.name}><div><strong>{profile.name}</strong><code>{profile.model}</code><small>{profile.supports_reasoning_effort ? `推理档位 · ${profile.reasoning_effort || '服务端默认'}` : '不支持推理档位'}</small></div><StatusBadge value={profile.configured ? 'configured' : 'unconfigured'} label={profile.configured ? '可用' : '未配置'} /></div>)}
         </div>
       </Section>
       <div className="group-list">
@@ -142,10 +154,11 @@ export function GroupsView({ plane }: { plane: Plane }) {
             </div>
             <div className="control-row">
               <label><span>其他群友统一模型</span><DraftSelect ariaLabel={`群 ${group.group_id} 统一模型`} value={group.dynamic_group_profile ?? ''} options={options} onCommit={(value) => setGroupModel(group.group_id, value)} /></label>
-              <span className="source-note">来源：{group.group_default_source}</span>
+              <label><span>其他群友统一推理强度</span><DraftSelect ariaLabel={`群 ${group.group_id} 统一推理强度`} value={group.member_reasoning_effort ?? ''} options={[{ value: '', label: '跟随各自模型默认' }, ...REASONING_OPTIONS]} onCommit={(value) => setGroupEffort(group.group_id, value)} /></label>
+              <span className="source-note">模型来源：{group.group_default_source}</span>
             </div>
-            <MemberTable title="我自己" members={rows(group.admins)} groupId={group.group_id} options={options} onCommit={setUserModel} />
-            <MemberTable title="其他群友" members={rows(group.members)} groupId={group.group_id} options={options} onCommit={setUserModel} collapsed />
+            <MemberTable title="我自己" members={rows(group.admins)} groupId={group.group_id} options={options} onModelCommit={setUserModel} onEffortCommit={setUserEffort} adminLane />
+            <MemberTable title="其他群友" members={rows(group.members)} groupId={group.group_id} options={options} onModelCommit={setUserModel} onEffortCommit={setUserEffort} collapsed />
           </section>
         ))}
         {!groups.length && <EmptyState>还没有发现任何群</EmptyState>}
@@ -154,13 +167,13 @@ export function GroupsView({ plane }: { plane: Plane }) {
   )
 }
 
-function MemberTable({ title, members, groupId, options, onCommit, collapsed = false }: { title: string; members: any[]; groupId: number; options: Array<{ value: string; label: string }>; onCommit: (groupId: number, userId: number, value: string) => Promise<unknown>; collapsed?: boolean }) {
+function MemberTable({ title, members, groupId, options, onModelCommit, onEffortCommit, collapsed = false, adminLane = false }: { title: string; members: any[]; groupId: number; options: Array<{ value: string; label: string }>; onModelCommit: (groupId: number, userId: number, value: string) => Promise<unknown>; onEffortCommit: (groupId: number, userId: number, value: string) => Promise<unknown>; collapsed?: boolean; adminLane?: boolean }) {
   return (
     <details className="member-panel" open={!collapsed}>
       <summary>{title}<span>{members.length} 人</span></summary>
       <DataTable>
-        <thead><tr><th>用户</th><th>QQ</th><th>个人模型</th><th>当前生效</th></tr></thead>
-        <tbody>{members.map((member) => <tr key={member.user_id}><td><strong>{member.display_name || member.nickname || `QQ ${member.user_id}`}</strong></td><td><code>{member.user_id}</code></td><td><DraftSelect ariaLabel={`${member.user_id} 个人模型`} value={member.explicit_profile ?? ''} options={[{ value: '', label: '跟随群统一模型' }, ...options.filter((item) => item.value)]} onCommit={(value) => onCommit(groupId, member.user_id, value)} /></td><td><StatusBadge value="active" label={member.effective_profile} /></td></tr>)}</tbody>
+        <thead><tr><th>用户</th><th>QQ</th><th>个人模型</th><th>推理强度</th><th>当前生效</th></tr></thead>
+        <tbody>{members.map((member) => <tr key={member.user_id}><td><strong>{member.display_name || member.nickname || `QQ ${member.user_id}`}</strong></td><td><code>{member.user_id}</code></td><td><DraftSelect ariaLabel={`${member.user_id} 个人模型`} value={member.explicit_profile ?? ''} options={[{ value: '', label: '跟随群统一模型' }, ...options.filter((item) => item.value)]} onCommit={(value) => onModelCommit(groupId, member.user_id, value)} /></td><td><DraftSelect ariaLabel={`${member.user_id} 推理强度`} value={member.explicit_reasoning_effort ?? ''} options={[{ value: '', label: adminLane ? '跟随模型默认' : '跟随群统一强度' }, ...REASONING_OPTIONS]} disabled={!member.supports_reasoning_effort} onCommit={(value) => onEffortCommit(groupId, member.user_id, value)} /></td><td><StatusBadge value="active" label={member.effective_profile} /><small className="cell-sub">{member.supports_reasoning_effort ? `推理：${member.effective_reasoning_effort || '服务端默认'}` : '推理：不支持档位'}</small></td></tr>)}</tbody>
       </DataTable>
       {!members.length && <EmptyState>暂无已观察到的用户</EmptyState>}
     </details>
@@ -319,7 +332,7 @@ const HELP_SECTIONS = [
   {
     title: '配置与内容',
     items: [
-      ['模型与群友', '群开关决定机器人是否处理该群消息；“其他群友统一模型”设置默认模型，“我自己”和成员详情可覆盖到个人。下拉修改会立即提交并留下审计记录。'],
+      ['模型与群友', '群开关决定机器人是否处理该群消息；“其他群友统一模型”和“统一推理强度”只作用于普通群友，不会覆盖“我自己”。管理员和成员详情可分别设置个人模型与推理强度；选择“跟随”会清除个人覆盖。所有修改立即生效并写入审计。'],
       ['工具权限', '开关决定下一轮 Agent 能否看到该工具。风险、幂等、副作用和超时由宿主执行器强制控制；关闭后不会中断已经开始的调用。'],
       ['媒体审核', '审核识图 worker 生成的表情候选：勾号批准发送，时钟保留待审，叉号拒绝。普通图片不长期保存；分享内容区展示各平台帖子与视频解析状态。'],
       ['审计记录', '查看谁在何时修改了哪个资源及版本。若提交时版本已经过期，控制台会拒绝覆盖并自动拉取最新版。'],

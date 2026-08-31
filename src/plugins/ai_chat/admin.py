@@ -23,6 +23,7 @@ from .admin_control import (
 )
 from .admin_dashboard import ADMIN_FAVICON_SVG, admin_asset_path, dashboard_html
 from .conversation_scope import ConversationScope
+from .model_catalog import SUPPORTED_REASONING_EFFORTS
 from .tool_policy import (
     TOOL_POLICIES,
     admin_tool_manifest,
@@ -48,6 +49,7 @@ class AdminServices:
     model_catalog: Any = None
     llm_gateway: Any = None
     model_preferences: Any = None
+    reasoning_preferences: Any = None
     user_profiles: Any = None
     message_ledger: Any = None
     settings: Any = None
@@ -71,6 +73,10 @@ class AdminMutationContext:
 
 class ModelSelectionRequest(BaseModel):
     profile: str | None = None
+
+
+class ReasoningEffortRequest(BaseModel):
+    effort: str | None = None
 
 
 class GroupEnabledRequest(BaseModel):
@@ -727,6 +733,7 @@ def register_admin(
             _group_model_overview(
                 services.model_catalog,
                 services.model_preferences,
+                services.reasoning_preferences,
                 services.settings,
                 services.message_ledger,
                 services.user_profiles,
@@ -894,6 +901,90 @@ def register_admin(
             group_id=group_id,
             user_id=user_id,
             profile=profile.name if profile is not None else None,
+        )
+
+    @router.put("/api/group-models/{group_id}/reasoning-effort")
+    async def set_group_reasoning_effort(
+        group_id: int,
+        selection: ReasoningEffortRequest,
+        mutation_info: AdminMutationContext = Depends(mutation_context),
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
+        authorize(authorization)
+        if group_id <= 0:
+            raise HTTPException(status_code=422, detail="群号必须是正整数")
+        preferences = services.reasoning_preferences
+        if preferences is None:
+            raise HTTPException(status_code=503, detail="推理强度存储不可用")
+        effort = _admin_reasoning_effort(selection.effort)
+
+        def update_group_effort(_version: int) -> dict[str, object]:
+            if effort is None:
+                preferences.clear_group_member_default(group_id)
+            else:
+                preferences.set_group_member_default(group_id, effort)
+            return {"effort": effort}
+
+        before = preferences.get_group_member_default(group_id)
+        result = mutate(
+            mutation_info,
+            "groups",
+            action="group.reasoning-effort.set",
+            target=str(group_id),
+            before={"effort": before},
+            operation=update_group_effort,
+        )
+        event_broker.publish("groups", "overview")
+        return mutation_payload(
+            result,
+            scope="group_members",
+            group_id=group_id,
+            effort=effort,
+        )
+
+    @router.put(
+        "/api/group-models/{group_id}/users/{user_id}/reasoning-effort"
+    )
+    async def set_group_user_reasoning_effort(
+        group_id: int,
+        user_id: int,
+        selection: ReasoningEffortRequest,
+        mutation_info: AdminMutationContext = Depends(mutation_context),
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
+        authorize(authorization)
+        if group_id <= 0 or user_id <= 0:
+            raise HTTPException(status_code=422, detail="群号和 QQ 号必须是正整数")
+        preferences = services.reasoning_preferences
+        if preferences is None:
+            raise HTTPException(status_code=503, detail="推理强度存储不可用")
+        effort = _admin_reasoning_effort(selection.effort)
+        conversation_id = f"group:{group_id}:user:{user_id}"
+
+        def update_user_effort(_version: int) -> dict[str, object]:
+            if effort is None:
+                preferences.clear(conversation_id)
+            else:
+                preferences.set(conversation_id, effort)
+            return {"effort": effort}
+
+        result = mutate(
+            mutation_info,
+            "groups",
+            action="group.user-reasoning-effort.set",
+            target=f"{group_id}:{user_id}",
+            before={
+                "effort": _explicit_preference(preferences, conversation_id)
+            },
+            operation=update_user_effort,
+        )
+        event_broker.publish("groups", "overview")
+        return mutation_payload(
+            result,
+            scope="group_user",
+            group_id=group_id,
+            user_id=user_id,
+            effort=effort,
         )
 
     @router.get("/api/media")
@@ -1748,6 +1839,9 @@ def _model_overview(
                 "protocol": profile.protocol,
                 "model": profile.model,
                 "configured": profile.configured,
+                "reasoning_effort": profile.reasoning_effort or None,
+                "supports_reasoning_effort": profile.provider
+                in {"openai", "cliproxy"},
                 "fallback_profiles": list(profile.fallback_profiles),
                 "health": health.get(
                     profile.name,
@@ -1782,6 +1876,22 @@ def _admin_model_profile(catalog: Any, requested: str | None) -> Any:
     if not profile.configured:
         raise HTTPException(status_code=409, detail="这个模型还没有配置可用的密钥")
     return profile
+
+
+def _admin_reasoning_effort(requested: str | None) -> str | None:
+    normalized = str(requested or "").strip().lower()
+    if not normalized:
+        return None
+    if normalized not in SUPPORTED_REASONING_EFFORTS:
+        raise HTTPException(status_code=422, detail="没有这个推理强度")
+    return normalized
+
+
+def _explicit_preference(preferences: Any, key: str) -> str | None:
+    getter = getattr(preferences, "get_explicit", None)
+    if callable(getter):
+        return getter(key)
+    return dict(preferences.items()).get(key)
 
 
 def _preserve_admin_model_selections(
@@ -1824,11 +1934,15 @@ _GROUP_CONVERSATION_PATTERN = re.compile(r"^group:(\d+):user:(\d+)$")
 _GROUP_SETTING_PATTERN = re.compile(
     r"^group:(\d+):(?:default|enabled|vision-auto-describe)$"
 )
+_GROUP_MEMBER_REASONING_PATTERN = re.compile(
+    r"^group:(\d+):member-default$"
+)
 
 
 def _group_model_overview(
     catalog: Any,
     preferences: Any,
+    reasoning_preferences: Any,
     settings: Any,
     message_ledger: Any,
     user_profiles: Any = None,
@@ -1890,6 +2004,34 @@ def _group_model_overview(
             "recognized": recognized,
         }
 
+    reasoning_by_group: dict[int, dict[int, str]] = {}
+    member_effort_by_group: dict[int, str] = {}
+    reasoning_items = (
+        reasoning_preferences.items()
+        if reasoning_preferences is not None
+        else []
+    )
+    for conversation_id, stored_effort in reasoning_items:
+        normalized_effort = str(stored_effort).strip().lower()
+        if normalized_effort not in SUPPORTED_REASONING_EFFORTS:
+            continue
+        match = _GROUP_CONVERSATION_PATTERN.fullmatch(str(conversation_id))
+        if match is not None:
+            group_id = int(match.group(1))
+            user_id = int(match.group(2))
+            group_ids.add(group_id)
+            reasoning_by_group.setdefault(group_id, {})[user_id] = (
+                normalized_effort
+            )
+            continue
+        default_match = _GROUP_MEMBER_REASONING_PATTERN.fullmatch(
+            str(conversation_id)
+        )
+        if default_match is not None:
+            group_id = int(default_match.group(1))
+            group_ids.add(group_id)
+            member_effort_by_group[group_id] = normalized_effort
+
     rows: list[dict[str, object]] = []
     admin_user_ids = set(
         getattr(settings, "admin_user_ids", set()) or set()
@@ -1941,6 +2083,7 @@ def _group_model_overview(
             dynamic_group_default = preferences.get_group_default(group_id)
         stored_group_default = dynamic_group_default or deployed_group_default
         group_default = catalog.resolve_preference(stored_group_default)
+        member_reasoning_effort = member_effort_by_group.get(group_id)
 
         observed_members: list[dict[str, object]] = []
         if user_profiles is not None:
@@ -1953,7 +2096,11 @@ def _group_model_overview(
             for item in observed_members
             if int(item.get("user_id", 0)) > 0
         }
-        for user_id in {*admin_user_ids, *overrides_by_group.get(group_id, {})}:
+        for user_id in {
+            *admin_user_ids,
+            *overrides_by_group.get(group_id, {}),
+            *reasoning_by_group.get(group_id, {}),
+        }:
             members_by_id.setdefault(
                 int(user_id),
                 {
@@ -1973,6 +2120,33 @@ def _group_model_overview(
                 if explicit is not None
                 else group_default
             )
+            supports_reasoning_effort = effective.provider in {
+                "openai",
+                "cliproxy",
+            }
+            explicit_effort = reasoning_by_group.get(group_id, {}).get(user_id)
+            inherited_effort = (
+                None
+                if user_id in admin_user_ids
+                else member_reasoning_effort
+            )
+            effective_effort = (
+                explicit_effort
+                or inherited_effort
+                or effective.reasoning_effort
+                or None
+            )
+            effort_source = (
+                "unsupported"
+                if not supports_reasoning_effort
+                else "user"
+                if explicit_effort is not None
+                else "group"
+                if inherited_effort is not None
+                else "model"
+                if effective.reasoning_effort
+                else "server"
+            )
             classified.append(
                 {
                     **member,
@@ -1983,6 +2157,12 @@ def _group_model_overview(
                     "effective_profile": effective.name,
                     "effective_provider": effective.provider,
                     "effective_model": effective.model,
+                    "supports_reasoning_effort": supports_reasoning_effort,
+                    "explicit_reasoning_effort": explicit_effort,
+                    "effective_reasoning_effort": (
+                        effective_effort if supports_reasoning_effort else None
+                    ),
+                    "reasoning_effort_source": effort_source,
                 }
             )
         classified.sort(
@@ -2018,6 +2198,7 @@ def _group_model_overview(
                     if deployed_group_default is not None
                     else "global"
                 ),
+                "member_reasoning_effort": member_reasoning_effort,
                 "overrides": overrides,
                 "admins": [item for item in classified if item["is_admin"]],
                 "members": [item for item in classified if not item["is_admin"]],

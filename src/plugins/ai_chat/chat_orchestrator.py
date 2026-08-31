@@ -444,12 +444,27 @@ def _group_default_model_preference(conversation_id: str) -> str | None:
     )
 
 
+def _group_member_reasoning_preference(
+    conversation_id: str,
+) -> str | None:
+    match = _GROUP_CONVERSATION_ID_PATTERN.fullmatch(conversation_id)
+    if match is None:
+        return None
+    group_id = int(match.group(1))
+    user_id = int(match.group(2))
+    if user_id in set(getattr(settings, "admin_user_ids", set()) or set()):
+        return None
+    return reasoning_preferences.get_group_member_default(group_id)
+
+
 def _preferred_model_profile(conversation_id: str) -> ModelProfile:
     preference = model_preferences.get_explicit(conversation_id)
     if preference is None:
         preference = _group_default_model_preference(conversation_id)
     profile = model_profiles.resolve_preference(preference)
     effort = reasoning_preferences.get_explicit(conversation_id)
+    if effort is None:
+        effort = _group_member_reasoning_preference(conversation_id)
     if effort is not None and effort not in SUPPORTED_REASONING_EFFORTS:
         reasoning_preferences.clear(conversation_id)
         effort = None

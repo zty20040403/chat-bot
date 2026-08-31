@@ -120,6 +120,7 @@ td strong { font-weight: 650; }
 .model-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border-right: 1px solid var(--border); }
 .model-item div { min-width: 0; display: grid; gap: 4px; }
 .model-item code { color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
+.model-item small { color: var(--muted); font-size: 9px; }
 .group-list { display: grid; gap: 18px; }
 .group-card { background: var(--surface); border: 1px solid var(--border); padding: 18px; }
 .group-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; padding-bottom: 15px; border-bottom: 1px solid var(--border); }
@@ -134,7 +135,7 @@ td strong { font-weight: 650; }
 .toggle input:checked + span::after { transform: translateX(13px); }
 .toggle b { font-size: 10px; font-weight: 600; white-space: nowrap; }
 .control-row { display: flex; align-items: flex-end; gap: 12px; padding: 14px 0; }
-.control-row label { min-width: min(360px, 100%); display: grid; gap: 6px; color: var(--muted); font-size: 10px; }
+.control-row label { min-width: min(300px, 100%); display: grid; gap: 6px; color: var(--muted); font-size: 10px; }
 select, input { min-height: 34px; border: 1px solid var(--border-strong); border-radius: 6px; background: #fff; color: var(--foreground); padding: 6px 9px; font-size: 12px; outline: none; }
 select:focus, input:focus { border-color: var(--blue); box-shadow: 0 0 0 2px rgba(37,99,235,.12); }
 .source-note { color: var(--muted); font-size: 10px; padding-bottom: 8px; }

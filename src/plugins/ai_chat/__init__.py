@@ -230,7 +230,7 @@ from . import onebot_delivery as _onebot_delivery
 SEND_RETRY_DELAY_SECONDS = 2.0
 SEND_RETRY_MAX_CHARS = 800
 TURN_PROMPT_VERSION = "qqbot-turn-v12"
-BOT_VERSION = "0.9.4"
+BOT_VERSION = "0.9.5"
 EMPTY_MENTION_FOLLOW_UP = "你觉得呢"
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 proactive_check_gate = ProactiveCheckGate()
@@ -357,7 +357,7 @@ register_http_surfaces(
 
 
 TrackedAIResult = ChatTurnResult
-_GROUP_CONVERSATION_ID_PATTERN = re.compile(r"^group:(\d+):user:\d+$")
+_GROUP_CONVERSATION_ID_PATTERN = re.compile(r"^group:(\d+):user:(\d+)$")
 
 
 _IMPLEMENTATION_MODULES = (

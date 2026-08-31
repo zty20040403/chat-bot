@@ -655,10 +655,17 @@ async def handle_effort_command(
     requested = aliases.get(requested, requested)
     valid = {"minimal", "low", "medium", "high", "xhigh", "max", "none"}
     explicit = reasoning_preferences.get_explicit(conversation_id)
+    group_default = _group_member_reasoning_preference(conversation_id)
 
     if not requested:
         current = profile.reasoning_effort or "服务端默认"
-        source = "当前会话覆盖" if explicit else "模型配置"
+        source = (
+            "当前会话覆盖"
+            if explicit
+            else "群友统一配置"
+            if group_default
+            else "模型配置"
+        )
         support = (
             "支持会话级设置"
             if profile.provider in {"openai", "cliproxy"}
@@ -684,7 +691,7 @@ async def handle_effort_command(
             effort_command,
             _reply_message(
                 event,
-                "已恢复模型默认推理强度："
+                "已恢复继承的推理强度："
                 f"{restored.reasoning_effort or '服务端默认'}。",
             ),
         )
