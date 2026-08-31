@@ -6,8 +6,13 @@ from src.bot_storage import StateSource, open_json_state
 
 
 class ModelPreferenceStore:
-    def __init__(self, state_path: StateSource) -> None:
-        self._state = open_json_state(state_path, "model_preferences")
+    def __init__(
+        self,
+        state_path: StateSource,
+        *,
+        namespace: str = "model_preferences",
+    ) -> None:
+        self._state = open_json_state(state_path, namespace)
         self._lock = threading.RLock()
         self._models = self._load()
 

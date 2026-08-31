@@ -108,7 +108,11 @@ from .historian import (
 from .ledger import MessageLedger
 from .long_term_memory import LongTermMemoryError, MemoryEntry
 from .media_library import choose_sticker_candidate, requests_sticker_variation
-from .model_catalog import ModelCatalogError, ModelProfile
+from .model_catalog import (
+    ModelCatalogError,
+    ModelProfile,
+    SUPPORTED_REASONING_EFFORTS,
+)
 from .message_ir import MessageBody, TextNode, render_fallback_text
 from .observability import observed_ai_turn, telemetry
 from .onebot_codec import (
@@ -226,7 +230,7 @@ from . import onebot_delivery as _onebot_delivery
 SEND_RETRY_DELAY_SECONDS = 2.0
 SEND_RETRY_MAX_CHARS = 800
 TURN_PROMPT_VERSION = "qqbot-turn-v12"
-BOT_VERSION = "0.9.3"
+BOT_VERSION = "0.9.4"
 EMPTY_MENTION_FOLLOW_UP = "你觉得呢"
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 proactive_check_gate = ProactiveCheckGate()

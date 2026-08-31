@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import json
 import unittest
 from pathlib import Path
@@ -17,6 +18,18 @@ from src.plugins.ai_chat.model_preferences import ModelPreferenceStore
 
 
 class ModelSelectionTests(unittest.TestCase):
+    def test_preference_stores_can_use_independent_postgres_namespaces(
+        self,
+    ) -> None:
+        module = importlib.import_module(
+            "src.plugins.ai_chat.model_preferences"
+        )
+        path = Path("reasoning.json")
+        state = SimpleNamespace(load=lambda: None, save=lambda payload: None)
+        with patch.object(module, "open_json_state", return_value=state) as opener:
+            ModelPreferenceStore(path, namespace="reasoning_preferences")
+        opener.assert_called_once_with(path, "reasoning_preferences")
+
     def test_group_enabled_override_is_persistent(self) -> None:
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "models.json"
@@ -144,6 +157,38 @@ class ModelSelectionTests(unittest.TestCase):
 
         self.assertEqual(selected.name, "main")
         self.assertNotIn("private-key", repr(selected))
+
+    def test_invalid_reasoning_preference_is_cleared_instead_of_crashing(
+        self,
+    ) -> None:
+        catalog = ModelCatalog.from_json(
+            json.dumps(
+                {
+                    "main": {
+                        "provider": "cliproxy",
+                        "model": "gpt-test",
+                        "api_key_required": False,
+                    }
+                }
+            ),
+            default_profile="main",
+            environ={},
+        )
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            models = ModelPreferenceStore(root / "models.json")
+            reasoning = ModelPreferenceStore(root / "reasoning.json")
+            reasoning.set("private:10", "gpt-5.6-luna")
+            with (
+                patch.object(ai_chat, "model_profiles", catalog),
+                patch.object(ai_chat, "model_preferences", models),
+                patch.object(ai_chat, "reasoning_preferences", reasoning),
+            ):
+                selected = ai_chat._preferred_model_profile("private:10")
+
+        self.assertEqual(selected.name, "main")
+        self.assertEqual(selected.reasoning_effort, "")
+        self.assertIsNone(reasoning.get_explicit("private:10"))
 
 
 if __name__ == "__main__":

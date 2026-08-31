@@ -39,6 +39,7 @@ from .deepseek import (
 )
 from .model_catalog import (
     ModelProfile,
+    SUPPORTED_REASONING_EFFORTS,
 )
 from .message_ir import (
     render_fallback_text,
@@ -449,6 +450,9 @@ def _preferred_model_profile(conversation_id: str) -> ModelProfile:
         preference = _group_default_model_preference(conversation_id)
     profile = model_profiles.resolve_preference(preference)
     effort = reasoning_preferences.get_explicit(conversation_id)
+    if effort is not None and effort not in SUPPORTED_REASONING_EFFORTS:
+        reasoning_preferences.clear(conversation_id)
+        effort = None
     if profile.provider not in {"openai", "cliproxy"}:
         return profile.with_reasoning_effort(None)
     return profile.with_reasoning_effort(effort or profile.reasoning_effort)

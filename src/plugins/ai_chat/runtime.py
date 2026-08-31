@@ -259,7 +259,8 @@ def build_app_context(
         store_source("model_preferences.json")
     )
     reasoning_preferences = ModelPreferenceStore(
-        store_source("reasoning_preferences.json")
+        store_source("reasoning_preferences.json"),
+        namespace="reasoning_preferences",
     )
     model_catalog = ModelCatalog.from_settings(settings)
     for group_id, profile_name in settings.group_model_profiles.items():
