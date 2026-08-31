@@ -8,6 +8,7 @@ import weakref
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 from nonebot import logger
@@ -33,6 +34,7 @@ class DeepVideoAnalyzer:
         *,
         whisper_model_path: str,
         ffmpeg_path: str = "ffmpeg",
+        ffprobe_path: str = "ffprobe",
         whisper_path: str = "whisper-cli",
         frame_count: int = 12,
         max_download_bytes: int = 1024 * 1024 * 1024,
@@ -45,6 +47,7 @@ class DeepVideoAnalyzer:
         self.vision_worker = vision_worker
         self.whisper_model_path = str(whisper_model_path).strip()
         self.ffmpeg_path = str(ffmpeg_path).strip() or "ffmpeg"
+        self.ffprobe_path = str(ffprobe_path).strip() or "ffprobe"
         self.whisper_path = str(whisper_path).strip() or "whisper-cli"
         self.frame_count = min(max(int(frame_count), 4), 12)
         self.max_download_bytes = max(int(max_download_bytes), 10 * 1024 * 1024)
@@ -98,6 +101,64 @@ class DeepVideoAnalyzer:
                 result,
             )
             return result, False
+
+    async def analyze_qq_video(
+        self,
+        source_url: str,
+        *,
+        question: str = "",
+        progress: ProgressCallback | None = None,
+    ) -> dict[str, object]:
+        if not self._is_allowed_qq_media_url(source_url):
+            raise DeepVideoAnalysisError("QQ 视频地址无效或不在允许的媒体域名内。")
+        await self._notify(progress, "正在下载 QQ 视频并检查时长。")
+        with TemporaryDirectory(prefix="qq-video-", dir=self.cache_root) as directory:
+            root = Path(directory)
+            video_path = root / "video.bin"
+            await self._download_qq_media(source_url, video_path)
+            duration = await self._probe_duration(video_path)
+            if duration <= 0:
+                raise DeepVideoAnalysisError("没有读取到有效视频时长。")
+            if duration > self.max_duration_seconds:
+                raise DeepVideoAnalysisError(
+                    f"视频超过分析上限 {self.max_duration_seconds // 60} 分钟。"
+                )
+            await self._notify(progress, "视频已下载，正在抽取关键画面并转写音轨。")
+            frames, transcript = await asyncio.gather(
+                self._extract_frames(video_path, root, duration),
+                self._transcribe_audio(video_path, root),
+            )
+            await self._notify(progress, "画面和音轨已经准备好，正在综合评价。")
+            visual = await self.vision_worker.analyze_video_frames(
+                frames,
+                context=json.dumps(
+                    {
+                        "source": "QQ 原生视频",
+                        "duration_seconds": duration,
+                    },
+                    ensure_ascii=False,
+                ),
+                transcript=transcript,
+                question=question,
+            )
+        return {
+            "mode": "deep",
+            "source": "qq_video",
+            "duration_seconds": duration,
+            "frame_count": len(frames),
+            "transcript": transcript[:12000],
+            "visual": visual,
+            "analyzed_at": int(time.time()),
+            "limitations": [
+                "画面结论来自均匀抽取的关键帧，不等于逐帧检查。",
+                (
+                    "音轨已由本地 Whisper 转写，可能存在专有名词误识别。"
+                    if transcript
+                    else "本次没有获得可用音轨转写。"
+                ),
+                "QQ 原视频和分析临时文件已在本轮结束后删除。",
+            ],
+        }
 
     async def _analyze_uncached(
         self,
@@ -208,6 +269,70 @@ class DeepVideoAnalyzer:
         if not target.is_file() or target.stat().st_size <= 0:
             raise DeepVideoAnalysisError("B站媒体流为空。")
 
+    async def _download_qq_media(self, url: str, target: Path) -> None:
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (X11; Linux x86_64; rv:130.0) "
+                "Gecko/20100101 Firefox/130.0"
+            )
+        }
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(self.timeout_seconds),
+                follow_redirects=False,
+                headers=headers,
+            ) as client:
+                current_url = url
+                for redirect_count in range(6):
+                    if not self._is_allowed_qq_media_url(current_url):
+                        raise DeepVideoAnalysisError(
+                            "QQ 视频跳转到了不允许的媒体域名。"
+                        )
+                    async with client.stream("GET", current_url) as response:
+                        if response.is_redirect:
+                            location = response.headers.get("location", "").strip()
+                            if not location or redirect_count >= 5:
+                                raise DeepVideoAnalysisError("QQ 视频跳转地址无效。")
+                            current_url = urljoin(str(response.url), location)
+                            continue
+                        response.raise_for_status()
+                        expected = int(response.headers.get("content-length") or 0)
+                        if expected > self.max_download_bytes:
+                            raise DeepVideoAnalysisError("QQ 视频超过大小上限。")
+                        size = 0
+                        with target.open("wb") as output:
+                            async for chunk in response.aiter_bytes():
+                                size += len(chunk)
+                                if size > self.max_download_bytes:
+                                    raise DeepVideoAnalysisError(
+                                        "QQ 视频超过大小上限。"
+                                    )
+                                output.write(chunk)
+                        break
+                else:
+                    raise DeepVideoAnalysisError("QQ 视频跳转次数过多。")
+        except httpx.HTTPError as exc:
+            raise DeepVideoAnalysisError("下载 QQ 视频失败。") from exc
+        if not target.is_file() or target.stat().st_size <= 0:
+            raise DeepVideoAnalysisError("下载到的 QQ 视频为空。")
+
+    async def _probe_duration(self, video_path: Path) -> int:
+        output = await self._run_capture(
+            self.ffprobe_path,
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(video_path),
+            timeout=min(self.timeout_seconds, 60),
+        )
+        try:
+            return max(int(float(output.strip())), 0)
+        except ValueError as exc:
+            raise DeepVideoAnalysisError("无法读取视频时长。") from exc
+
     async def _extract_frames(
         self,
         video_path: Path,
@@ -291,6 +416,9 @@ class DeepVideoAnalyzer:
         )[:12000]
 
     async def _run(self, *command: str, timeout: int) -> None:
+        await self._run_capture(*command, timeout=timeout)
+
+    async def _run_capture(self, *command: str, timeout: int) -> str:
         try:
             process = await asyncio.create_subprocess_exec(
                 *command,
@@ -316,6 +444,7 @@ class DeepVideoAnalyzer:
             raise DeepVideoAnalysisError(
                 f"{command[0]} 执行失败：{detail or process.returncode}"
             )
+        return stdout.decode("utf-8", errors="replace")
 
     async def _notify(
         self,
@@ -330,9 +459,20 @@ class DeepVideoAnalyzer:
             logger.debug(f"Could not send deep video progress: {exc}")
 
     def _validate_runtime(self) -> None:
-        for executable in (self.ffmpeg_path, self.whisper_path):
+        for executable in (self.ffmpeg_path, self.ffprobe_path, self.whisper_path):
             if not shutil.which(executable):
                 raise DeepVideoAnalysisError(f"缺少运行程序：{executable}")
         model = Path(self.whisper_model_path)
         if not model.is_file():
             raise DeepVideoAnalysisError("Whisper 模型文件不存在。")
+
+    @staticmethod
+    def _is_allowed_qq_media_url(url: str) -> bool:
+        parsed = urlsplit(str(url).strip())
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return False
+        hostname = parsed.hostname.rstrip(".").lower()
+        return any(
+            hostname == suffix or hostname.endswith(f".{suffix}")
+            for suffix in ("qq.com", "qq.com.cn", "qpic.cn")
+        )

@@ -144,6 +144,10 @@ def _voice_cache_key(event: MessageEvent) -> str:
     return _image_cache_key(event)
 
 
+def _video_cache_key(event: MessageEvent) -> str:
+    return _image_cache_key(event)
+
+
 def _has_available_ocr_image(event: MessageEvent) -> bool:
     return bool(
         image_sources(event.original_message, max_images=1)

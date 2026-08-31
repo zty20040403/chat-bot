@@ -65,6 +65,7 @@ from .ai_tools import (
     UNPIN_MESSAGE_TOOL_NAME,
     USE_SKILL_TOOL_NAME,
     VIEW_IMAGE_TOOL_NAME,
+    VIEW_VIDEO_TOOL_NAME,
     WEB_SEARCH_TOOL_NAME,
     available_tools,
     force_tool,
@@ -190,6 +191,13 @@ from .voice import (
     transcribe_voice,
 )
 from .video_analysis import DeepVideoAnalysisError, DeepVideoAnalyzer
+from .video import (
+    VideoReference,
+    contains_video,
+    indexed_video_sources,
+    message_video_sources,
+    replied_video_message_id,
+)
 from .matchers import (
     ai,
     ai_reset,
@@ -230,7 +238,7 @@ from . import onebot_delivery as _onebot_delivery
 SEND_RETRY_DELAY_SECONDS = 2.0
 SEND_RETRY_MAX_CHARS = 800
 TURN_PROMPT_VERSION = "qqbot-turn-v12"
-BOT_VERSION = "0.9.6"
+BOT_VERSION = "0.9.7"
 EMPTY_MENTION_FOLLOW_UP = "你觉得呢"
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 proactive_check_gate = ProactiveCheckGate()
@@ -284,6 +292,7 @@ dream_service = app_context.dream_service
 turn_journal = app_context.turn_journal
 recent_images = app_context.recent_images
 recent_voices = app_context.recent_voices
+recent_videos = app_context.recent_videos
 reference_resolver = ReferenceResolver(graph_store=topic_graph_store)
 sandbox_manager = app_context.sandbox_manager
 browser_manager = app_context.browser_manager
@@ -400,12 +409,14 @@ if vision_worker is not None:
 onebot_ingest_adapter = OneBotIngestAdapter(
     group_enabled=_is_group_enabled, canonical_scope=_conversation_scope,
     image_cache_key=_image_cache_key, voice_cache_key=_voice_cache_key,
+    video_cache_key=_video_cache_key,
     ocr_max_images=settings.ocr_max_images, logger=logger,
     message_ledger=message_ledger, delivery_store=delivery_store,
     bridge_router=bridge_router, mirror_state=mirror_state,
     bridge_manager=bridge_manager, media_library=media_library,
     source_store=source_store, user_profiles=user_profiles,
     recent_images=recent_images, recent_voices=recent_voices,
+    recent_videos=recent_videos,
 )
 
 @driver.on_startup

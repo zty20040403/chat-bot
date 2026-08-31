@@ -30,6 +30,7 @@ from src.plugins.ai_chat.ai_tools import (
     SEND_QQ_FACE_TOOL_NAME,
     SEND_STICKER_TOOL_NAME,
     VIEW_IMAGE_TOOL_NAME,
+    VIEW_VIDEO_TOOL_NAME,
 )
 from src.plugins.ai_chat.adapters import OneBotIngestAdapter
 from src.plugins.ai_chat.context_pipeline import TurnContextPlan
@@ -74,6 +75,32 @@ def _private_image_event(user_id: int = 321) -> PrivateMessageEvent:
         user_id=user_id,
         message_type="private",
         message_id=655,
+        message=message,
+        original_message=message,
+        raw_message=str(message),
+        font=0,
+        sender={"user_id": user_id, "nickname": "Alice"},
+    )
+
+
+def _private_video_event(user_id: int = 321) -> PrivateMessageEvent:
+    message = Message(
+        [
+            MessageSegment(
+                "video",
+                {"url": "https://multimedia.nt.qq.com.cn/test.mp4"},
+            ),
+            MessageSegment.text("评价一下这个视频"),
+        ]
+    )
+    return PrivateMessageEvent(
+        time=1,
+        self_id=999,
+        post_type="message",
+        sub_type="friend",
+        user_id=user_id,
+        message_type="private",
+        message_id=656,
         message=message,
         original_message=message,
         raw_message=str(message),
@@ -384,6 +411,66 @@ class NaturalToolRoutingTests(unittest.IsolatedAsyncioTestCase):
             "private:321",
             ["https://multimedia.nt.qq.com.cn/test.jpg"],
         )
+
+    async def test_private_video_forces_video_tool(self) -> None:
+        captured: dict[str, object] = {}
+
+        async def fake_deepseek(
+            user_text,
+            history,
+            tools,
+            execute_tool,
+            **kwargs,
+        ) -> str:
+            del user_text, history, execute_tool
+            captured["tool_names"] = {
+                tool["function"]["name"] for tool in tools
+            }
+            captured.update(kwargs)
+            return "已经看完了"
+
+        import src.plugins.ai_chat as ai_chat
+
+        with (
+            patch.object(ai_chat, "video_analyzer", object()),
+            patch.object(ai_chat, "message_ledger", None),
+            patch.object(ai_chat, "pin_store", None),
+            patch.object(ai_chat, "source_store", None),
+            patch.object(ai_chat, "_current_long_term_memory", return_value=""),
+            patch.object(ai_chat, "ask_deepseek_with_tools", new=fake_deepseek),
+            patch.object(ai_chat.memory, "append_turn"),
+        ):
+            answer = await ai_chat._ask_ai(
+                AsyncMock(),
+                _private_video_event(),
+                "评价一下这个视频",
+                available_image_sources=[],
+            )
+
+        self.assertIn("已经看完了", answer)
+        self.assertIn(VIEW_VIDEO_TOOL_NAME, captured["tool_names"])
+        self.assertEqual(
+            captured["tool_choice"]["function"]["name"],
+            VIEW_VIDEO_TOOL_NAME,
+        )
+        self.assertIn("当前会话可用视频", captured["tool_context"])
+
+    async def test_private_video_is_recorded_for_follow_up_message(self) -> None:
+        recent_videos = Mock()
+        adapter = OneBotIngestAdapter(
+            group_enabled=lambda _group_id: True,
+            canonical_scope=Mock(),
+            image_cache_key=lambda event: f"private:{event.user_id}",
+            voice_cache_key=lambda event: f"private:{event.user_id}",
+            video_cache_key=lambda event: f"private:{event.user_id}",
+            ocr_max_images=2,
+            logger=Mock(),
+            recent_videos=recent_videos,
+        )
+
+        await adapter.observe_group_activity(_private_video_event())
+
+        recent_videos.record.assert_called_once_with("private:321", 656)
 
     async def test_natural_request_uses_auto_tool_choice(self) -> None:
         captured_tool_names: set[str] = set()

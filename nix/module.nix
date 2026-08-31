@@ -215,7 +215,7 @@ in {
     };
 
     videoDeep = {
-      enable = lib.mkEnableOption "temporary deep analysis of shared Bilibili videos";
+      enable = lib.mkEnableOption "temporary deep analysis of shared and QQ-native videos";
 
       whisperPackage = lib.mkOption {
         type = lib.types.package;
@@ -252,6 +252,12 @@ in {
         type = lib.types.ints.positive;
         default = 1800;
         description = "Timeout for media preparation and local transcription.";
+      };
+
+      recentSeconds = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 300;
+        description = "How long a sender's latest QQ video remains available for a follow-up request.";
       };
     };
 
@@ -391,6 +397,7 @@ in {
           AI_VIDEO_MAX_DOWNLOAD_MB = toString cfg.videoDeep.maxDownloadMB;
           AI_VIDEO_MAX_DURATION_MINUTES = toString cfg.videoDeep.maxDurationMinutes;
           AI_VIDEO_TIMEOUT_SECONDS = toString cfg.videoDeep.timeoutSeconds;
+          AI_VIDEO_RECENT_SECONDS = toString cfg.videoDeep.recentSeconds;
         }
         // lib.optionalAttrs (!cfg.videoDeep.enable) {
           AI_VIDEO_DEEP_ENABLED = "false";

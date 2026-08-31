@@ -165,6 +165,7 @@ class Settings:
     video_timeout_seconds: int
     video_whisper_threads: int
     video_cache_seconds: int
+    video_recent_seconds: int
     archive_enabled: bool
     archive_root: str
     archive_media_retention_days: int
@@ -522,6 +523,9 @@ class Settings:
             ),
             video_cache_seconds=max(
                 _get_int("AI_VIDEO_CACHE_SECONDS", 86400), 60
+            ),
+            video_recent_seconds=max(
+                _get_int("AI_VIDEO_RECENT_SECONDS", 300), 30
             ),
             archive_enabled=_get_bool("AI_ARCHIVE_ENABLED", False),
             archive_root=os.getenv("AI_ARCHIVE_ROOT", "").strip(),

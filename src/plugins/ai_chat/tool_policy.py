@@ -55,6 +55,7 @@ _READ_TOOLS = {
     "web_search",
     "read_image_text",
     "view_image",
+    "view_video",
     "find_images",
     "find_stickers",
     "transcribe_voice",
@@ -191,6 +192,13 @@ def _policy_registry() -> dict[str, ToolPolicy]:
         idempotency="pure",
         side_effects=("read", "download:remote-media"),
         timeout_seconds=3900.0,
+        max_identical_calls=1,
+    )
+    policies["view_video"] = ToolPolicy(
+        risk="low",
+        idempotency="pure",
+        side_effects=("read", "download:remote-media"),
+        timeout_seconds=1900.0,
         max_identical_calls=1,
     )
     policies["sandbox_create"] = ToolPolicy(

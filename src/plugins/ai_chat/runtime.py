@@ -61,6 +61,7 @@ from .tasks import RunningTaskRegistry
 from .storage.jobs import DurableJobStore
 from .turn_journal import TurnJournal
 from .voice import RecentVoiceStore
+from .video import RecentVideoStore
 from .vision_worker import VisionWorker
 from .workers.durable_jobs import DurableJobWorker
 
@@ -103,6 +104,7 @@ class AppContext:
     skill_registry: SkillRegistry
     recent_images: RecentImageStore
     recent_voices: RecentVoiceStore
+    recent_videos: RecentVideoStore
     sandbox_manager: DockerSandboxManager
     bridge_router: MirrorRouter
     message_ledger: MessageLedger | None = None
@@ -766,6 +768,7 @@ def build_app_context(
         skill_registry=SkillRegistry(project_root / "skills"),
         recent_images=RecentImageStore(settings.ocr_recent_image_seconds),
         recent_voices=RecentVoiceStore(settings.voice_recent_seconds),
+        recent_videos=RecentVideoStore(settings.video_recent_seconds),
         sandbox_manager=sandbox_manager,
         bridge_router=bridge_router,
         message_ledger=message_ledger,

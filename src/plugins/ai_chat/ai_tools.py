@@ -8,6 +8,7 @@ ToolChoice = Union[str, dict[str, Any]]
 WEB_SEARCH_TOOL_NAME = "web_search"
 READ_IMAGE_TEXT_TOOL_NAME = "read_image_text"
 VIEW_IMAGE_TOOL_NAME = "view_image"
+VIEW_VIDEO_TOOL_NAME = "view_video"
 FIND_STICKERS_TOOL_NAME = "find_stickers"
 TRANSCRIBE_VOICE_TOOL_NAME = "transcribe_voice"
 REPLY_WITH_VOICE_TOOL_NAME = "reply_with_voice"
@@ -132,6 +133,39 @@ VIEW_IMAGE_TOOL: ToolDefinition = {
                     "type": "string",
                     "maxLength": 2000,
                     "description": "需要视觉模型重点检查的问题。",
+                },
+            },
+            "additionalProperties": False,
+        },
+    },
+}
+
+VIEW_VIDEO_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": VIEW_VIDEO_TOOL_NAME,
+        "description": (
+            "读取并评价 QQ 当前消息、引用消息、指定消息，或该用户最近发送的原生视频。"
+            "宿主会下载临时副本、抽取关键帧、用本地 Whisper 转写音轨，再由视觉模型"
+            "综合分析；原视频和临时文件不会长期保存。用户要求看视频、总结视频、评价"
+            "视频或询问视频内容时必须调用。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "message_handle": {
+                    "type": "string",
+                    "pattern": "^msg#[1-9][0-9]*$",
+                    "description": "上下文中真实存在的视频消息句柄；未指定时省略。",
+                },
+                "segment_index": {
+                    "type": "integer",
+                    "minimum": 0,
+                },
+                "question": {
+                    "type": "string",
+                    "maxLength": 2000,
+                    "description": "希望重点评价或检查的问题。",
                 },
             },
             "additionalProperties": False,
@@ -1195,6 +1229,7 @@ def available_tools(
     include_group_tools: bool = False,
     include_reminder_tools: bool = False,
     include_media_tools: bool = False,
+    include_video_analysis: bool = False,
     include_source_tools: bool = False,
 ) -> list[ToolDefinition]:
     tools: list[ToolDefinition] = []
@@ -1204,6 +1239,8 @@ def available_tools(
         tools.append(READ_IMAGE_TEXT_TOOL)
     if include_media_tools:
         tools.extend([VIEW_IMAGE_TOOL, FIND_STICKERS_TOOL])
+    if include_video_analysis:
+        tools.append(VIEW_VIDEO_TOOL)
     if include_voice_transcription:
         tools.append(TRANSCRIBE_VOICE_TOOL)
     if include_voice_reply:

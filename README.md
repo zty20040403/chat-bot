@@ -42,7 +42,7 @@ Kennethbot 通过 NapCatQQ 接收 OneBot V11 事件，使用 NoneBot2 处理消�
     <td><strong>图片、表情与语音</strong><br>临时识图、全局安全表情库、QQ 语音转写与腾讯 SILK 语音回复。</td>
   </tr>
   <tr>
-    <td><strong>帖子与视频</strong><br>读取分享正文和评论；B 站视频支持抽帧、Whisper 转写与视觉综合分析。</td>
+    <td><strong>帖子与视频</strong><br>读取分享正文和评论；B 站链接与 QQ 原生视频支持抽帧、Whisper 转写与视觉综合分析。</td>
     <td><strong>代码沙箱</strong><br>在临时 Docker 容器中创建项目、安装依赖、测试、打包并把产物发回 QQ。</td>
   </tr>
   <tr>
@@ -100,7 +100,7 @@ OneBot 消息段并发送。
 | 浏览器 | Playwright、Chromium |
 | 沙箱 | Docker |
 | 图片理解 | 可配置视觉模型 profile |
-| 视频分析 | Bilibili 公共接口、FFmpeg、whisper.cpp |
+| 视频分析 | Bilibili 公共接口、QQ 媒体流、FFmpeg、whisper.cpp |
 | 语音 | Edge TTS、腾讯 SILK、NapCat 语音转写 |
 | 富文本 | CodeSnap、Pygments |
 | 部署 | Nix Flakes、NixOS、systemd |
@@ -144,7 +144,8 @@ bot/
         ├── delivery.py          # 幂等消息投递 Outbox
         ├── media_library.py     # 永久表情库
         ├── vision_worker.py     # 一次性图片理解任务
-        ├── video_analysis.py    # B 站视频深度分析
+        ├── video.py             # QQ 原生视频引用与短期缓存
+        ├── video_analysis.py    # B 站与 QQ 视频深度分析
         ├── sandbox.py           # Docker 任务沙箱
         ├── browser_tools.py     # 持久浏览器工具
         ├── output_planner.py    # 回复拆分与控制句柄
@@ -349,14 +350,15 @@ OpenAI/CLIProxy 模型可以按当前用户、当前会话覆盖推理强度：
 ## 帖子与视频
 
 `inspect_shared_content` 可以读取群里的 `source#`、`msg#` 或完整链接。普通模式读取页面元数据、
-正文和评论；B 站视频支持额外的深度模式：
+正文和评论；B 站链接以及 QQ 当前消息、引用消息或同一用户最近五分钟内发送的原生视频，
+都支持额外的深度模式：
 
-1. 获取低清 DASH 视频与音频流。
+1. 获取 B 站低清 DASH 流，或带签名的 QQ 原生视频媒体流。
 2. 临时下载媒体文件。
 3. 使用 FFmpeg 均匀抽取关键帧。
 4. 使用本地 whisper.cpp 转写音轨。
 5. 把关键帧、转写、标题和用户问题交给视觉模型综合分析。
-6. 删除临时媒体文件，只缓存有时效的分析结果。
+6. 删除临时媒体文件；B 站结果可短期缓存，QQ 原生视频不会长期保存。
 
 默认深度分析上限为 60 分钟、1GB 和 12 张关键帧。它不是逐帧审片，转写也可能误识别
 专有名词，回答中会保留这些限制说明。

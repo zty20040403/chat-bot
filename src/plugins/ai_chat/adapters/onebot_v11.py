@@ -17,6 +17,7 @@ from ..onebot_codec import (
     scope_from_event,
 )
 from ..voice import contains_voice
+from ..video import contains_video
 
 
 class AdapterLogger(Protocol):
@@ -33,6 +34,7 @@ class OneBotIngestAdapter:
         canonical_scope: Callable[[MessageEvent], Any],
         image_cache_key: Callable[[MessageEvent], str],
         voice_cache_key: Callable[[MessageEvent], str],
+        video_cache_key: Callable[[MessageEvent], str] | None = None,
         ocr_max_images: int,
         logger: AdapterLogger,
         message_ledger: Any = None,
@@ -45,11 +47,13 @@ class OneBotIngestAdapter:
         user_profiles: Any = None,
         recent_images: Any = None,
         recent_voices: Any = None,
+        recent_videos: Any = None,
     ) -> None:
         self.group_enabled = group_enabled
         self.canonical_scope = canonical_scope
         self.image_cache_key = image_cache_key
         self.voice_cache_key = voice_cache_key
+        self.video_cache_key = video_cache_key or voice_cache_key
         self.ocr_max_images = max(int(ocr_max_images), 1)
         self.logger = logger
         self.message_ledger = message_ledger
@@ -62,6 +66,7 @@ class OneBotIngestAdapter:
         self.user_profiles = user_profiles
         self.recent_images = recent_images
         self.recent_voices = recent_voices
+        self.recent_videos = recent_videos
 
     async def ingest(self, event: MessageEvent) -> None:
         if (
@@ -196,5 +201,10 @@ class OneBotIngestAdapter:
         if contains_voice(event.original_message) and self.recent_voices is not None:
             self.recent_voices.record(
                 self.voice_cache_key(event),
+                event.message_id,
+            )
+        if contains_video(event.original_message) and self.recent_videos is not None:
+            self.recent_videos.record(
+                self.video_cache_key(event),
                 event.message_id,
             )

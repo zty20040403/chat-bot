@@ -59,6 +59,7 @@ from .ai_tools import (
     UNPIN_MESSAGE_TOOL_NAME,
     USE_SKILL_TOOL_NAME,
     VIEW_IMAGE_TOOL_NAME,
+    VIEW_VIDEO_TOOL_NAME,
     WEB_SEARCH_TOOL_NAME,
     available_tools,
     force_tool,
@@ -136,6 +137,14 @@ from .voice import (
     synthesize_silk_voice,
     transcribe_voice,
 )
+from .video import (
+    VideoReference,
+    contains_video,
+    indexed_video_sources,
+    message_video_sources,
+    replied_video_message_id,
+)
+from .video_analysis import DeepVideoAnalysisError
 
 
 def _private_vision_required(
@@ -155,6 +164,77 @@ def _private_vision_required(
             flags=re.IGNORECASE,
         )
     )
+
+
+def _video_analysis_required(
+    event: MessageEvent,
+    user_text: str,
+    available_video: VideoReference | None,
+) -> bool:
+    if available_video is None:
+        return False
+    if contains_video(event.original_message):
+        return True
+    return bool(
+        re.search(
+            r"视频|录像|片段|看看|看下|分析|评价|锐评|总结|讲了什么|"
+            r"刚才|上面|这(?:个|段|是|啥|什么)|它|怎么(?:样|回事)|你觉得",
+            user_text,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+async def _resolve_video_reference(
+    bot: Bot,
+    event: MessageEvent,
+    *,
+    message_handle: str = "",
+    segment_index: int | None = None,
+) -> VideoReference | None:
+    scope = scope_from_event(event)
+    requested_handle = str(message_handle).strip()
+    if requested_handle:
+        canonical_id = _canonical_message_id(requested_handle)
+        target = (
+            message_ledger.get_in_scope(scope, canonical_id)
+            if message_ledger is not None and canonical_id is not None
+            else None
+        )
+        if target is None or not target.native_message_id:
+            raise ValueError("当前会话看不到这条视频消息。")
+        native_message_id = int(target.native_message_id)
+        source_items = await message_video_sources(bot, native_message_id)
+    else:
+        native_message_id = int(event.message_id)
+        source_items = indexed_video_sources(event.original_message)
+        if contains_video(event.original_message) and not source_items:
+            source_items = await message_video_sources(bot, native_message_id)
+        if not source_items:
+            replied_id = replied_video_message_id(event.original_message)
+            if replied_id is not None:
+                replied_sources = await message_video_sources(bot, replied_id)
+                if replied_sources:
+                    native_message_id = replied_id
+                    source_items = replied_sources
+        if not source_items:
+            recent_id = recent_videos.get(_video_cache_key(event))
+            if recent_id is not None:
+                recent_sources = await message_video_sources(bot, recent_id)
+                if recent_sources:
+                    native_message_id = recent_id
+                    source_items = recent_sources
+    if segment_index is None:
+        selected = source_items[0] if source_items else None
+    else:
+        selected = next(
+            (item for item in source_items if item[0] == int(segment_index)),
+            None,
+        )
+    if selected is None:
+        return None
+    selected_index, source_url = selected
+    return VideoReference(native_message_id, selected_index, source_url)
 
 
 async def _ask_ai(
@@ -254,6 +334,17 @@ async def _ask_ai(
         user_text,
         available_image_sources,
     )
+    available_video: VideoReference | None = None
+    if video_analyzer is not None:
+        try:
+            available_video = await _resolve_video_reference(bot, event)
+        except (ActionFailed, OSError, RuntimeError, ValueError) as exc:
+            logger.warning(f"Could not resolve QQ video for this turn: {exc}")
+    video_analysis_required = _video_analysis_required(
+        event,
+        user_text,
+        available_video,
+    )
 
     should_resolve_voice = (
         force_voice_transcription
@@ -299,6 +390,7 @@ async def _ask_ai(
         include_media_tools=(
             vision_worker is not None or media_library is not None
         ),
+        include_video_analysis=video_analyzer is not None,
         include_source_tools=source_store is not None,
     )
     current_tool_catalog_version = tool_catalog_fingerprint(tools)
@@ -1141,6 +1233,55 @@ async def _ask_ai(
                 ensure_ascii=False,
             )
 
+        if name == VIEW_VIDEO_TOOL_NAME:
+            if video_analyzer is None:
+                return json.dumps(
+                    {"ok": False, "error": "视频分析服务暂时不可用。"},
+                    ensure_ascii=False,
+                )
+            try:
+                raw_index = arguments.get("segment_index")
+                target_video = await _resolve_video_reference(
+                    bot,
+                    event,
+                    message_handle=str(arguments.get("message_handle") or ""),
+                    segment_index=(int(raw_index) if raw_index is not None else None),
+                )
+                if target_video is None:
+                    return json.dumps(
+                        {
+                            "ok": False,
+                            "error": (
+                                "没有找到可分析的视频，请发送视频、回复视频，"
+                                "或检查 message_handle 和 segment_index。"
+                            ),
+                        },
+                        ensure_ascii=False,
+                    )
+                result = await video_analyzer.analyze_qq_video(
+                    target_video.source_url,
+                    question=str(arguments.get("question") or "").strip(),
+                )
+            except (ActionFailed, OSError, RuntimeError, ValueError) as exc:
+                logger.warning(f"QQ video analysis tool failed: {exc}")
+                error = (
+                    str(exc)
+                    if isinstance(exc, (DeepVideoAnalysisError, ValueError))
+                    else "视频读取或分析失败，请稍后重试。"
+                )
+                return json.dumps(
+                    {"ok": False, "error": error},
+                    ensure_ascii=False,
+                )
+            return json.dumps(
+                {
+                    "ok": True,
+                    "segment_index": target_video.segment_index,
+                    **result,
+                },
+                ensure_ascii=False,
+            )
+
         if name == FIND_STICKERS_TOOL_NAME:
             if media_library is None:
                 return json.dumps(
@@ -1399,6 +1540,8 @@ async def _ask_ai(
     tool_choice = "auto"
     if force_search:
         tool_choice = force_tool(WEB_SEARCH_TOOL_NAME)
+    elif video_analysis_required:
+        tool_choice = force_tool(VIEW_VIDEO_TOOL_NAME)
     elif force_ocr or private_vision_required:
         tool_choice = force_tool(
             VIEW_IMAGE_TOOL_NAME
@@ -1441,6 +1584,14 @@ async def _ask_ai(
                 "view_image，不能只根据文字或旧上下文猜图。未指定句柄时不要编造 "
                 "msg#，直接省略 message_handle。"
             )
+        if available_video is not None:
+            context_parts.append(
+                "[当前会话可用视频]\n"
+                "当前消息、引用消息或该用户最近五分钟内有一段可读取的 QQ 视频。"
+                "用户要求查看、总结、评价视频，或使用‘这个/它/刚才那个’等指代时，"
+                "必须先调用 view_video；未指定句柄时不要编造 msg#，直接省略 "
+                "message_handle。"
+            )
         skill_index = skill_registry.prompt_index()
         if skill_index:
             context_parts.append(skill_index)
@@ -1465,7 +1616,10 @@ async def _ask_ai(
                 "近期原文里有自然延续的笑点时可以简短回扣，但不要解释梗、复读梗，"
                 "也不要为了显得会聊天而把已经结束的旧话题硬拉回来。"
                 "遇到 [image#消息.段] 且用户要求评价或分析这张图时，调用 "
-                "view_image 并完整照抄对应 msg# 句柄。旧聊天或旧任务细节按需先用 "
+                "view_image 并完整照抄对应 msg# 句柄。"
+                "遇到 [video#消息.段] 且用户要求查看、总结或评价视频时，调用 "
+                "view_video 并完整照抄对应 msg# 句柄。"
+                "旧聊天或旧任务细节按需先用 "
                 "context_search，再用 context_expand；不要猜测不存在的句柄。"
             )
         agent_tool_context = ""
