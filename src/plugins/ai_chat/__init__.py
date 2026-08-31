@@ -149,6 +149,7 @@ from .ocr import (
 )
 from .reminders import Reminder
 from .runtime import build_app_context
+from .sandbox import SandboxError
 from .application import ChatOrchestrator, ChatPorts, ChatTurnResult
 from .semantic_recall import (
     SemanticDocument,
@@ -194,7 +195,8 @@ from .matchers import (
     group_context_recorder,
     image_auto_description,
     image_ocr,
-    max_style_command,
+    control_command,
+    effort_command,
     memory_command,
     mention_ai,
     model_command,
@@ -204,6 +206,7 @@ from .matchers import (
     qq_face,
     sticker,
     sticker_status,
+    shell_command,
     task_status,
     task_stop,
     unpin_command,
@@ -223,7 +226,7 @@ from . import onebot_delivery as _onebot_delivery
 SEND_RETRY_DELAY_SECONDS = 2.0
 SEND_RETRY_MAX_CHARS = 800
 TURN_PROMPT_VERSION = "qqbot-turn-v12"
-BOT_VERSION = "0.9.2"
+BOT_VERSION = "0.9.3"
 EMPTY_MENTION_FOLLOW_UP = "你觉得呢"
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 proactive_check_gate = ProactiveCheckGate()
@@ -252,6 +255,7 @@ long_term_memory = app_context.long_term_memory
 running_tasks = app_context.running_tasks
 user_profiles = app_context.user_profiles
 model_preferences = app_context.model_preferences
+reasoning_preferences = app_context.reasoning_preferences
 model_profiles = app_context.model_catalog
 model_gateway = app_context.llm_gateway
 message_ledger = app_context.message_ledger
@@ -511,7 +515,9 @@ for _matcher, _handler in (
     (voice_transcription, handle_voice_transcription),
     (model_command, handle_model_command),
     (memory_command, handle_memory_command),
-    (max_style_command, handle_max_style_command),
+    (control_command, handle_control_command),
+    (effort_command, handle_effort_command),
+    (shell_command, handle_shell_command),
     (pin_command, handle_pin_command),
     (unpin_command, handle_unpin_command),
     (pins_command, handle_pins_command),

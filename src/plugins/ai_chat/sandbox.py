@@ -75,11 +75,20 @@ class DockerSandboxManager:
         self.max_file_bytes = max(0, int(max_file_bytes))
         self._active_execs: dict[str, SandboxExecutionActivity] = {}
         self._last_execs: dict[str, SandboxExecutionActivity] = {}
+        self._owner_create_locks: dict[str, asyncio.Lock] = {}
+        self._exec_locks: dict[str, asyncio.Lock] = {}
 
-    async def create(self, owner: str, runtime: str = "python") -> dict[str, str]:
+    async def create(
+        self,
+        owner: str,
+        runtime: str = "python",
+        *,
+        purpose: str = "task",
+    ) -> dict[str, str]:
         image = self.image or RUNTIME_IMAGES.get(runtime)
         if image is None:
             raise SandboxError("不支持的运行环境。")
+        normalized_purpose = "shell" if purpose == "shell" else "task"
 
         owner_hash = self._owner_hash(owner)
         owner_sandboxes = await self.list(owner)
@@ -109,6 +118,8 @@ class DockerSandboxManager:
             f"qqbot.id={sandbox_id}",
             "--label",
             f"qqbot.runtime={runtime}",
+            "--label",
+            f"qqbot.purpose={normalized_purpose}",
             "--memory",
             "8g",
             "--memory-swap",
@@ -152,12 +163,49 @@ class DockerSandboxManager:
             "runtime": runtime,
             "image": image,
             "status": "running",
+            "purpose": normalized_purpose,
             "toolset": (
                 "advanced"
                 if self.image
                 else f"minimal-{runtime}"
             ),
         }
+
+    async def ensure_default(
+        self,
+        owner: str,
+        runtime: str = "debian",
+    ) -> dict[str, str]:
+        """Return the owner's reusable shell sandbox, creating it if needed."""
+        owner_key = self._owner_hash(owner)
+        lock = self._owner_create_locks.setdefault(owner_key, asyncio.Lock())
+        async with lock:
+            sandboxes = sorted(
+                await self.list(owner),
+                key=lambda item: str(item.get("sandbox_id") or ""),
+            )
+            shell_sandboxes = [
+                item for item in sandboxes if item.get("purpose") == "shell"
+            ]
+            if shell_sandboxes:
+                selected = shell_sandboxes[0]
+                sandbox_id = str(selected["sandbox_id"])
+                if not str(selected.get("status") or "").lower().startswith("up "):
+                    result = await self._run(
+                        "docker",
+                        "start",
+                        self._container_name(sandbox_id),
+                        timeout=30,
+                    )
+                    if result.returncode != 0:
+                        raise SandboxError(self._docker_error(result.stderr))
+                return {
+                    **selected,
+                    "status": "running",
+                    "purpose": "shell",
+                    "toolset": "advanced" if self.image else f"minimal-{runtime}",
+                }
+            return await self.create(owner, runtime, purpose="shell")
 
     async def list(self, owner: str) -> list[dict[str, str]]:
         return await self._list_by_label(
@@ -175,7 +223,8 @@ class DockerSandboxManager:
             (
                 '{{.Names}}|{{.Label "qqbot.id"}}|'
                 '{{.Label "qqbot.runtime"}}|{{.Label "qqbot.owner_ref"}}|'
-                '{{.Label "qqbot.owner"}}|{{.Status}}'
+                '{{.Label "qqbot.owner"}}|{{.Label "qqbot.purpose"}}|'
+                '{{.Status}}'
             ),
             timeout=20,
         )
@@ -185,8 +234,8 @@ class DockerSandboxManager:
         containers: list[dict[str, object]] = []
         running_names: list[str] = []
         for line in result.stdout.splitlines():
-            parts = (line.split("|", 5) + [""] * 6)[:6]
-            name, sandbox_id, runtime, owner_ref, owner_hash, status = parts
+            parts = (line.split("|", 6) + [""] * 7)[:7]
+            name, sandbox_id, runtime, owner_ref, owner_hash, purpose, status = parts
             if not SANDBOX_ID_PATTERN.fullmatch(sandbox_id):
                 continue
             running = status.lower().startswith("up ")
@@ -197,6 +246,7 @@ class DockerSandboxManager:
                     "sandbox_id": sandbox_id,
                     "name": name,
                     "runtime": runtime,
+                    "purpose": purpose or "task",
                     "owner": owner_ref,
                     "owner_hash": owner_hash,
                     "status": status,
@@ -239,7 +289,11 @@ class DockerSandboxManager:
         }
 
     async def destroy(self, owner: str, sandbox_id: str) -> None:
-        name = await self._owned_container(owner, sandbox_id)
+        name = await self._owned_container(
+            owner,
+            sandbox_id,
+            require_running=False,
+        )
         result = await self._run(
             "docker",
             "rm",
@@ -249,6 +303,7 @@ class DockerSandboxManager:
         )
         if result.returncode != 0:
             raise SandboxError(self._docker_error(result.stderr))
+        self._exec_locks.pop(sandbox_id, None)
 
     async def exec(
         self,
@@ -259,82 +314,89 @@ class DockerSandboxManager:
     ) -> SandboxResult:
         if not command.strip():
             raise SandboxError("命令不能为空。")
-        name = await self._owned_container(owner, sandbox_id)
-        timeout = min(
-            max(timeout_seconds or self.default_timeout_seconds, 1),
-            300,
-        )
-        activity_id = secrets.token_hex(8)
-        activity = SandboxExecutionActivity(
-            activity_id=activity_id,
-            sandbox_id=sandbox_id,
-            owner=self._owner_ref(owner),
-            command=command[:2000],
-            started_at=int(time.time()),
-        )
-        self._active_execs[activity_id] = activity
-        marker = f"/tmp/qqbot-observe-{secrets.token_hex(8)}"
-        marker_ready = False
-        try:
-            network_mode = await self._network_mode(name)
-            marker_result = await self._run(
-                "docker", "exec", name, "touch", marker, timeout=10
+        lock = self._exec_locks.setdefault(sandbox_id, asyncio.Lock())
+        async with lock:
+            name = await self._owned_container(owner, sandbox_id)
+            timeout = min(
+                max(timeout_seconds or self.default_timeout_seconds, 1),
+                300,
             )
-            marker_ready = marker_result.returncode == 0
-            started = time.monotonic()
-            stdout_bytes, stderr_bytes, returncode = await self._run_bytes(
-                "docker",
-                "exec",
-                name,
-                "sh",
-                "-lc",
-                command,
-                timeout=timeout,
+            activity_id = secrets.token_hex(8)
+            activity = SandboxExecutionActivity(
+                activity_id=activity_id,
+                sandbox_id=sandbox_id,
+                owner=self._owner_ref(owner),
+                command=command[:2000],
+                started_at=int(time.time()),
             )
-            duration_ms = max(int((time.monotonic() - started) * 1000), 0)
-            changed_paths = (
-                await self._changed_workspace_paths(name, marker)
-                if marker_ready
-                else ()
-            )
-            container_diff = await self._container_diff(name, marker)
-            result = SandboxResult(
-                stdout=self._trim_output(
-                    stdout_bytes.decode("utf-8", errors="replace")
-                ),
-                stderr=self._trim_output(
-                    stderr_bytes.decode("utf-8", errors="replace")
-                ),
-                returncode=returncode,
-                manifest=SandboxObservedManifest(
-                    command=command,
-                    duration_ms=duration_ms,
-                    stdout_sha256=hashlib.sha256(stdout_bytes).hexdigest(),
-                    stdout_bytes=len(stdout_bytes),
-                    stderr_sha256=hashlib.sha256(stderr_bytes).hexdigest(),
-                    stderr_bytes=len(stderr_bytes),
-                    changed_workspace_paths=changed_paths,
-                    container_diff=container_diff,
-                    network_mode=network_mode,
-                ),
-            )
-        except asyncio.CancelledError:
-            self._remember_exec(activity, status="cancelled")
-            raise
-        except Exception as exc:
-            self._remember_exec(activity, status="failed", error=str(exc))
-            raise
-        else:
-            self._remember_exec(
-                activity,
-                status="completed" if result.returncode == 0 else "failed",
-                returncode=result.returncode,
-            )
-            return result
-        finally:
-            self._active_execs.pop(activity_id, None)
-            if marker_ready:
-                await self._remove_observation_marker(name, marker)
+            self._active_execs[activity_id] = activity
+            marker = f"/tmp/qqbot-observe-{secrets.token_hex(8)}"
+            marker_ready = False
+            try:
+                network_mode = await self._network_mode(name)
+                marker_result = await self._run(
+                    "docker", "exec", name, "touch", marker, timeout=10
+                )
+                marker_ready = marker_result.returncode == 0
+                started = time.monotonic()
+                stdout_bytes, stderr_bytes, returncode = await self._run_bytes(
+                    "docker",
+                    "exec",
+                    name,
+                    "timeout",
+                    "--signal=TERM",
+                    "--kill-after=5s",
+                    "--preserve-status",
+                    str(timeout),
+                    "sh",
+                    "-lc",
+                    command,
+                    timeout=timeout + 10,
+                )
+                duration_ms = max(int((time.monotonic() - started) * 1000), 0)
+                changed_paths = (
+                    await self._changed_workspace_paths(name, marker)
+                    if marker_ready
+                    else ()
+                )
+                container_diff = await self._container_diff(name, marker)
+                result = SandboxResult(
+                    stdout=self._trim_output(
+                        stdout_bytes.decode("utf-8", errors="replace")
+                    ),
+                    stderr=self._trim_output(
+                        stderr_bytes.decode("utf-8", errors="replace")
+                    ),
+                    returncode=returncode,
+                    manifest=SandboxObservedManifest(
+                        command=command,
+                        duration_ms=duration_ms,
+                        stdout_sha256=hashlib.sha256(stdout_bytes).hexdigest(),
+                        stdout_bytes=len(stdout_bytes),
+                        stderr_sha256=hashlib.sha256(stderr_bytes).hexdigest(),
+                        stderr_bytes=len(stderr_bytes),
+                        changed_workspace_paths=changed_paths,
+                        container_diff=container_diff,
+                        network_mode=network_mode,
+                    ),
+                )
+            except asyncio.CancelledError:
+                self._remember_exec(activity, status="cancelled")
+                raise
+            except Exception as exc:
+                self._remember_exec(activity, status="failed", error=str(exc))
+                raise
+            else:
+                self._remember_exec(
+                    activity,
+                    status="completed" if result.returncode == 0 else "failed",
+                    returncode=result.returncode,
+                )
+                return result
+            finally:
+                self._active_execs.pop(activity_id, None)
+                if marker_ready:
+                    await self._remove_observation_marker(name, marker)
 
     async def write_file(
         self,
@@ -431,7 +493,13 @@ class DockerSandboxManager:
             limits.append(int(requested))
         return min(limits) if limits else None
 
-    async def _owned_container(self, owner: str, sandbox_id: str) -> str:
+    async def _owned_container(
+        self,
+        owner: str,
+        sandbox_id: str,
+        *,
+        require_running: bool = True,
+    ) -> str:
         if not SANDBOX_ID_PATTERN.fullmatch(sandbox_id):
             raise SandboxError("沙盒 ID 格式错误。")
         name = self._container_name(sandbox_id)
@@ -448,7 +516,7 @@ class DockerSandboxManager:
         owner_hash, _, running = result.stdout.strip().partition("|")
         if owner_hash != self._owner_hash(owner):
             raise SandboxError("你无权访问这个沙盒。")
-        if running.lower() != "true":
+        if require_running and running.lower() != "true":
             raise SandboxError("沙盒没有运行。")
         return name
 
@@ -536,19 +604,25 @@ class DockerSandboxManager:
             "--filter",
             f"label={label}",
             "--format",
-            '{{.Label "qqbot.id"}}|{{.Label "qqbot.runtime"}}|{{.Status}}',
+            (
+                '{{.Label "qqbot.id"}}|{{.Label "qqbot.runtime"}}|'
+                '{{.Label "qqbot.purpose"}}|{{.Status}}'
+            ),
             timeout=20,
         )
         if result.returncode != 0:
             raise SandboxError(self._docker_error(result.stderr))
         sandboxes: list[dict[str, str]] = []
         for line in result.stdout.splitlines():
-            sandbox_id, runtime, status = (line.split("|", 2) + ["", ""])[:3]
+            sandbox_id, runtime, purpose, status = (
+                line.split("|", 3) + ["", "", ""]
+            )[:4]
             if SANDBOX_ID_PATTERN.fullmatch(sandbox_id):
                 sandboxes.append(
                     {
                         "sandbox_id": sandbox_id,
                         "runtime": runtime,
+                        "purpose": purpose or "task",
                         "status": status,
                     }
                 )

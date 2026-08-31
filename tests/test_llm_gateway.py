@@ -22,6 +22,7 @@ from src.plugins.ai_chat.llm_gateway import (
     OpenAIChatProvider,
     _anthropic_request,
     _anthropic_response,
+    _request_for_profile,
 )
 from src.plugins.ai_chat.model_catalog import (
     ModelCatalog,
@@ -71,6 +72,17 @@ class RecordingProvider:
 
 
 class LLMGatewayTests(unittest.IsolatedAsyncioTestCase):
+    async def test_openai_profile_forwards_reasoning_effort(self) -> None:
+        selected = profile("reasoning", provider="cliproxy")
+        selected = selected.with_reasoning_effort("high")
+
+        request = _request_for_profile(
+            selected,
+            {"messages": [{"role": "user", "content": "hello"}]},
+        )
+
+        self.assertEqual(request["reasoning_effort"], "high")
+
     async def test_retryable_failure_uses_fallback_and_opens_circuit(self) -> None:
         primary = profile("primary", provider="same-provider")
         backup = profile("backup", provider="same-provider")

@@ -28,6 +28,7 @@ class ModelCatalogTests(unittest.TestCase):
                         "api_key_env": "DEEPSEEK_TEST_KEY",
                         "model": "deepseek-chat",
                         "aliases": ["ds"],
+                        "reasoning_effort": "medium",
                     },
                     "claude": {
                         "provider": "anthropic",
@@ -51,6 +52,7 @@ class ModelCatalogTests(unittest.TestCase):
 
         self.assertEqual(catalog.default.name, "fast")
         self.assertEqual(catalog.resolve("ds").model, "deepseek-chat")
+        self.assertEqual(catalog.resolve("ds").reasoning_effort, "medium")
         claude = catalog.resolve("claude")
         self.assertEqual(claude.protocol, "anthropic-messages")
         self.assertEqual(claude.api_key, "secret-two")

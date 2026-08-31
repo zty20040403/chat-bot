@@ -447,9 +447,11 @@ def _preferred_model_profile(conversation_id: str) -> ModelProfile:
     preference = model_preferences.get_explicit(conversation_id)
     if preference is None:
         preference = _group_default_model_preference(conversation_id)
-    return model_profiles.resolve_preference(
-        preference
-    )
+    profile = model_profiles.resolve_preference(preference)
+    effort = reasoning_preferences.get_explicit(conversation_id)
+    if profile.provider not in {"openai", "cliproxy"}:
+        return profile.with_reasoning_effort(None)
+    return profile.with_reasoning_effort(effort or profile.reasoning_effort)
 
 
 def _background_model_profile(

@@ -96,6 +96,7 @@ class AppContext:
     running_tasks: RunningTaskRegistry
     user_profiles: GroupUserProfileStore
     model_preferences: ModelPreferenceStore
+    reasoning_preferences: ModelPreferenceStore
     model_catalog: ModelCatalog
     llm_gateway: LLMGateway = field(repr=False)
     self_source: SelfSource
@@ -256,6 +257,9 @@ def build_app_context(
     user_profiles = GroupUserProfileStore(store_source("user_profiles.json"))
     model_preferences = ModelPreferenceStore(
         store_source("model_preferences.json")
+    )
+    reasoning_preferences = ModelPreferenceStore(
+        store_source("reasoning_preferences.json")
     )
     model_catalog = ModelCatalog.from_settings(settings)
     for group_id, profile_name in settings.group_model_profiles.items():
@@ -754,6 +758,7 @@ def build_app_context(
         running_tasks=running_tasks,
         user_profiles=user_profiles,
         model_preferences=model_preferences,
+        reasoning_preferences=reasoning_preferences,
         model_catalog=model_catalog,
         llm_gateway=llm_gateway,
         self_source=SelfSource(project_root),

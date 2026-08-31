@@ -272,6 +272,10 @@ NapCat 日志出现连接成功后，可以在 QQ 中测试：
 | `/模型` | 查看当前可用模型与选择 |
 | `/模型 profile` | 为当前用户切换模型 |
 | `/模型 默认` | 恢复群默认模型 |
+| `/effort [档位]` | 查看或设置当前会话的推理强度 |
+| `/shell 命令` | 在当前群共享的 Docker 工作区执行命令，不经过 LLM |
+| `/shell status` | 查看当前群命令行沙盒 |
+| `/shell reset` | 销毁当前群命令行沙盒并清空工作区 |
 | `/识图` | 读取当前、引用或最近图片 |
 | `/听` | 转写引用或最近 QQ 语音 |
 | `/语音 内容` | 使用语音回答 |
@@ -285,6 +289,25 @@ NapCat 日志出现连接成功后，可以在 QQ 中测试：
 | `/pin`、`/pins` | 固定消息或查看固定列表 |
 | `/ai_reset` | 重置当前会话的 AI 上下文边界 |
 | `/clear` | 清理当前会话的上下文和存储数据 |
+
+`/shell` 会自动创建当前群专属的高级沙盒，同一个群复用 `/workspace`，不同群之间隔离。
+它不会执行 h610 宿主机命令，也不会消耗模型 Token。普通命令最长运行 30 秒：
+
+```text
+/shell pwd
+/shell ls -lah
+/shell python --version
+/shell echo hello > hello.txt
+```
+
+OpenAI/CLIProxy 模型可以按当前用户、当前会话覆盖推理强度：
+
+```text
+/effort
+/effort high
+/effort xhigh
+/effort default
+```
 
 自然语言请求不依赖关键词硬编码。`@机器人 看看这张图`、`帮我查一下最新消息`、
 `创建一个 Python 项目并把文件发出来` 等请求会进入同一个 Agent Loop，由当前模型决定

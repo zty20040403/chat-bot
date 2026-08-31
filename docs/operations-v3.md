@@ -46,6 +46,7 @@ AI_GROUP_MODEL_PROFILES_JSON={"201644592":"openai"}
 | `timeout_seconds` | 单次 HTTP 请求超时，范围 1 到 600 秒 |
 | `temperature` | 可选采样温度；留空则由供应商默认 |
 | `thinking` | `auto`、`enabled` 或 `disabled` |
+| `reasoning_effort` | 可选默认推理强度：`minimal`、`low`、`medium`、`high`、`xhigh`、`max` 或 `none` |
 | `max_output_tokens` | 输出 token 上限；Anthropic 默认 4096 |
 | `api_key_required` | 本地免鉴权兼容服务可显式设为 `false` |
 | `capabilities` | 可覆盖 `tools`、`streaming`、`json_mode`、`model_listing`、`vision` |
@@ -66,6 +67,9 @@ profile 若声明不支持工具，机器人仍能普通回答，但不会给该
 /模型
 /模型 claude
 /模型 默认
+/effort
+/effort high
+/effort default
 ```
 
 选择按用户和会话隔离，只持久化 profile 名。群级默认可由

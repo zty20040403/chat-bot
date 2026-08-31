@@ -49,6 +49,18 @@ model_command = on_command(
     priority=10,
     block=True,
 )
+effort_command = on_command(
+    "effort",
+    aliases={"推理强度", "思考强度", "reasoning"},
+    priority=10,
+    block=True,
+)
+shell_command = on_command(
+    "shell",
+    aliases={"终端", "执行", "cmd"},
+    priority=9,
+    block=True,
+)
 memory_command = on_command(
     "记忆", aliases={"memory", "长期记忆"}, priority=10, block=True
 )
@@ -61,8 +73,8 @@ unpin_command = on_command(
 pins_command = on_command(
     "pins", aliases={"固定列表"}, priority=10, block=True
 )
-max_style_command = on_regex(
-    r"^!(?:feedback|fb|btw|ps|kill|pin|unpin|pins|usage|help|version)(?:\s|$)",
+control_command = on_regex(
+    r"^/(?:feedback|fb|btw|help|version)(?:\s|$)",
     flags=re.IGNORECASE,
     priority=9,
     block=True,

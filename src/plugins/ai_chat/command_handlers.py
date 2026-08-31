@@ -86,7 +86,7 @@ def _task_status_text(event: MessageEvent) -> str:
         f"- {task.task_id} · {task.elapsed_seconds}s · {task.summary or '未命名任务'}"
         for task in tasks
     )
-    lines.append("\n停止：!kill 任务ID 或 /停止 任务ID；不写 ID 时停止最新任务。")
+    lines.append("\n停止：/停止 任务ID；不写 ID 时停止最新任务。")
     return "\n".join(lines)
 
 
@@ -529,6 +529,11 @@ async def handle_model_command(
     if requested.lower() in {"默认", "default", "reset", "重置"}:
         model_preferences.clear(conversation_id)
         default_profile = _preferred_model_profile(conversation_id)
+        if (
+            default_profile.provider not in {"openai", "cliproxy"}
+            and reasoning_preferences.clear(conversation_id)
+        ):
+            default_profile = _preferred_model_profile(conversation_id)
         default_scope = (
             "当前群默认模型"
             if _group_default_model_preference(conversation_id) is not None
@@ -545,10 +550,24 @@ async def handle_model_command(
         return
 
     if not requested:
+        thinking_labels = {
+            "auto": "服务端自动",
+            "enabled": "开启",
+            "disabled": "关闭",
+        }
+        explicit_effort = reasoning_preferences.get_explicit(conversation_id)
+        effort_text = current_profile.reasoning_effort or "服务端默认"
+        if explicit_effort:
+            effort_text += "（当前会话覆盖）"
         lines = [
             "当前模型："
             f"{current_profile.name}（{current_profile.provider} / "
             f"{current_profile.model}）",
+            "推理模式：" + thinking_labels.get(
+                current_profile.thinking,
+                current_profile.thinking,
+            ),
+            f"推理强度：{effort_text}",
             "",
             "可用模型配置：",
         ]
@@ -567,12 +586,18 @@ async def handle_model_command(
             )
             configured_label = "" if profile.configured else " · 未配置密钥"
             capability_text = "/".join(flags) or "纯文本"
+            reasoning_text = (
+                profile.reasoning_effort
+                or thinking_labels.get(profile.thinking, profile.thinking)
+            )
             lines.append(
                 f"- {profile.name}: {profile.provider} / {profile.model} "
-                f"[{capability_text}]{default_label}{configured_label}"
+                f"[{capability_text}；推理:{reasoning_text}]"
+                f"{default_label}{configured_label}"
             )
         lines.append("\n切换：/模型 配置名")
         lines.append("恢复：/模型 默认")
+        lines.append("推理强度：/effort high（查看可直接发送 /effort）")
         await _finish_safely(
             model_command,
             _reply_message(event, "\n".join(lines)),
@@ -592,13 +617,201 @@ async def handle_model_command(
         return
 
     model_preferences.set(conversation_id, target_profile.name)
+    effort_cleared = (
+        target_profile.provider not in {"openai", "cliproxy"}
+        and reasoning_preferences.clear(conversation_id)
+    )
     await _finish_safely(
         model_command,
         _reply_message(
             event,
             f"已切换到：{target_profile.name}（{target_profile.model}）\n"
-            "只影响你在当前会话中的回答。",
+            "只影响你在当前会话中的回答。"
+            + (
+                "\n该提供方不支持强度档位，已清除原来的 /effort 覆盖。"
+                if effort_cleared
+                else ""
+            ),
         ),
+    )
+
+
+async def handle_effort_command(
+    event: MessageEvent,
+    args: Message = CommandArg(),
+) -> None:
+    conversation_id = _conversation_id(event)
+    profile = _preferred_model_profile(conversation_id)
+    requested = args.extract_plain_text().strip().lower()
+    aliases = {
+        "最低": "minimal",
+        "低": "low",
+        "中": "medium",
+        "高": "high",
+        "超高": "xhigh",
+        "最高": "max",
+        "关闭": "none",
+    }
+    requested = aliases.get(requested, requested)
+    valid = {"minimal", "low", "medium", "high", "xhigh", "max", "none"}
+    explicit = reasoning_preferences.get_explicit(conversation_id)
+
+    if not requested:
+        current = profile.reasoning_effort or "服务端默认"
+        source = "当前会话覆盖" if explicit else "模型配置"
+        support = (
+            "支持会话级设置"
+            if profile.provider in {"openai", "cliproxy"}
+            else "当前提供方只支持推理开关，不支持强度档位"
+        )
+        await _finish_safely(
+            effort_command,
+            _reply_message(
+                event,
+                f"当前推理强度：{current}（{source}）\n"
+                f"当前模型：{profile.name} / {profile.model}\n"
+                f"状态：{support}\n"
+                "设置：/effort minimal|low|medium|high|xhigh|max|none\n"
+                "恢复：/effort default",
+            ),
+        )
+        return
+
+    if requested in {"default", "reset", "默认", "重置"}:
+        reasoning_preferences.clear(conversation_id)
+        restored = _preferred_model_profile(conversation_id)
+        await _finish_safely(
+            effort_command,
+            _reply_message(
+                event,
+                "已恢复模型默认推理强度："
+                f"{restored.reasoning_effort or '服务端默认'}。",
+            ),
+        )
+        return
+
+    if requested not in valid:
+        await _finish_safely(
+            effort_command,
+            _reply_message(
+                event,
+                "不认识这个推理强度。可用：minimal、low、medium、high、"
+                "xhigh、max、none、default。",
+            ),
+        )
+        return
+
+    if profile.provider not in {"openai", "cliproxy"}:
+        await _finish_safely(
+            effort_command,
+            _reply_message(
+                event,
+                f"{profile.name} 不支持按档位调整推理强度。"
+                "先用 /模型 切换到 GPT/CLIProxy 配置。",
+            ),
+        )
+        return
+
+    reasoning_preferences.set(conversation_id, requested)
+    await _finish_safely(
+        effort_command,
+        _reply_message(
+            event,
+            f"推理强度已设为 {requested}。只影响你在当前会话中的回答。",
+        ),
+    )
+
+
+def _shell_owner(event: MessageEvent) -> str:
+    if isinstance(event, GroupMessageEvent):
+        return f"shell:group:{event.group_id}"
+    return f"shell:private:{event.user_id}"
+
+
+def _format_shell_result(result) -> str:
+    parts: list[str] = []
+    stdout = result.stdout.rstrip()
+    stderr = result.stderr.rstrip()
+    if stdout:
+        parts.append(stdout)
+    if stderr:
+        parts.append("[stderr]\n" + stderr)
+    if result.returncode != 0:
+        parts.append(f"[退出码 {result.returncode}]")
+    return "\n".join(parts) or "（命令执行成功，无输出）"
+
+
+async def handle_shell_command(
+    event: MessageEvent,
+    args: Message = CommandArg(),
+) -> None:
+    if not settings.is_sandbox_user_allowed(event.user_id):
+        await _finish_safely(
+            shell_command,
+            _reply_message(event, "当前没有开放命令行沙盒。"),
+        )
+        return
+
+    owner = _shell_owner(event)
+    command = args.extract_plain_text().strip()
+    action = command.casefold()
+
+    if not command or action in {"help", "帮助"}:
+        await _finish_safely(
+            shell_command,
+            _reply_message(
+                event,
+                "用法：/shell Shell命令\n"
+                "示例：/shell ls -lah\n"
+                "状态：/shell status\n"
+                "重建：/shell reset\n"
+                "同一个群复用同一个 /workspace；群与群之间隔离。",
+            ),
+        )
+        return
+
+    try:
+        if action in {"status", "状态"}:
+            sandboxes = await sandbox_manager.list(owner)
+            shell_sandboxes = [
+                item for item in sandboxes if item.get("purpose") == "shell"
+            ]
+            text = (
+                "当前群还没有默认命令行沙盒。执行任意 /shell 命令会自动创建。"
+                if not shell_sandboxes
+                else "当前群命令行沙盒：\n"
+                + "\n".join(
+                    f"- {item['sandbox_id']} · {item['status']} · /workspace"
+                    for item in shell_sandboxes
+                )
+            )
+        elif action in {"reset", "重建", "destroy", "销毁"}:
+            sandboxes = await sandbox_manager.list(owner)
+            shell_sandboxes = [
+                item for item in sandboxes if item.get("purpose") == "shell"
+            ]
+            for item in shell_sandboxes:
+                await sandbox_manager.destroy(owner, str(item["sandbox_id"]))
+            text = (
+                "已销毁当前群的命令行沙盒，下次执行时会创建干净工作区。"
+                if shell_sandboxes
+                else "当前群没有命令行沙盒。"
+            )
+        else:
+            sandbox = await sandbox_manager.ensure_default(owner, "debian")
+            result = await sandbox_manager.exec(
+                owner,
+                str(sandbox["sandbox_id"]),
+                command,
+                30,
+            )
+            text = _format_shell_result(result)
+    except SandboxError as exc:
+        text = f"命令行沙盒执行失败：{exc}"
+
+    await _finish_safely(
+        shell_command,
+        _reply_message(event, text),
     )
 
 
@@ -796,9 +1009,9 @@ async def _ack_control_command(
     await _finish_safely(matcher, _reply_message(event, fallback))
 
 
-async def handle_max_style_command(bot: Bot, event: MessageEvent) -> None:
+async def handle_control_command(bot: Bot, event: MessageEvent) -> None:
     plain = event.message.extract_plain_text().strip()
-    matched = re.match(r"^!([A-Za-z]+)(?:\s+(.*))?$", plain, re.DOTALL)
+    matched = re.match(r"^/([A-Za-z]+)(?:\s+(.*))?$", plain, re.DOTALL)
     if matched is None:
         return
     verb = matched.group(1).casefold()
@@ -807,8 +1020,8 @@ async def handle_max_style_command(bot: Bot, event: MessageEvent) -> None:
     if verb in {"feedback", "fb"}:
         if not body:
             await _finish_safely(
-                max_style_command,
-                _reply_message(event, "用法：!feedback 需要补充或修改的内容"),
+                control_command,
+                _reply_message(event, "用法：/feedback 需要补充或修改的内容"),
             )
         replied_id = reply_message_id(event.original_message)
         author = _current_user_identity(event)
@@ -822,13 +1035,13 @@ async def handle_max_style_command(bot: Bot, event: MessageEvent) -> None:
         )
         if selected is not None:
             await _ack_control_command(
-                max_style_command,
+                control_command,
                 bot,
                 event,
                 f"反馈已送入 {selected.task_id}。",
             )
         await _finish_tracked_ai(
-            max_style_command,
+            control_command,
             bot,
             event,
             body,
@@ -839,11 +1052,11 @@ async def handle_max_style_command(bot: Bot, event: MessageEvent) -> None:
     if verb == "btw":
         if not body:
             await _finish_safely(
-                max_style_command,
-                _reply_message(event, "用法：!btw 另一个问题"),
+                control_command,
+                _reply_message(event, "用法：/btw 另一个问题"),
             )
         await _finish_tracked_ai(
-            max_style_command,
+            control_command,
             bot,
             event,
             body,
@@ -853,7 +1066,7 @@ async def handle_max_style_command(bot: Bot, event: MessageEvent) -> None:
 
     if verb == "ps":
         await _finish_safely(
-            max_style_command,
+            control_command,
             _reply_message(event, _task_status_text(event)),
         )
 
@@ -866,11 +1079,11 @@ async def handle_max_style_command(bot: Bot, event: MessageEvent) -> None:
         )
         if stopped is None:
             await _finish_safely(
-                max_style_command,
-                _reply_message(event, "当前会话没有匹配的运行任务。发送 !ps 查看。"),
+                control_command,
+                _reply_message(event, "当前会话没有匹配的运行任务。发送 /任务 查看。"),
             )
         await _ack_control_command(
-            max_style_command,
+            control_command,
             bot,
             event,
             f"已请求停止 {stopped.task_id}。",
@@ -880,15 +1093,15 @@ async def handle_max_style_command(bot: Bot, event: MessageEvent) -> None:
         target_id = _pin_target_message_id(event, body)
         if pin_store is None or message_ledger is None:
             await _finish_safely(
-                max_style_command,
+                control_command,
                 _reply_message(event, "固定消息功能暂时不可用。"),
             )
         if target_id is None:
             await _finish_safely(
-                max_style_command,
+                control_command,
                 _reply_message(
                     event,
-                    f"请引用消息发送 !{verb}，或写 !{verb} msg#编号。",
+                    f"请引用消息发送 /{verb}，或写 /{verb} msg#编号。",
                 ),
             )
         if verb == "unpin":
@@ -900,11 +1113,11 @@ async def handle_max_style_command(bot: Bot, event: MessageEvent) -> None:
             )
             if not changed:
                 await _finish_safely(
-                    max_style_command,
+                    control_command,
                     _reply_message(event, fallback),
                 )
             await _ack_control_command(
-                max_style_command,
+                control_command,
                 bot,
                 event,
                 fallback,
@@ -924,11 +1137,11 @@ async def handle_max_style_command(bot: Bot, event: MessageEvent) -> None:
             )
         except ValueError as exc:
             await _finish_safely(
-                max_style_command,
+                control_command,
                 _reply_message(event, str(exc)),
             )
         await _ack_control_command(
-            max_style_command,
+            control_command,
             bot,
             event,
             f"已固定 msg#{pinned.canonical_message_id}。",
@@ -941,19 +1154,19 @@ async def handle_max_style_command(bot: Bot, event: MessageEvent) -> None:
             rendered = pin_store.render(message_ledger, scope_from_event(event))
             text = rendered or "当前会话还没有固定消息。"
         await _finish_safely(
-            max_style_command,
+            control_command,
             _reply_message(event, text),
         )
 
     if verb == "usage":
         await _finish_safely(
-            max_style_command,
+            control_command,
             _reply_message(event, _usage_text(event)),
         )
 
     if verb == "version":
         await _finish_safely(
-            max_style_command,
+            control_command,
             _reply_message(
                 event,
                 f"qq-deepseek-bot {BOT_VERSION} · NoneBot2 / OneBot V11 · "
@@ -963,11 +1176,12 @@ async def handle_max_style_command(bot: Bot, event: MessageEvent) -> None:
 
     if verb == "help":
         await _finish_safely(
-            max_style_command,
+            control_command,
             _reply_message(
                 event,
-                "控制命令：!ps、!kill [tID]、!feedback 内容、!btw 问题、"
-                "!pin、!unpin、!pins、!usage、!version。普通问题直接 @我。",
+                "常用命令：/模型、/effort、/shell、/任务、/停止、"
+                "/feedback、/btw、/pin、/unpin、/pins、/usage、/version。"
+                "普通问题直接 @我。",
             ),
         )
 
@@ -1184,6 +1398,8 @@ async def handle_clear_data(event: MessageEvent) -> None:
     cleared_items.append(f"长期记忆 {long_term_count} 条")
     if model_preferences.clear(conversation_id):
         cleared_items.append("当前模型选择")
+    if reasoning_preferences.clear(conversation_id):
+        cleared_items.append("当前推理强度")
     if browser_manager is not None:
         try:
             if await browser_manager.clear_profile(conversation_id):

@@ -649,8 +649,16 @@ def _request_for_profile(
             request["extra_body"] = {"thinking": {"type": "disabled"}}
         else:
             request.pop("extra_body", None)
+        if (
+            profile.provider in {"openai", "cliproxy"}
+            and profile.reasoning_effort
+        ):
+            request["reasoning_effort"] = profile.reasoning_effort
+        else:
+            request.pop("reasoning_effort", None)
     else:
         request.pop("extra_body", None)
+        request.pop("reasoning_effort", None)
     return request
 
 

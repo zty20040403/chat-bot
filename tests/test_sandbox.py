@@ -55,6 +55,26 @@ class DockerSandboxCancellationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("--cpus", command)
         self.assertNotIn("--pids-limit", command)
         self.assertIn("qqbot.owner_ref=owner", command)
+        self.assertIn("qqbot.purpose=task", command)
+
+    async def test_default_shell_reuses_the_group_sandbox(self) -> None:
+        manager = DockerSandboxManager(image="kennethbot-sandbox:latest")
+        manager.list = AsyncMock(  # type: ignore[method-assign]
+            return_value=[
+                {
+                    "sandbox_id": "sabc123",
+                    "runtime": "debian",
+                    "purpose": "shell",
+                    "status": "Up 2 minutes",
+                }
+            ]
+        )
+        manager.create = AsyncMock()  # type: ignore[method-assign]
+
+        selected = await manager.ensure_default("shell:group:1")
+
+        self.assertEqual(selected["sandbox_id"], "sabc123")
+        manager.create.assert_not_awaited()
 
     async def test_configured_advanced_image_runs_as_sandbox_user(self) -> None:
         manager = DockerSandboxManager(image="kennethbot-sandbox:latest")
@@ -132,7 +152,7 @@ class DockerSandboxCancellationTests(unittest.IsolatedAsyncioTestCase):
                 SandboxResult(
                     (
                         "qqbot-sabc123|sabc123|python|"
-                        "group:1:user:2|ownerhash|Up 2 minutes\n"
+                        "group:1:user:2|ownerhash|task|Up 2 minutes\n"
                     ),
                     "",
                     0,
@@ -155,6 +175,7 @@ class DockerSandboxCancellationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot["active_commands"], 0)
         item = snapshot["items"][0]  # type: ignore[index]
         self.assertEqual(item["owner"], "group:1:user:2")
+        self.assertEqual(item["purpose"], "task")
         self.assertEqual(item["memory_usage"], "64MiB / 8GiB")
         self.assertEqual(item["workspace_file_count"], 2)
         self.assertEqual(item["workspace_files"][1]["path"], "dir/b.bin")

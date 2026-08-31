@@ -16,6 +16,9 @@ SUPPORTED_MODEL_PROTOCOLS = frozenset(
         "anthropic-messages",
     }
 )
+SUPPORTED_REASONING_EFFORTS = frozenset(
+    {"minimal", "low", "medium", "high", "xhigh", "max", "none"}
+)
 _PROFILE_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 _ENV_NAME_PATTERN = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 
@@ -93,6 +96,7 @@ class ModelProfile:
     timeout_seconds: float = 60.0
     temperature: float | None = None
     thinking: str = "auto"
+    reasoning_effort: str = ""
     max_input_tokens: int = 0
     max_output_tokens: int = 0
     aliases: tuple[str, ...] = ()
@@ -129,6 +133,12 @@ class ModelProfile:
         if not selected:
             return self
         return replace(self, model=selected)
+
+    def with_reasoning_effort(self, effort: str | None) -> "ModelProfile":
+        selected = str(effort or "").strip().lower()
+        if selected and selected not in SUPPORTED_REASONING_EFFORTS:
+            raise ModelCatalogError(f"unsupported reasoning effort: {effort}")
+        return replace(self, reasoning_effort=selected)
 
 
 class ModelCatalog:
@@ -463,6 +473,12 @@ def _parse_profile(
         raise ModelCatalogError(
             f"model profile {name!r} thinking must be auto, enabled, or disabled"
         )
+    reasoning_effort = str(raw.get("reasoning_effort") or "").strip().lower()
+    if reasoning_effort and reasoning_effort not in SUPPORTED_REASONING_EFFORTS:
+        raise ModelCatalogError(
+            f"model profile {name!r} reasoning_effort must be one of: "
+            + ", ".join(sorted(SUPPORTED_REASONING_EFFORTS))
+        )
 
     default_output_tokens = 4096 if protocol == "anthropic-messages" else 0
     return ModelProfile(
@@ -477,6 +493,7 @@ def _parse_profile(
         timeout_seconds=timeout_seconds,
         temperature=temperature,
         thinking=thinking,
+        reasoning_effort=reasoning_effort,
         max_input_tokens=_nonnegative_int(
             raw.get("max_input_tokens", 0),
             f"{name}.max_input_tokens",
