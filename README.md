@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.9.0-22c55e?style=for-the-badge">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.9.8-22c55e?style=for-the-badge">
   <img alt="Python" src="https://img.shields.io/badge/Python-3.12-3776ab?style=for-the-badge&amp;logo=python&amp;logoColor=white">
   <img alt="NoneBot2" src="https://img.shields.io/badge/NoneBot2-OneBot_V11-ea5252?style=for-the-badge">
   <img alt="PostgreSQL" src="https://img.shields.io/badge/PostgreSQL-Durable-4169e1?style=for-the-badge&amp;logo=postgresql&amp;logoColor=white">
@@ -47,7 +47,7 @@ Kennethbot 通过 NapCatQQ 接收 OneBot V11 事件，使用 NoneBot2 处理消�
   </tr>
   <tr>
     <td><strong>Durable Runtime</strong><br>PostgreSQL 保存消息、回合、工具效果、Outbox、提醒、持久任务和媒体元数据。</td>
-    <td><strong>生产部署</strong><br>实时管理控制台、Nix Flake、NixOS module、systemd Worker 与数据库迁移。</td>
+    <td><strong>生产部署</strong><br>实时管理控制台、权威告警查询、Nix Flake、NixOS module、systemd Worker 与数据库迁移。</td>
   </tr>
 </table>
 

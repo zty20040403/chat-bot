@@ -53,6 +53,7 @@ class ToolApproval:
 
 _READ_TOOLS = {
     "web_search",
+    "query_alerts",
     "read_image_text",
     "view_image",
     "view_video",

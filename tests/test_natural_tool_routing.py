@@ -27,6 +27,7 @@ from src.plugins.ai_chat.ai_tools import (
     MEMORY_ADD_TOOL_NAME,
     MEMORY_LIST_TOOL_NAME,
     MEMORY_REMOVE_TOOL_NAME,
+    QUERY_ALERTS_TOOL_NAME,
     SEND_QQ_FACE_TOOL_NAME,
     SEND_STICKER_TOOL_NAME,
     VIEW_IMAGE_TOOL_NAME,
@@ -37,7 +38,7 @@ from src.plugins.ai_chat.context_pipeline import TurnContextPlan
 from src.plugins.ai_chat.media_library import MediaRecord
 
 
-def _group_event(user_id: int = 321) -> GroupMessageEvent:
+def _group_event(user_id: int = 321, group_id: int = 789) -> GroupMessageEvent:
     return GroupMessageEvent(
         time=1,
         self_id=999,
@@ -56,7 +57,7 @@ def _group_event(user_id: int = 321) -> GroupMessageEvent:
             "card": "",
             "role": "member",
         },
-        group_id=789,
+        group_id=group_id,
     )
 
 
@@ -500,6 +501,104 @@ class NaturalToolRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(MEMORY_ADD_TOOL_NAME, captured_tool_names)
         self.assertIn(MEMORY_LIST_TOOL_NAME, captured_tool_names)
         self.assertIn(MEMORY_REMOVE_TOOL_NAME, captured_tool_names)
+
+    async def test_alert_ranking_uses_authoritative_alert_tool(self) -> None:
+        captured: dict[str, object] = {}
+        alert_store = Mock()
+        alert_store.snapshot.return_value = {
+            "timezone": "Asia/Shanghai",
+            "range_start": 100,
+            "generated_at": 200,
+            "summary": {"triggered": 14, "current_active": 8},
+            "incidents": [
+                {
+                    "incident_key": "host:r2s",
+                    "severity": "warning",
+                    "status": "firing",
+                    "event_count": 1,
+                    "active_event_count": 1,
+                    "summary": "r2s service failed",
+                    "last_seen_at": 190,
+                },
+                {
+                    "incident_key": "host:h310",
+                    "severity": "critical",
+                    "status": "firing",
+                    "event_count": 13,
+                    "active_event_count": 7,
+                    "summary": "h310 unreachable",
+                    "last_seen_at": 195,
+                },
+            ],
+        }
+        alert_store.rank_incidents.return_value = {
+            "range_start": 100,
+            "generated_at": 200,
+            "items": [
+                {
+                    "incident_key": "host:h310",
+                    "event_count": 13,
+                    "active_event_count": 7,
+                    "first_seen_at": 101,
+                    "last_seen_at": 195,
+                },
+                {
+                    "incident_key": "host:r2s",
+                    "event_count": 1,
+                    "active_event_count": 1,
+                    "first_seen_at": 102,
+                    "last_seen_at": 190,
+                },
+            ],
+        }
+
+        async def fake_deepseek(
+            user_text,
+            history,
+            tools,
+            execute_tool,
+            **kwargs,
+        ) -> str:
+            del user_text, history
+            captured["tool_names"] = {
+                tool["function"]["name"] for tool in tools
+            }
+            captured["tool_choice"] = kwargs["tool_choice"]
+            captured["result"] = await execute_tool(
+                QUERY_ALERTS_TOOL_NAME,
+                {"days": 7, "limit": 10},
+            )
+            return "h310 最多"
+
+        import src.plugins.ai_chat as ai_chat
+
+        with (
+            patch.object(ai_chat, "alert_store", alert_store),
+            patch.object(ai_chat, "_alert_tools_allowed", return_value=True),
+            patch.object(ai_chat, "message_ledger", None),
+            patch.object(ai_chat, "pin_store", None),
+            patch.object(ai_chat, "source_store", None),
+            patch.object(ai_chat, "_current_long_term_memory", return_value=""),
+            patch.object(ai_chat, "ask_deepseek_with_tools", new=fake_deepseek),
+            patch.object(ai_chat.memory, "append_turn"),
+        ):
+            answer = await ai_chat._ask_ai(
+                AsyncMock(),
+                _group_event(group_id=611798505),
+                "告警系统里面谁最多",
+                available_image_sources=[],
+            )
+
+        payload = str(captured["result"])
+        self.assertIn("h310", answer)
+        self.assertIn(QUERY_ALERTS_TOOL_NAME, captured["tool_names"])
+        self.assertEqual(
+            captured["tool_choice"]["function"]["name"],
+            QUERY_ALERTS_TOOL_NAME,
+        )
+        self.assertLess(payload.find("host:h310"), payload.find("host:r2s"))
+        alert_store.snapshot.assert_called_once_with(days=7, limit=100)
+        alert_store.rank_incidents.assert_called_once_with(days=7, limit=10)
 
     def test_secret_like_content_is_not_eligible_for_memory(self) -> None:
         self.assertTrue(_looks_like_secret("API_KEY=secret-value"))

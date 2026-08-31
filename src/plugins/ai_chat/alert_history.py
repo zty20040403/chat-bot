@@ -154,14 +154,7 @@ class AlertEventStore:
         bounded_days = min(max(int(days), 1), 365)
         bounded_limit = min(max(int(limit), 1), 500)
         now = int(time.time())
-        timezone = ZoneInfo("Asia/Shanghai")
-        local_now = datetime.fromtimestamp(now, tz=timezone)
-        start = int(
-            (
-                local_now.replace(hour=0, minute=0, second=0, microsecond=0)
-                - timedelta(days=bounded_days - 1)
-            ).timestamp()
-        )
+        start = _range_start(bounded_days, now=now)
 
         connection = self.database.store_connection()
         try:
@@ -261,6 +254,61 @@ class AlertEventStore:
             ],
         }
 
+    def rank_incidents(
+        self,
+        *,
+        days: int = 7,
+        limit: int = 10,
+    ) -> dict[str, object]:
+        """Rank incidents over the full period without snapshot row truncation."""
+
+        bounded_days = min(max(int(days), 1), 365)
+        bounded_limit = min(max(int(limit), 1), 20)
+        now = int(time.time())
+        start = _range_start(bounded_days, now=now)
+        connection = self.database.store_connection()
+        try:
+            rows = connection.execute(
+                """
+                SELECT
+                    incident_key,
+                    COUNT(*) AS event_count,
+                    SUM(CASE WHEN status = 'firing' THEN 1 ELSE 0 END)
+                        AS active_event_count,
+                    MIN(first_seen_at) AS first_seen_at,
+                    MAX(last_seen_at) AS last_seen_at
+                FROM alert_events
+                WHERE first_seen_at >= ? OR status = 'firing'
+                GROUP BY incident_key
+                ORDER BY event_count DESC,
+                         active_event_count DESC,
+                         last_seen_at DESC
+                LIMIT ?
+                """,
+                (start, bounded_limit),
+            ).fetchall()
+        finally:
+            connection.close()
+
+        return {
+            "configured": True,
+            "available": True,
+            "timezone": "Asia/Shanghai",
+            "days": bounded_days,
+            "range_start": start,
+            "generated_at": now,
+            "items": [
+                {
+                    "incident_key": str(row["incident_key"]),
+                    "event_count": int(row["event_count"] or 0),
+                    "active_event_count": int(row["active_event_count"] or 0),
+                    "first_seen_at": int(row["first_seen_at"] or 0),
+                    "last_seen_at": int(row["last_seen_at"] or 0),
+                }
+                for row in rows
+            ],
+        }
+
 
 def _event_payload(row: Any) -> dict[str, object]:
     return {
@@ -284,6 +332,17 @@ def _event_payload(row: Any) -> dict[str, object]:
             int(row["resolved_at"]) if row["resolved_at"] is not None else None
         ),
     }
+
+
+def _range_start(days: int, *, now: int) -> int:
+    timezone = ZoneInfo("Asia/Shanghai")
+    local_now = datetime.fromtimestamp(now, tz=timezone)
+    return int(
+        (
+            local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+            - timedelta(days=days - 1)
+        ).timestamp()
+    )
 
 
 def _incident_payloads(events: Sequence[dict[str, object]]) -> list[dict[str, object]]:

@@ -6,6 +6,7 @@ ToolDefinition = dict[str, Any]
 ToolChoice = Union[str, dict[str, Any]]
 
 WEB_SEARCH_TOOL_NAME = "web_search"
+QUERY_ALERTS_TOOL_NAME = "query_alerts"
 READ_IMAGE_TEXT_TOOL_NAME = "read_image_text"
 VIEW_IMAGE_TOOL_NAME = "view_image"
 VIEW_VIDEO_TOOL_NAME = "view_video"
@@ -81,6 +82,36 @@ WEB_SEARCH_TOOL: ToolDefinition = {
                 },
             },
             "required": ["query", "freshness"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+QUERY_ALERTS_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": QUERY_ALERTS_TOOL_NAME,
+        "description": (
+            "查询 Kennethbot 权威告警库，而不是搜索群聊通知。用于回答当前哪些"
+            "服务器或服务在告警、过去谁告警最多、谁是常客、告警数量和恢复情况。"
+            "结果按 incident_key 聚合同一台机器或服务，并明确统计周期。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "days": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 365,
+                    "description": "统计最近多少个自然日；未指定时默认 7 天。",
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 20,
+                    "description": "排名和当前告警最多返回多少项；默认 10。",
+                },
+            },
             "additionalProperties": False,
         },
     },
@@ -1215,6 +1246,7 @@ BROWSER_TOOLS = [
 def available_tools(
     *,
     include_web_search: bool,
+    include_alert_tools: bool = False,
     include_image_ocr: bool,
     include_voice_transcription: bool = False,
     include_voice_reply: bool = False,
@@ -1235,6 +1267,8 @@ def available_tools(
     tools: list[ToolDefinition] = []
     if include_web_search:
         tools.append(WEB_SEARCH_TOOL)
+    if include_alert_tools:
+        tools.append(QUERY_ALERTS_TOOL)
     if include_image_ocr:
         tools.append(READ_IMAGE_TEXT_TOOL)
     if include_media_tools:

@@ -48,6 +48,7 @@ from .ai_tools import (
     MEMORY_LIST_TOOL_NAME,
     MEMORY_REMOVE_TOOL_NAME,
     PIN_MESSAGE_TOOL_NAME,
+    QUERY_ALERTS_TOOL_NAME,
     READ_IMAGE_TEXT_TOOL_NAME,
     REPLY_WITH_VOICE_TOOL_NAME,
     SEND_QQ_FACE_TOOL_NAME,
@@ -185,6 +186,28 @@ def _video_analysis_required(
     )
 
 
+def _alert_query_required(user_text: str) -> bool:
+    return bool(
+        re.search(r"告警|报警|alertmanager|prometheus", user_text, re.IGNORECASE)
+        and re.search(
+            r"谁|最多|常客|当前|现在|最近|今天|本周|历史|数量|统计|"
+            r"哪台|哪个|还有|状态|恢复|故障|寄了|挂了",
+            user_text,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _alert_tools_allowed(event: MessageEvent) -> bool:
+    return bool(
+        event.user_id in settings.admin_user_ids
+        or (
+            isinstance(event, GroupMessageEvent)
+            and event.group_id == settings.alert_notify_group_id
+        )
+    )
+
+
 async def _resolve_video_reference(
     bot: Bot,
     event: MessageEvent,
@@ -270,6 +293,10 @@ async def _ask_ai(
         return "语音功能暂时没有开启。"
 
     conversation_id = _conversation_id(event)
+    alert_tools_enabled = bool(
+        alert_store is not None and _alert_tools_allowed(event)
+    )
+    alert_query_required = alert_tools_enabled and _alert_query_required(user_text)
     sandbox_tools_enabled = (
         isinstance(event, GroupMessageEvent)
         and settings.is_sandbox_user_allowed(event.user_id)
@@ -364,6 +391,7 @@ async def _ask_ai(
             settings.search_enabled
             and (force_search or settings.search_auto_enabled)
         ),
+        include_alert_tools=alert_tools_enabled,
         include_image_ocr=(
             settings.ocr_enabled and bool(available_image_sources)
         ),
@@ -1128,6 +1156,99 @@ async def _ask_ai(
                 ensure_ascii=False,
             )
 
+        if name == QUERY_ALERTS_TOOL_NAME:
+            if not alert_tools_enabled or alert_store is None:
+                return json.dumps(
+                    {"ok": False, "error": "当前会话无权读取告警状态。"},
+                    ensure_ascii=False,
+                )
+            try:
+                days = min(max(int(arguments.get("days") or 7), 1), 365)
+                limit = min(max(int(arguments.get("limit") or 10), 1), 20)
+                snapshot = await asyncio.to_thread(
+                    alert_store.snapshot,
+                    days=days,
+                    limit=100,
+                )
+                ranked = await asyncio.to_thread(
+                    alert_store.rank_incidents,
+                    days=days,
+                    limit=limit,
+                )
+                incidents = (
+                    snapshot.get("incidents")
+                    if isinstance(snapshot, dict)
+                    and isinstance(snapshot.get("incidents"), list)
+                    else []
+                )
+                details_by_key = {
+                    str(item.get("incident_key") or ""): item
+                    for item in incidents
+                    if isinstance(item, dict)
+                }
+                ranked_items = (
+                    ranked.get("items")
+                    if isinstance(ranked, dict)
+                    and isinstance(ranked.get("items"), list)
+                    else []
+                )
+                ranking: list[dict[str, object]] = []
+                for item in ranked_items:
+                    if not isinstance(item, dict):
+                        continue
+                    key = str(item.get("incident_key") or "")
+                    ranking.append({**details_by_key.get(key, {}), **item})
+                active = sorted(
+                    (
+                        item
+                        for item in incidents
+                        if isinstance(item, dict)
+                        and int(item.get("active_event_count") or 0) > 0
+                    ),
+                    key=lambda item: (
+                        int(item.get("active_event_count") or 0),
+                        int(item.get("last_seen_at") or 0),
+                    ),
+                    reverse=True,
+                )[:limit]
+
+                def compact(item: dict[str, object]) -> dict[str, object]:
+                    return {
+                        "target": str(item.get("incident_key") or ""),
+                        "severity": str(item.get("severity") or ""),
+                        "status": str(item.get("status") or ""),
+                        "event_count": int(item.get("event_count") or 0),
+                        "active_event_count": int(
+                            item.get("active_event_count") or 0
+                        ),
+                        "summary": str(item.get("summary") or "")[:300],
+                        "last_seen_at": int(item.get("last_seen_at") or 0),
+                    }
+                return json.dumps(
+                    {
+                        "ok": True,
+                        "authoritative": True,
+                        "timezone": str(snapshot.get("timezone") or "Asia/Shanghai"),
+                        "days": days,
+                        "range_start": int(ranked.get("range_start") or 0),
+                        "generated_at": int(ranked.get("generated_at") or 0),
+                        "summary": snapshot.get("summary") or {},
+                        "ranking": [compact(item) for item in ranking],
+                        "active": [compact(item) for item in active],
+                        "ranking_basis": (
+                            "按同一 incident_key 在统计周期内的独立告警事件数降序；"
+                            "不是按群聊通知条数。"
+                        ),
+                    },
+                    ensure_ascii=False,
+                )
+            except (OSError, RuntimeError, TypeError, ValueError, DatabaseError) as exc:
+                logger.warning(f"Alert query tool failed: {exc}")
+                return json.dumps(
+                    {"ok": False, "error": "权威告警库查询失败，请稍后重试。"},
+                    ensure_ascii=False,
+                )
+
         if name == VIEW_IMAGE_TOOL_NAME:
             if vision_worker is None:
                 return json.dumps(
@@ -1540,6 +1661,8 @@ async def _ask_ai(
     tool_choice = "auto"
     if force_search:
         tool_choice = force_tool(WEB_SEARCH_TOOL_NAME)
+    elif alert_query_required:
+        tool_choice = force_tool(QUERY_ALERTS_TOOL_NAME)
     elif video_analysis_required:
         tool_choice = force_tool(VIEW_VIDEO_TOOL_NAME)
     elif force_ocr or private_vision_required:
@@ -1591,6 +1714,14 @@ async def _ask_ai(
                 "用户要求查看、总结、评价视频，或使用‘这个/它/刚才那个’等指代时，"
                 "必须先调用 view_video；未指定句柄时不要编造 msg#，直接省略 "
                 "message_handle。"
+            )
+        if alert_tools_enabled:
+            context_parts.append(
+                "[权威告警数据]\n"
+                "涉及当前告警、历史次数、排名、常客、恢复情况或哪台服务器故障时，"
+                "必须调用 query_alerts。它读取 PostgreSQL 告警生命周期库；不要用 "
+                "search_messages 统计群通知，也不要凭近期聊天猜测。回答必须说明统计周期"
+                "和口径。"
             )
         skill_index = skill_registry.prompt_index()
         if skill_index:

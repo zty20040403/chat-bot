@@ -54,6 +54,7 @@ from .ai_tools import (
     MEMORY_LIST_TOOL_NAME,
     MEMORY_REMOVE_TOOL_NAME,
     PIN_MESSAGE_TOOL_NAME,
+    QUERY_ALERTS_TOOL_NAME,
     READ_IMAGE_TEXT_TOOL_NAME,
     REPLY_WITH_VOICE_TOOL_NAME,
     SEND_QQ_FACE_TOOL_NAME,
@@ -238,7 +239,7 @@ from . import onebot_delivery as _onebot_delivery
 SEND_RETRY_DELAY_SECONDS = 2.0
 SEND_RETRY_MAX_CHARS = 800
 TURN_PROMPT_VERSION = "qqbot-turn-v12"
-BOT_VERSION = "0.9.7"
+BOT_VERSION = "0.9.8"
 EMPTY_MENTION_FOLLOW_UP = "你觉得呢"
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 proactive_check_gate = ProactiveCheckGate()
@@ -299,6 +300,7 @@ browser_manager = app_context.browser_manager
 rich_renderer = app_context.rich_renderer
 media_library = app_context.media_library
 source_store = app_context.source_store
+alert_store = app_context.alert_store
 vision_worker = app_context.vision_worker
 video_analyzer: DeepVideoAnalyzer | None = None
 if (
