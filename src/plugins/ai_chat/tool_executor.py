@@ -26,6 +26,7 @@ from nonebot.adapters.onebot.v11 import (
     Message,
     MessageEvent,
     MessageSegment,
+    PrivateMessageEvent,
 )
 from nonebot.adapters.onebot.v11.exception import (
     ActionFailed,
@@ -108,6 +109,7 @@ from .output_planner import (
 )
 from .ocr import (
     OCRError,
+    image_sources,
     recognize_images,
     reply_message_id,
 )
@@ -134,6 +136,25 @@ from .voice import (
     synthesize_silk_voice,
     transcribe_voice,
 )
+
+
+def _private_vision_required(
+    event: MessageEvent,
+    user_text: str,
+    available_image_sources: list[str],
+) -> bool:
+    if not isinstance(event, PrivateMessageEvent) or not available_image_sources:
+        return False
+    if image_sources(event.original_message, max_images=1):
+        return True
+    return bool(
+        re.search(
+            r"图片|照片|截图|图里|表情|看图|看看|看下|分析|识别|"
+            r"刚才|上面|这(?:个|张|是|啥|什么)|它|怎么(?:样|回事)|你觉得",
+            user_text,
+            flags=re.IGNORECASE,
+        )
+    )
 
 
 async def _ask_ai(
@@ -223,9 +244,16 @@ async def _ask_ai(
         "user_memory": 0,
     }
 
-    if available_image_sources is None and settings.ocr_enabled:
+    if available_image_sources is None and (
+        settings.ocr_enabled or vision_worker is not None
+    ):
         available_image_sources = await _resolve_ocr_sources(bot, event)
     available_image_sources = available_image_sources or []
+    private_vision_required = _private_vision_required(
+        event,
+        user_text,
+        available_image_sources,
+    )
 
     should_resolve_voice = (
         force_voice_transcription
@@ -1028,7 +1056,7 @@ async def _ask_ai(
                     )
                     if target is None or not target.native_message_id:
                         return json.dumps(
-                            {"ok": False, "error": "当前群看不到这条图片消息。"},
+                            {"ok": False, "error": "当前会话看不到这条图片消息。"},
                             ensure_ascii=False,
                         )
                     native_message_id = target.native_message_id
@@ -1371,7 +1399,7 @@ async def _ask_ai(
     tool_choice = "auto"
     if force_search:
         tool_choice = force_tool(WEB_SEARCH_TOOL_NAME)
-    elif force_ocr:
+    elif force_ocr or private_vision_required:
         tool_choice = force_tool(
             VIEW_IMAGE_TOOL_NAME
             if vision_worker is not None
@@ -1404,6 +1432,15 @@ async def _ask_ai(
             "表格；宿主会把完整代码块和表格渲染为清晰图片。\n"
             "可用反应表：" + face_prompt_table()
         ]
+        if available_image_sources:
+            context_parts.append(
+                "[当前会话可用图片]\n"
+                f"当前消息、引用消息或该用户最近五分钟内共有 "
+                f"{len(available_image_sources)} 张可读取图片。用户询问图片内容、"
+                "使用‘这个/它/刚才那张’等指代，或本轮直接附带图片时，必须先调用 "
+                "view_image，不能只根据文字或旧上下文猜图。未指定句柄时不要编造 "
+                "msg#，直接省略 message_handle。"
+            )
         skill_index = skill_registry.prompt_index()
         if skill_index:
             context_parts.append(skill_index)

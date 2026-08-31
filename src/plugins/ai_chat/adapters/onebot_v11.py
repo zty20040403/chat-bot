@@ -3,7 +3,11 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, Protocol
 
-from nonebot.adapters.onebot.v11 import GroupMessageEvent, MessageEvent
+from nonebot.adapters.onebot.v11 import (
+    GroupMessageEvent,
+    MessageEvent,
+    PrivateMessageEvent,
+)
 
 from ..bridges import BridgeEvent
 from ..ocr import image_sources
@@ -165,17 +169,24 @@ class OneBotIngestAdapter:
             self.logger.warning(f"Canonical message ingest failed: {exc}")
 
     async def observe_group_activity(self, event: MessageEvent) -> None:
-        if not isinstance(event, GroupMessageEvent):
+        if event.user_id == event.self_id:
             return
-        if event.user_id == event.self_id or not self.group_enabled(event.group_id):
+        if isinstance(event, GroupMessageEvent):
+            if not self.group_enabled(event.group_id):
+                return
+            if self.user_profiles is not None:
+                self.user_profiles.observe(
+                    event.group_id,
+                    event.user_id,
+                    nickname=event.sender.nickname or "",
+                    card=event.sender.card or "",
+                )
+        elif not isinstance(event, PrivateMessageEvent):
             return
-        if self.user_profiles is not None:
-            self.user_profiles.observe(
-                event.group_id,
-                event.user_id,
-                nickname=event.sender.nickname or "",
-                card=event.sender.card or "",
-            )
+
+        # Recent media belongs to the physical conversation and sender. Private
+        # messages need the same short-lived cache as groups so a phone user can
+        # send an image first and ask about it in the next message.
         sources = image_sources(
             event.original_message,
             max_images=self.ocr_max_images,

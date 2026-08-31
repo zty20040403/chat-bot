@@ -10,7 +10,12 @@ import nonebot
 
 nonebot.init()
 
-from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message, MessageSegment
+from nonebot.adapters.onebot.v11 import (
+    GroupMessageEvent,
+    Message,
+    MessageSegment,
+    PrivateMessageEvent,
+)
 
 from src.plugins.ai_chat import (
     _ask_ai,
@@ -26,6 +31,7 @@ from src.plugins.ai_chat.ai_tools import (
     SEND_STICKER_TOOL_NAME,
     VIEW_IMAGE_TOOL_NAME,
 )
+from src.plugins.ai_chat.adapters import OneBotIngestAdapter
 from src.plugins.ai_chat.context_pipeline import TurnContextPlan
 from src.plugins.ai_chat.media_library import MediaRecord
 
@@ -50,6 +56,29 @@ def _group_event(user_id: int = 321) -> GroupMessageEvent:
             "role": "member",
         },
         group_id=789,
+    )
+
+
+def _private_image_event(user_id: int = 321) -> PrivateMessageEvent:
+    message = Message(
+        [
+            MessageSegment.image("https://multimedia.nt.qq.com.cn/test.jpg"),
+            MessageSegment.text("看看这张图"),
+        ]
+    )
+    return PrivateMessageEvent(
+        time=1,
+        self_id=999,
+        post_type="message",
+        sub_type="friend",
+        user_id=user_id,
+        message_type="private",
+        message_id=655,
+        message=message,
+        original_message=message,
+        raw_message=str(message),
+        font=0,
+        sender={"user_id": user_id, "nickname": "Alice"},
     )
 
 
@@ -291,6 +320,70 @@ class NaturalToolRoutingTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("[image#21.0", str(captured["group_context"]))
         self.assertIn(VIEW_IMAGE_TOOL_NAME, captured["tool_names"])
+
+    async def test_private_image_forces_vision_tool_and_announces_source(self) -> None:
+        captured: dict[str, object] = {}
+
+        async def fake_deepseek(
+            user_text,
+            history,
+            tools,
+            execute_tool,
+            **kwargs,
+        ) -> str:
+            del user_text, history, execute_tool
+            captured["tool_names"] = {
+                tool["function"]["name"] for tool in tools
+            }
+            captured.update(kwargs)
+            return "已看图"
+
+        import src.plugins.ai_chat as ai_chat
+
+        with (
+            patch.object(ai_chat, "vision_worker", object()),
+            patch.object(ai_chat, "message_ledger", None),
+            patch.object(ai_chat, "pin_store", None),
+            patch.object(ai_chat, "source_store", None),
+            patch.object(ai_chat, "_current_long_term_memory", return_value=""),
+            patch.object(ai_chat, "ask_deepseek_with_tools", new=fake_deepseek),
+            patch.object(ai_chat.memory, "append_turn"),
+        ):
+            answer = await ai_chat._ask_ai(
+                AsyncMock(),
+                _private_image_event(),
+                "看看这张图",
+                available_image_sources=[
+                    "https://multimedia.nt.qq.com.cn/test.jpg"
+                ],
+            )
+
+        self.assertIn("已看图", answer)
+        self.assertIn(VIEW_IMAGE_TOOL_NAME, captured["tool_names"])
+        self.assertEqual(
+            captured["tool_choice"]["function"]["name"],
+            VIEW_IMAGE_TOOL_NAME,
+        )
+        self.assertIn("当前会话可用图片", captured["tool_context"])
+
+    async def test_private_image_is_recorded_for_follow_up_message(self) -> None:
+        recent_images = Mock()
+        adapter = OneBotIngestAdapter(
+            group_enabled=lambda _group_id: True,
+            canonical_scope=Mock(),
+            image_cache_key=lambda event: f"private:{event.user_id}",
+            voice_cache_key=lambda event: f"private:{event.user_id}",
+            ocr_max_images=2,
+            logger=Mock(),
+            recent_images=recent_images,
+        )
+
+        await adapter.observe_group_activity(_private_image_event())
+
+        recent_images.record.assert_called_once_with(
+            "private:321",
+            ["https://multimedia.nt.qq.com.cn/test.jpg"],
+        )
 
     async def test_natural_request_uses_auto_tool_choice(self) -> None:
         captured_tool_names: set[str] = set()
