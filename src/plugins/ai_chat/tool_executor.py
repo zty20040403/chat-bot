@@ -2339,6 +2339,7 @@ async def _ask_ai(
             cleanup = await agent_executor.cleanup_task_sandboxes()
             destroyed = cleanup["destroyed"]
             failed = cleanup["failed"]
+            retained = cleanup["retained"]
             if destroyed:
                 logger.info(
                     f"Destroyed {len(destroyed)} task sandbox(es): "
@@ -2348,6 +2349,11 @@ async def _ask_ai(
                 logger.warning(
                     f"Could not destroy {len(failed)} task sandbox(es): "
                     + ", ".join(failed)
+                )
+            if retained:
+                logger.info(
+                    f"Retained {len(retained)} task sandbox(es) with unsent artifacts: "
+                    + ", ".join(retained)
                 )
 
     if not answer and not voice_reply_text and visual_reply_segment is None:

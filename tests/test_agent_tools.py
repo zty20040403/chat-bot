@@ -143,7 +143,11 @@ class FakeSandboxManager:
     async def list(self, owner: str) -> list[dict[str, str]]:
         del owner
         return [
-            {"sandbox_id": sandbox_id, "status": "running"}
+            {
+                "sandbox_id": sandbox_id,
+                "status": "running",
+                "purpose": "task",
+            }
             for sandbox_id in {"s123abc", *self.created}
         ]
 
@@ -594,8 +598,36 @@ class AgentToolExecutorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(cleanup["destroyed"], (second_id,))
         self.assertEqual(cleanup["failed"], ())
+        self.assertEqual(cleanup["retained"], ())
         self.assertEqual(repeated["destroyed"], ())
         self.assertEqual(self.sandbox.destroyed, [first_id, second_id])
+
+    async def test_unsent_artifact_retains_sandbox_until_followup_delivery(self) -> None:
+        self.executor._task_sandbox_ids.add("s123abc")
+        self.executor._pending_artifacts["s123abc"] = {"report.pdf"}
+
+        retained = await self.executor.cleanup_task_sandboxes()
+
+        self.assertEqual(retained["retained"], ("s123abc",))
+        self.assertEqual(self.sandbox.destroyed, [])
+
+        self.sandbox.files[("s123abc", "/workspace/report.pdf")] = b"%PDF-fake"
+        result = json.loads(
+            await self.executor.execute(
+                "send_file_from_sandbox",
+                {
+                    "sandbox_id": "s123abc",
+                    "path": "/workspace/report.pdf",
+                    "filename": "中文报告.pdf",
+                },
+            )
+            or "{}"
+        )
+        cleanup = await self.executor.cleanup_task_sandboxes()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(cleanup["destroyed"], ("s123abc",))
+        self.assertEqual(self.sandbox.destroyed, ["s123abc"])
 
     async def test_forward_expansion_never_exposes_native_user_or_forward_ids(self) -> None:
         await self.executor.ensure_canonical_message(1)

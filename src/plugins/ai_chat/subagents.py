@@ -219,6 +219,13 @@ _ROUTE_LONG_ACTION_PATTERN = re.compile(
     r"(?:修复|编写|修改).{0,12}(?:测试|构建|打包)|"
     r"(?:下载|读取).{0,12}(?:分析|整理|生成))"
 )
+_DELIVERY_REQUEST_PATTERN = re.compile(
+    r"(?:发到群|发群里|发出来|发送到群|传到群|上传到群|发给我|交付(?:文件|pdf|文档))",
+    re.IGNORECASE,
+)
+_SANDBOX_ARTIFACT_HANDLE_PATTERN = re.compile(
+    r"^(s[0-9a-f]{6}):(/workspace/.+)$"
+)
 
 
 def route_subagent_request(
@@ -988,6 +995,19 @@ class SubAgentCoordinator:
 
         completed: dict[str, StepOutcome] = {}
         pending = {step.key: step for step in steps}
+        delivered_artifacts: set[tuple[str, str]] = set()
+
+        async def tracked_execute_tool(
+            name: str,
+            arguments: dict[str, object],
+        ) -> str:
+            raw_result = await execute_tool(name, arguments)
+            if name == "send_file_from_sandbox" and _tool_result_ok(raw_result):
+                key = _artifact_key_from_arguments(arguments)
+                if key is not None:
+                    delivered_artifacts.add(key)
+            return raw_result
+
         while pending:
             if self.store.cancellation_requested(task.task_id):
                 raise asyncio.CancelledError
@@ -1018,7 +1038,7 @@ class SubAgentCoordinator:
                         },
                         selected_profile=selected_profile,
                         tools_by_name=tools_by_name,
-                        execute_tool=execute_tool,
+                        execute_tool=tracked_execute_tool,
                     )
                     for step in ready
                 )
@@ -1033,6 +1053,14 @@ class SubAgentCoordinator:
                     for item in outcomes
                 )
                 await progress(f"{task.handle} 进度：{finished}。")
+
+        delivery_results = await self._deliver_requested_artifacts(
+            task,
+            completed,
+            execute_tool=tracked_execute_tool,
+            delivered_artifacts=delivered_artifacts,
+            progress=progress,
+        )
 
         self.store.set_task_state(task.task_id, "verifying")
         if progress is not None:
@@ -1055,8 +1083,10 @@ class SubAgentCoordinator:
         )
         _merge_trace(parent_trace, final_trace)
         failures = [item for item in completed.values() if not item.succeeded]
+        delivery_failed = any(not bool(item.get("ok")) for item in delivery_results)
         result = {
             "answer": final_text,
+            "deliveries": delivery_results,
             "steps": {
                 key: {
                     "role": outcome.step.role,
@@ -1067,9 +1097,77 @@ class SubAgentCoordinator:
                 for key, outcome in completed.items()
             },
         }
-        status = "partial" if failures else "completed"
+        status = "partial" if failures or delivery_failed else "completed"
         self.store.set_task_state(task.task_id, status, result=result)
         return f"{task.handle}\n{final_text}" if final_text else f"{task.handle} 已完成。"
+
+    async def _deliver_requested_artifacts(
+        self,
+        task: TaskRecord,
+        completed: Mapping[str, StepOutcome],
+        *,
+        execute_tool: ToolExecutor,
+        delivered_artifacts: set[tuple[str, str]],
+        progress: ProgressCallback | None,
+    ) -> list[dict[str, Any]]:
+        if not _DELIVERY_REQUEST_PATTERN.search(task.objective):
+            return []
+
+        deliveries: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for outcome in completed.values():
+            artifacts = outcome.result.get("artifacts")
+            if not isinstance(artifacts, list):
+                continue
+            for raw_artifact in artifacts:
+                if not isinstance(raw_artifact, dict):
+                    continue
+                handle = str(raw_artifact.get("handle") or "").strip()
+                parsed = _sandbox_artifact_key(handle)
+                if parsed is None or parsed in seen:
+                    continue
+                seen.add(parsed)
+                sandbox_id, path = parsed
+                filename = str(raw_artifact.get("name") or "").strip()
+                if parsed in delivered_artifacts:
+                    payload: dict[str, Any] = {
+                        "ok": True,
+                        "already_delivered": True,
+                        "handle": handle,
+                        "filename": filename,
+                    }
+                else:
+                    if progress is not None:
+                        await progress(
+                            f"{task.handle} · 主控 Agent：正在发送交付文件"
+                            f"{f' {filename}' if filename else ''}。"
+                        )
+                    raw_result = await execute_tool(
+                        "send_file_from_sandbox",
+                        {
+                            "sandbox_id": sandbox_id,
+                            "path": path,
+                            "filename": filename,
+                        },
+                    )
+                    payload = _tool_result_payload(raw_result)
+                    payload.setdefault("handle", handle)
+                    payload.setdefault("filename", filename)
+                raw_artifact["delivery"] = payload
+                deliveries.append(payload)
+
+                if bool(payload.get("ok")):
+                    facts = outcome.result.setdefault("facts", [])
+                    if isinstance(facts, list):
+                        facts.append(f"交付文件已发送：{filename or path}")
+                else:
+                    warnings = outcome.result.setdefault("warnings", [])
+                    if isinstance(warnings, list):
+                        warnings.append(
+                            "交付文件发送失败："
+                            + str(payload.get("error") or "未知原因")
+                        )
+        return deliveries
 
     async def _run_step(
         self,
@@ -1311,6 +1409,37 @@ def _parse_worker_result(answer: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise RuntimeError("Sub-Agent result must be a JSON object")
     return payload
+
+
+def _sandbox_artifact_key(handle: str) -> tuple[str, str] | None:
+    matched = _SANDBOX_ARTIFACT_HANDLE_PATTERN.fullmatch(handle.strip())
+    if matched is None:
+        return None
+    return matched.group(1), matched.group(2)
+
+
+def _artifact_key_from_arguments(
+    arguments: Mapping[str, object],
+) -> tuple[str, str] | None:
+    sandbox_id = str(arguments.get("sandbox_id") or "").strip()
+    path = str(arguments.get("path") or "").strip()
+    if not path.startswith("/workspace/"):
+        path = "/workspace/" + path.lstrip("/")
+    return _sandbox_artifact_key(f"{sandbox_id}:{path}")
+
+
+def _tool_result_payload(raw_result: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(raw_result)
+    except (json.JSONDecodeError, TypeError):
+        return {"ok": False, "error": str(raw_result)[:500] or "工具没有返回结果"}
+    if not isinstance(payload, dict):
+        return {"ok": False, "error": "工具返回格式无效"}
+    return dict(payload)
+
+
+def _tool_result_ok(raw_result: str) -> bool:
+    return bool(_tool_result_payload(raw_result).get("ok"))
 
 
 def _synthesis_input(objective: str, completed: Mapping[str, StepOutcome]) -> str:

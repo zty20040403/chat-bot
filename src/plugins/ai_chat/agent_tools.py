@@ -67,6 +67,20 @@ from .turn_journal import TurnJournal
 from .video_analysis import DeepVideoAnalysisError, DeepVideoAnalyzer
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+DELIVERABLE_SUFFIXES = {
+    ".pdf",
+    ".doc",
+    ".docx",
+    ".xls",
+    ".xlsx",
+    ".ppt",
+    ".pptx",
+    ".csv",
+    ".zip",
+    ".tar",
+    ".gz",
+    ".7z",
+}
 MESSAGE_HANDLE_PATTERN = re.compile(r"^msg#([1-9][0-9]*)$")
 AGENT_TOOL_PROMPT = (
     "你可以使用当前群聊的历史消息、群文件和隔离 Docker 开发沙盒。"
@@ -202,6 +216,7 @@ class AgentToolExecutor:
         self.video_analyzer = video_analyzer
         self.job_store = job_store
         self._task_sandbox_ids: set[str] = set()
+        self._pending_artifacts: dict[str, set[str]] = {}
         self.output_resolver = OneBotModelOutputResolver(
             bot,
             event,
@@ -768,7 +783,12 @@ class AgentToolExecutor:
         """Destroy only sandboxes created by this executor's agent turn."""
         destroyed: list[str] = []
         failed: list[str] = []
+        retained: list[str] = []
         for sandbox_id in sorted(self._task_sandbox_ids):
+            if self._pending_artifacts.get(sandbox_id):
+                self._task_sandbox_ids.discard(sandbox_id)
+                retained.append(sandbox_id)
+                continue
             try:
                 await self.sandbox_manager.destroy(self.owner, sandbox_id)
             except Exception as exc:
@@ -782,6 +802,7 @@ class AgentToolExecutor:
         return {
             "destroyed": tuple(destroyed),
             "failed": tuple(failed),
+            "retained": tuple(retained),
         }
 
     async def _sandbox_exec(
@@ -798,6 +819,9 @@ class AgentToolExecutor:
             command,
             timeout,
         )
+        if result.manifest is not None:
+            for path in result.manifest.changed_workspace_paths:
+                self._track_pending_artifact(sandbox_id, path)
         return _json_result(
             ok=result.returncode == 0,
             returncode=result.returncode,
@@ -823,6 +847,7 @@ class AgentToolExecutor:
             path,
             content,
         )
+        self._track_pending_artifact(sandbox_id, path)
         return _json_result(ok=True, path=path, bytes_written=size)
 
     async def _sandbox_read_file(
@@ -915,13 +940,50 @@ class AgentToolExecutor:
             file="base64://" + base64.b64encode(content).decode("ascii"),
             name=filename,
         )
+        uploaded = bool(response is not False)
+        if uploaded:
+            self._mark_artifact_delivered(sandbox_id, path)
+            await self._schedule_delivered_task_cleanup(sandbox_id)
         return _json_result(
-            ok=True,
+            ok=uploaded,
             filename=filename,
             size=len(content),
-            uploaded=bool(response is not False),
+            uploaded=uploaded,
             pdf_validation=pdf_validation,
         )
+
+    @staticmethod
+    def _workspace_artifact_path(path: str) -> str:
+        normalized = str(PurePosixPath(path.strip()))
+        if normalized == "/workspace":
+            return ""
+        if normalized.startswith("/workspace/"):
+            return normalized.removeprefix("/workspace/")
+        return normalized.lstrip("/")
+
+    def _track_pending_artifact(self, sandbox_id: str, path: str) -> None:
+        relative = self._workspace_artifact_path(path)
+        if not relative or PurePosixPath(relative).suffix.lower() not in DELIVERABLE_SUFFIXES:
+            return
+        self._pending_artifacts.setdefault(sandbox_id, set()).add(relative)
+
+    def _mark_artifact_delivered(self, sandbox_id: str, path: str) -> None:
+        relative = self._workspace_artifact_path(path)
+        pending = self._pending_artifacts.get(sandbox_id)
+        if pending is None:
+            return
+        pending.discard(relative)
+        if not pending:
+            self._pending_artifacts.pop(sandbox_id, None)
+
+    async def _schedule_delivered_task_cleanup(self, sandbox_id: str) -> None:
+        sandboxes = await self.sandbox_manager.list(self.owner)
+        if any(
+            str(item.get("sandbox_id") or "") == sandbox_id
+            and str(item.get("purpose") or "task") == "task"
+            for item in sandboxes
+        ):
+            self._task_sandbox_ids.add(sandbox_id)
 
     async def _send_image_from_sandbox(
         self,

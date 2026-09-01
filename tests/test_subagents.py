@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -265,6 +266,87 @@ class SubAgentCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         task = store.recent(limit=1)[0]
         self.assertEqual(task.status, "completed")
         self.assertEqual([run.role for run in store.runs(task.task_id)], ["researcher", "document"])
+        store.close()
+
+    async def test_explicit_group_delivery_is_completed_after_worker_rounds(self) -> None:
+        store = SubAgentStore(":memory:")
+        profile = ModelProfile(
+            name="test",
+            provider="test",
+            protocol="openai-chat",
+            model="test-model",
+            base_url="http://127.0.0.1",
+            api_key_required=False,
+        )
+        catalog = ModelCatalog({"test": profile}, default_profile="test")
+        coordinator = SubAgentCoordinator(store, catalog, logger=AsyncMock())
+        plan = {
+            "goal": "生成并发送 PDF",
+            "steps": [
+                {
+                    "id": "write",
+                    "agent": "document",
+                    "depends_on": [],
+                    "objective": "生成 PDF",
+                    "deliverable": "已发送的 PDF",
+                }
+            ],
+        }
+        worker_result = json.dumps(
+            {
+                "status": "partial",
+                "summary": "PDF 已生成但工具轮次用完",
+                "facts": [],
+                "artifacts": [
+                    {
+                        "handle": "s123abc:/workspace/output.pdf",
+                        "kind": "file",
+                        "name": "中文报告.pdf",
+                    }
+                ],
+                "warnings": [],
+            },
+            ensure_ascii=False,
+        )
+        execute_tool = AsyncMock(return_value='{"ok":true,"uploaded":true}')
+        with (
+            patch(
+                "src.plugins.ai_chat.subagents.ask_deepseek_json",
+                new=AsyncMock(return_value=plan),
+            ),
+            patch(
+                "src.plugins.ai_chat.subagents.ask_deepseek_with_tools",
+                new=AsyncMock(return_value=worker_result),
+            ),
+            patch(
+                "src.plugins.ai_chat.subagents.ask_deepseek",
+                new=AsyncMock(return_value="PDF 已发到群里。"),
+            ),
+        ):
+            answer = await coordinator.run(
+                scope_key="qq:group:1",
+                conversation_id="group:1:user:2",
+                requester_user_id=2,
+                trigger_message_id=3,
+                objective="整理成 PDF 发到群里",
+                context="必要上下文",
+                selected_profile=profile,
+                tools=[],
+                execute_tool=execute_tool,
+            )
+
+        self.assertIn("PDF 已发到群里", answer)
+        execute_tool.assert_awaited_once_with(
+            "send_file_from_sandbox",
+            {
+                "sandbox_id": "s123abc",
+                "path": "/workspace/output.pdf",
+                "filename": "中文报告.pdf",
+            },
+        )
+        task = store.recent(limit=1)[0]
+        self.assertEqual(task.status, "completed")
+        self.assertTrue(task.result["deliveries"][0]["ok"])
         store.close()
 
 
