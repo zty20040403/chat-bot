@@ -1,3 +1,4 @@
+import { useEffect, useMemo, useState } from 'react'
 import {
   Ban,
   Check,
@@ -5,6 +6,7 @@ import {
   Clock3,
   Database,
   ExternalLink,
+  GitBranch,
   Play,
   RotateCcw,
   ShieldCheck,
@@ -55,6 +57,177 @@ function jsonRows(value: unknown): any[] {
   } catch {
     return []
   }
+}
+
+function planLayers(value: unknown): any[][] {
+  const steps = rows(value)
+  if (!steps.length) return []
+  const remaining = new Map(steps.map((step, index) => [String(step.id ?? `step-${index}`), step]))
+  const resolved = new Set<string>()
+  const layers: any[][] = []
+  while (remaining.size) {
+    const ready = [...remaining.entries()].filter(([, step]) =>
+      rows(step.depends_on).every((dependency) => resolved.has(String(dependency))),
+    )
+    if (!ready.length) return [steps]
+    layers.push(ready.map(([, step]) => step))
+    ready.forEach(([key]) => {
+      remaining.delete(key)
+      resolved.add(key)
+    })
+  }
+  return layers
+}
+
+function PlanFlow({ steps }: { steps: unknown }) {
+  const layers = planLayers(steps)
+  if (!layers.length) return <>-</>
+  return (
+    <div className="parallel-plan" title="加号表示可以并行，箭头表示需要等待上一层完成">
+      {layers.map((layer, index) => (
+        <span className="plan-layer-wrap" key={index}>
+          {index > 0 && <b aria-hidden="true">→</b>}
+          <span className={layer.length > 1 ? 'plan-layer parallel' : 'plan-layer'}>
+            {layer.map((step) => String(step.agent ?? step.role ?? step.id)).join(' + ')}
+          </span>
+        </span>
+      ))}
+    </div>
+  )
+}
+
+function runDuration(run: any, now: number): number {
+  if (!run.started_at) return 0
+  return Math.max(Number(run.finished_at ?? now) - Number(run.started_at), 0)
+}
+
+function peakParallelism(runs: any[], now: number): number {
+  const events = runs.flatMap((run) => {
+    if (!run.started_at) return []
+    const start = Number(run.started_at)
+    const finish = Math.max(Number(run.finished_at ?? now), start + 0.001)
+    return [{ time: start, delta: 1 }, { time: finish, delta: -1 }]
+  }).sort((left, right) => left.time - right.time || left.delta - right.delta)
+  let active = 0
+  let peak = 0
+  events.forEach((event) => {
+    active += event.delta
+    peak = Math.max(peak, active)
+  })
+  return peak
+}
+
+function AgentFlowNode({ node, now, roleTitles }: { node: any; now: number; roleTitles: Map<string, string> }) {
+  const duration = runDuration(node, now)
+  const dependencies = rows(node.dependencies)
+  return (
+    <article className={`agent-flow-node ${node.status} ${node.synthetic ? 'synthetic' : ''}`} title={node.objective}>
+      <header>
+        <span className={`agent-state-dot ${node.status}`} />
+        <div>
+          <strong>{node.title ?? roleTitles.get(String(node.role)) ?? node.role}</strong>
+          <code>{node.handle}</code>
+        </div>
+        <StatusBadge value={node.status} />
+      </header>
+      <p>{node.objective}</p>
+      <footer>
+        <span>{node.model_profile || (node.synthetic ? '宿主控制' : '默认模型')}</span>
+        <span>{node.started_at ? fmtDuration(duration) : dependencies.length ? `等待 ${dependencies.join('、')}` : '等待调度'}</span>
+      </footer>
+    </article>
+  )
+}
+
+function stageState(stage: any[]): string {
+  const states = stage.map((node) => String(node.status))
+  if (states.some((state) => state === 'failed' || state === 'cancelled')) return 'failed'
+  if (states.some((state) => state === 'running' || state === 'planning' || state === 'verifying')) return 'running'
+  if (states.every((state) => state === 'succeeded' || state === 'completed' || state === 'partial')) return 'succeeded'
+  return 'pending'
+}
+
+function SubAgentFlow({ detail, loading, error, now, roles }: { detail: any; loading: boolean; error: string; now: number; roles: any[] }) {
+  const task = detail?.task
+  const runs = rows(detail?.runs)
+  const running = runs.filter((run) => run.status === 'running').length
+  const peak = peakParallelism(runs, now)
+  const roleTitles = new Map(roles.map((role) => [String(role.role), String(role.title)]))
+  const runsByStep = new Map(runs.map((run) => [String(run.step_key), run]))
+  const latestRunFinish = runs.reduce((latest, run) => Math.max(latest, Number(run.finished_at ?? 0)), 0)
+  const workerStages = planLayers(task?.plan?.steps).map((layer) => layer.map((step) => runsByStep.get(String(step.id)) ?? {
+    handle: String(step.id),
+    role: step.agent,
+    objective: step.objective,
+    dependencies: step.depends_on,
+    status: 'pending',
+  }))
+  const planningStatus = ['received', 'planning'].includes(String(task?.status)) ? 'running' : task?.plan?.steps ? 'succeeded' : 'failed'
+  const deliveryStatus = task?.status === 'verifying'
+    ? 'running'
+    : ['completed', 'partial', 'failed', 'cancelled'].includes(String(task?.status))
+      ? task.status
+      : 'pending'
+  const stages = task ? [
+    [{
+      handle: 'supervisor',
+      role: 'supervisor',
+      title: '主控 Agent',
+      objective: '拆解目标、安排依赖和验收标准',
+      status: planningStatus,
+      started_at: task.created_at,
+      finished_at: planningStatus === 'succeeded' ? runs[0]?.created_at ?? task.updated_at : null,
+      synthetic: true,
+    }],
+    ...workerStages,
+    [{
+      handle: 'delivery',
+      role: 'supervisor',
+      title: '验收与交付',
+      objective: '汇总各 Agent 结果，检查目标并完成消息或文件交付',
+      status: deliveryStatus,
+      started_at: ['verifying', 'completed', 'partial', 'failed'].includes(String(task.status)) ? Math.max(latestRunFinish, Number(task.updated_at)) : null,
+      finished_at: task.finished_at,
+      synthetic: true,
+    }],
+  ] : []
+
+  if (loading && !task) return <div className="subagent-flow-state">正在读取 Agent 执行图...</div>
+  if (error) return <div className="inline-error">{error}</div>
+  if (!task) return null
+  return (
+    <div className="subagent-flow">
+      <div className="subagent-flow-head">
+        <div>
+          <span className="eyebrow">执行拓扑 · {task.handle}</span>
+          <h3>{task.objective}</h3>
+        </div>
+        <div className="flow-metrics">
+          <span><small>当前并行</small><strong>{running}</strong></span>
+          <span><small>峰值并行</small><strong>{peak}</strong></span>
+          <span><small>执行阶段</small><strong>{workerStages.length}</strong></span>
+        </div>
+      </div>
+      <div className="agent-flow-scroll">
+        <div className="agent-flow-canvas">
+          {stages.map((stage, index) => (
+            <div className="flow-stage-wrap" key={index}>
+              {index > 0 && <div className={`flow-link ${stageState(stage)}`} aria-hidden="true">
+                <span className="flow-energy first" />
+                <span className="flow-energy second" />
+              </div>}
+              <div className="flow-stage">
+                <span className="flow-stage-label">{index === 0 ? '规划' : index === stages.length - 1 ? '交付' : `阶段 ${index}`}{stage.length > 1 ? ` · 并行 ${stage.length}` : ''}</span>
+                <div className="flow-stage-nodes">
+                  {stage.map((node) => <AgentFlowNode key={node.handle} node={node} now={now} roleTitles={roleTitles} />)}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
 }
 
 export function OverviewView({ plane, onOpenDetail }: { plane: Plane; onOpenDetail: DetailOpener }) {
@@ -187,6 +360,45 @@ export function TasksView({ plane, onOpenDetail }: { plane: Plane; onOpenDetail:
   const agentRoles = rows(subagents.roles)
   const jobs = rows(plane.data.jobs?.items)
   const deliveries = rows(plane.data.deliveries?.items)
+  const [selectedTaskId, setSelectedTaskId] = useState<number | null>(null)
+  const [subagentDetail, setSubagentDetail] = useState<any>(null)
+  const [subagentDetailLoading, setSubagentDetailLoading] = useState(false)
+  const [subagentDetailError, setSubagentDetailError] = useState('')
+  const [clock, setClock] = useState(() => Math.floor(Date.now() / 1000))
+  const taskIds = useMemo(() => subagentTasks.map((task) => Number(task.task_id)), [subagentTasks])
+
+  useEffect(() => {
+    if (!taskIds.length) {
+      setSelectedTaskId(null)
+      setSubagentDetail(null)
+      return
+    }
+    if (selectedTaskId === null || !taskIds.includes(selectedTaskId)) setSelectedTaskId(taskIds[0])
+  }, [selectedTaskId, taskIds])
+
+  useEffect(() => {
+    if (selectedTaskId === null) return
+    const controller = new AbortController()
+    setSubagentDetailLoading(true)
+    void plane.query(`/subagents/${selectedTaskId}`, controller.signal)
+      .then((payload) => {
+        setSubagentDetail(payload)
+        setSubagentDetailError('')
+      })
+      .catch((reason) => {
+        if (!controller.signal.aborted) setSubagentDetailError(reason instanceof Error ? reason.message : 'Sub-Agent 详情读取失败')
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setSubagentDetailLoading(false)
+      })
+    return () => controller.abort()
+  }, [plane.query, selectedTaskId, subagents])
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setClock(Math.floor(Date.now() / 1000)), 1000)
+    return () => window.clearInterval(timer)
+  }, [])
+
   return (
     <>
       <PageHeader title="任务与投递" description="前台 Agent、持久任务和消息投递的统一操作面" action={<RefreshButton onClick={() => void plane.refreshMany(['tasks', 'subagents', 'jobs', 'deliveries'])} />} />
@@ -194,8 +406,9 @@ export function TasksView({ plane, onOpenDetail }: { plane: Plane; onOpenDetail:
         <div className="model-strip">
           {agentRoles.map((role) => <div className="model-item" key={role.role}><div><strong>{role.title}</strong><code>{role.role}</code><small>{role.description}</small></div><StatusBadge value="configured" label={`${rows(role.allowed_tools).length} 个工具`} /></div>)}
         </div>
-        <DataTable><thead><tr><th>更新时间</th><th>任务</th><th>范围</th><th>目标</th><th>步骤</th><th>状态</th><th></th></tr></thead><tbody>{subagentTasks.slice(0, 5).map((task) => <tr key={task.task_id}><td>{fmtTime(task.updated_at)}</td><td><code>{task.handle}</code><small className="cell-sub">{String(task.trace_id ?? '').slice(0, 12)}</small></td><td><code>{task.scope_key}</code></td><td>{task.objective}</td><td>{rows(task.plan?.steps).map((step) => step.agent).join(' → ') || '-'}</td><td><StatusBadge value={task.status} /></td><td className="actions">{['received', 'planning', 'running', 'verifying', 'cancelling'].includes(task.status) && <button className="icon-button danger" title="取消 Sub-Agent 任务" onClick={() => void plane.mutate('subagents', `/subagents/${task.task_id}/cancel`, 'POST', {}, ['subagents', 'tasks'])}><Square size={15} /></button>}</td></tr>)}</tbody></DataTable>
+        <DataTable><thead><tr><th>更新时间</th><th>任务</th><th>范围</th><th>目标</th><th>执行关系</th><th>状态</th><th></th></tr></thead><tbody>{subagentTasks.slice(0, 5).map((task) => <tr className={selectedTaskId === Number(task.task_id) ? 'selected-task-row' : ''} key={task.task_id}><td>{fmtTime(task.updated_at)}</td><td><code>{task.handle}</code><small className="cell-sub">{String(task.trace_id ?? '').slice(0, 12)}</small></td><td><code>{task.scope_key}</code></td><td>{task.objective}</td><td><PlanFlow steps={task.plan?.steps} /></td><td><StatusBadge value={task.status} /></td><td className="actions"><button className="icon-button" title="查看 Agent 执行拓扑" onClick={() => setSelectedTaskId(Number(task.task_id))}><GitBranch size={15} /></button>{['received', 'planning', 'running', 'verifying', 'cancelling'].includes(task.status) && <button className="icon-button danger" title="取消 Sub-Agent 任务" onClick={() => void plane.mutate('subagents', `/subagents/${task.task_id}/cancel`, 'POST', {}, ['subagents', 'tasks'])}><Square size={15} /></button>}</td></tr>)}</tbody></DataTable>
         {!subagentTasks.length && <EmptyState>还没有 Sub-Agent 任务</EmptyState>}
+        <SubAgentFlow detail={subagentDetail} loading={subagentDetailLoading} error={subagentDetailError} now={clock} roles={agentRoles} />
       </Section>
       <Section title="运行中的 Agent" description="取消会触发当前任务的取消路径">
         <DataTable><thead><tr><th>任务</th><th>会话</th><th>摘要</th><th>耗时</th><th></th></tr></thead><tbody>{tasks.map((task) => <tr key={task.task_id}><td><code>{task.task_id}</code></td><td>{task.conversation_id}</td><td>{task.summary}</td><td>{fmtDuration(task.elapsed_seconds)}</td><td className="actions"><button className="icon-button danger" title="取消任务" onClick={() => void plane.mutate('tasks', `/tasks/${task.task_id}/cancel`, 'POST', {}, ['tasks'])}><Square size={15} /></button></td></tr>)}</tbody></DataTable>
@@ -332,7 +545,7 @@ const HELP_SECTIONS = [
   {
     title: '运行与排障',
     items: [
-      ['任务与投递', '查看当前 Agent、后台持久任务和 QQ 消息投递。右侧方形按钮取消任务，旋转箭头重试任务，播放按钮重试失败投递。'],
+      ['任务与投递', '查看当前 Agent、后台持久任务和 QQ 消息投递。Sub-Agent 列表中的“+”表示并行、“→”表示依赖；点分支图标查看方块执行拓扑和实时状态。右侧方形按钮取消任务，旋转箭头重试任务，播放按钮重试失败投递。'],
       ['Trace 与上下文', '用 Trace ID 串起一次回答的模型、工具、Token 和耗时；上下文决策显示“你觉得呢”等追问最终关联了哪条消息及置信度。'],
       ['上下文调试', '左侧选择一次回答，右侧查看当前话题、原始证据、候选评分、Token 分区及群/个人记忆。确认质量后点“答对了”或“答非所问”，备注会连同版本写入审计。'],
       ['数据库', '查看 h610 主库和备用节点、连接池、延迟及复制状态。出现 offline 或 degraded 时先看节点错误，不要直接清数据。'],
