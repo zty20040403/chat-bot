@@ -30,6 +30,7 @@ SEND_IMAGE_FROM_SANDBOX_TOOL_NAME = "send_image_from_sandbox"
 LIST_RECENT_FILES_TOOL_NAME = "list_recent_files"
 IMPORT_FILE_TO_SANDBOX_TOOL_NAME = "import_file_to_sandbox"
 SAY_TOOL_NAME = "say"
+RUN_SUBAGENTS_TOOL_NAME = "run_subagents"
 MEMORY_ADD_TOOL_NAME = "memory_add"
 MEMORY_LIST_TOOL_NAME = "memory_list"
 MEMORY_REMOVE_TOOL_NAME = "memory_remove"
@@ -660,6 +661,31 @@ SAY_TOOL: ToolDefinition = {
     },
 }
 
+RUN_SUBAGENTS_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": RUN_SUBAGENTS_TOOL_NAME,
+        "description": (
+            "把当前复杂目标升级为固定角色的 Sub-Agent 任务。任务涉及多个专业领域、"
+            "需要分阶段搜索/读媒体/写代码/处理文件/分析/运维，或预计需要较长时间时"
+            "调用；主控会自动拆分依赖、并行执行、汇报每个 Agent 的进度并验收结果。"
+            "简单问答、单次搜索、单张识图、普通闲聊不要调用。用户不需要先输入 /task。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "goal": {
+                    "type": "string",
+                    "maxLength": 6000,
+                    "description": "保留用户约束、交付物和验收要求的完整任务目标。",
+                }
+            },
+            "required": ["goal"],
+            "additionalProperties": False,
+        },
+    },
+}
+
 MEMORY_ADD_TOOL: ToolDefinition = {
     "type": "function",
     "function": {
@@ -1263,6 +1289,7 @@ def available_tools(
     include_media_tools: bool = False,
     include_video_analysis: bool = False,
     include_source_tools: bool = False,
+    include_subagents: bool = False,
 ) -> list[ToolDefinition]:
     tools: list[ToolDefinition] = []
     if include_web_search:
@@ -1305,6 +1332,8 @@ def available_tools(
         tools.extend(
             [REMINDER_SET_TOOL, REMINDER_LIST_TOOL, REMINDER_CANCEL_TOOL]
         )
+    if include_subagents:
+        tools.append(RUN_SUBAGENTS_TOOL)
     return tools
 
 

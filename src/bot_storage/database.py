@@ -116,6 +116,10 @@ _IDENTITY_COLUMNS = {
     "message_topic_edges": "edge_id",
     "alert_events": "event_id",
     "alert_notifications": "notification_id",
+    "subagent_tasks": "task_id",
+    "subagent_runs": "run_id",
+    "subagent_events": "event_id",
+    "subagent_artifacts": "artifact_id",
 }
 
 

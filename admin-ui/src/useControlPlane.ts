@@ -15,6 +15,7 @@ const INITIAL_RESOURCES: ResourceName[] = [
   'deliveries',
   'usage',
   'tasks',
+  'subagents',
   'jobs',
   'sandboxes',
   'stickers',
@@ -141,7 +142,7 @@ export function useControlPlane(runtime: KennethbotAdminRuntime) {
   useEffect(() => {
     if (!authenticated) return
     const timer = window.setInterval(() => {
-      void refreshMany(['overview', 'observability', 'alerts', 'databases', 'usage', 'contextDebug'])
+      void refreshMany(['overview', 'observability', 'alerts', 'databases', 'usage', 'subagents', 'contextDebug'])
     }, 30000)
     return () => window.clearInterval(timer)
   }, [authenticated, refreshMany])

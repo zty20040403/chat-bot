@@ -202,6 +202,12 @@ class Settings:
     durable_job_lease_seconds: int
     durable_job_max_attempts: int
     durable_job_concurrency: int
+    subagents_enabled: bool
+    subagent_max_steps: int
+    subagent_max_parallelism: int
+    subagent_max_tool_rounds: int
+    subagent_timeout_seconds: int
+    subagent_profiles_json: str
     quota_enabled: bool
     quota_daily_calls: int
     quota_daily_input_tokens: int
@@ -635,6 +641,26 @@ class Settings:
                 max(_get_int("AI_DURABLE_JOB_CONCURRENCY", 2), 1),
                 32,
             ),
+            subagents_enabled=_get_bool("AI_SUBAGENTS_ENABLED", True),
+            subagent_max_steps=min(
+                max(_get_int("AI_SUBAGENT_MAX_STEPS", 8), 1),
+                12,
+            ),
+            subagent_max_parallelism=min(
+                max(_get_int("AI_SUBAGENT_MAX_PARALLELISM", 3), 1),
+                6,
+            ),
+            subagent_max_tool_rounds=min(
+                max(_get_int("AI_SUBAGENT_MAX_TOOL_ROUNDS", 6), 1),
+                12,
+            ),
+            subagent_timeout_seconds=min(
+                max(_get_int("AI_SUBAGENT_TIMEOUT_SECONDS", 600), 30),
+                3600,
+            ),
+            subagent_profiles_json=os.getenv(
+                "AI_SUBAGENT_PROFILES_JSON", "{}"
+            ).strip(),
             quota_enabled=_get_bool("AI_QUOTA_ENABLED", True),
             quota_daily_calls=max(
                 _get_int("AI_QUOTA_DAILY_CALLS", 0),

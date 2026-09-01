@@ -210,6 +210,13 @@ def _policy_registry() -> dict[str, ToolPolicy]:
         compensation="cleanup-created-resource",
         max_identical_calls=1,
     )
+    policies["run_subagents"] = ToolPolicy(
+        risk="medium",
+        idempotency="non-idempotent",
+        side_effects=("spawn:agent", "model:multiple", "write:task-ledger"),
+        timeout_seconds=3600.0,
+        max_identical_calls=1,
+    )
     policies["sandbox_destroy"] = ToolPolicy(
         risk="critical",
         idempotency="idempotent",

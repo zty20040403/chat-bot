@@ -42,6 +42,8 @@ class AdminServices:
     running_tasks: Any = None
     job_store: Any = None
     job_worker: Any = None
+    subagent_store: Any = None
+    subagent_coordinator: Any = None
     bridge_router: Any = None
     bridge_state: Any = None
     browser_manager: Any = None
@@ -285,12 +287,18 @@ def register_admin(
             if services.job_store is not None
             else {}
         )
+        subagent_tasks = (
+            services.subagent_store.stats()
+            if services.subagent_store is not None
+            else {}
+        )
         return {
             "version": services.version,
             "uptime_seconds": max(int(time.time()) - services.started_at, 0),
             "deliveries": deliveries,
             "running_tasks": tasks,
             "durable_jobs": durable_jobs,
+            "subagent_tasks": subagent_tasks,
             "background_tasks": (
                 {
                     "running": list(services.background_tasks.running()),
@@ -512,6 +520,124 @@ def register_admin(
             ),
         )
         event_broker.publish("tasks", "overview")
+        return mutation_payload(result, task_id=task_id)
+
+    @router.get("/api/subagents")
+    def subagents(
+        limit: int = Query(default=100, ge=1, le=500),
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
+        authorize(authorization)
+        if services.subagent_store is None:
+            return {"items": [], "roles": [], "counts": {}, "configured": False}
+        roles = (
+            services.subagent_coordinator.manifest()
+            if services.subagent_coordinator is not None
+            else []
+        )
+        return {
+            "items": [
+                {
+                    "task_id": item.task_id,
+                    "handle": item.handle,
+                    "trace_id": item.trace_id,
+                    "scope_key": item.scope_key,
+                    "conversation_id": item.conversation_id,
+                    "requester_user_id": item.requester_user_id,
+                    "trigger_message_id": item.trigger_message_id,
+                    "objective": item.objective,
+                    "status": item.status,
+                    "plan": item.plan,
+                    "result": item.result,
+                    "last_error": item.last_error,
+                    "cancel_requested": item.cancel_requested,
+                    "created_at": item.created_at,
+                    "updated_at": item.updated_at,
+                    "finished_at": item.finished_at,
+                }
+                for item in services.subagent_store.recent(limit=limit)
+            ],
+            "roles": roles,
+            "counts": services.subagent_store.stats(),
+            "configured": services.subagent_coordinator is not None,
+        }
+
+    @router.get("/api/subagents/{task_id}")
+    def subagent_detail(
+        task_id: int,
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
+        authorize(authorization)
+        if services.subagent_store is None:
+            raise HTTPException(status_code=404, detail="Sub-Agent task store is unavailable")
+        task = services.subagent_store.get(task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail="Sub-Agent task not found")
+        return {
+            "task": {
+                "task_id": task.task_id,
+                "handle": task.handle,
+                "trace_id": task.trace_id,
+                "scope_key": task.scope_key,
+                "conversation_id": task.conversation_id,
+                "requester_user_id": task.requester_user_id,
+                "trigger_message_id": task.trigger_message_id,
+                "objective": task.objective,
+                "status": task.status,
+                "plan": task.plan,
+                "result": task.result,
+                "last_error": task.last_error,
+                "cancel_requested": task.cancel_requested,
+                "created_at": task.created_at,
+                "updated_at": task.updated_at,
+                "finished_at": task.finished_at,
+            },
+            "runs": [
+                {
+                    "run_id": run.run_id,
+                    "handle": run.handle,
+                    "step_key": run.step_key,
+                    "role": run.role,
+                    "objective": run.objective,
+                    "deliverable": run.deliverable,
+                    "dependencies": list(run.dependencies),
+                    "allowed_tools": list(run.allowed_tools),
+                    "model_profile": run.model_profile,
+                    "status": run.status,
+                    "attempt": run.attempt,
+                    "result": run.result,
+                    "last_error": run.last_error,
+                    "created_at": run.created_at,
+                    "started_at": run.started_at,
+                    "finished_at": run.finished_at,
+                }
+                for run in services.subagent_store.runs(task_id)
+            ],
+            "events": services.subagent_store.events(task_id),
+        }
+
+    @router.post("/api/subagents/{task_id}/cancel")
+    def cancel_subagent_task(
+        task_id: int,
+        mutation_info: AdminMutationContext = Depends(mutation_context),
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
+        authorize(authorization)
+        result = mutate(
+            mutation_info,
+            "subagents",
+            action="subagent.cancel",
+            target=f"task#{task_id}",
+            operation=lambda _version: require_changed(
+                bool(
+                    services.subagent_coordinator is not None
+                    and services.subagent_coordinator.cancel(task_id)
+                ),
+                409,
+                "Sub-Agent task is not cancellable",
+            ),
+        )
+        event_broker.publish("subagents", "tasks", "overview")
         return mutation_payload(result, task_id=task_id)
 
     @router.get("/api/jobs")

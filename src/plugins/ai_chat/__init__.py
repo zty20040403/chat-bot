@@ -57,6 +57,8 @@ from .ai_tools import (
     QUERY_ALERTS_TOOL_NAME,
     READ_IMAGE_TEXT_TOOL_NAME,
     REPLY_WITH_VOICE_TOOL_NAME,
+    RUN_SUBAGENTS_TOOL_NAME,
+    SAY_TOOL_NAME,
     SEND_QQ_FACE_TOOL_NAME,
     SEND_STICKER_TOOL_NAME,
     TRANSCRIBE_VOICE_TOOL_NAME,
@@ -239,8 +241,8 @@ from . import onebot_delivery as _onebot_delivery
 
 SEND_RETRY_DELAY_SECONDS = 2.0
 SEND_RETRY_MAX_CHARS = 800
-TURN_PROMPT_VERSION = "qqbot-turn-v12"
-BOT_VERSION = "0.9.9"
+TURN_PROMPT_VERSION = "qqbot-turn-v13"
+BOT_VERSION = "0.10.0"
 EMPTY_MENTION_FOLLOW_UP = "你觉得呢"
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 proactive_check_gate = ProactiveCheckGate()
@@ -282,6 +284,8 @@ reminder_store = app_context.reminder_store
 delivery_store = app_context.delivery_store
 job_store = app_context.job_store
 job_worker = app_context.job_worker
+subagent_store = app_context.subagent_store
+subagent_coordinator = app_context.subagent_coordinator
 bridge_router = app_context.bridge_router
 mirror_state = app_context.mirror_state
 bridge_manager = app_context.bridge_manager

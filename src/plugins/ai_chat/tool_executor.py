@@ -51,6 +51,8 @@ from .ai_tools import (
     QUERY_ALERTS_TOOL_NAME,
     READ_IMAGE_TEXT_TOOL_NAME,
     REPLY_WITH_VOICE_TOOL_NAME,
+    RUN_SUBAGENTS_TOOL_NAME,
+    SAY_TOOL_NAME,
     SEND_QQ_FACE_TOOL_NAME,
     SEND_STICKER_TOOL_NAME,
     TRANSCRIBE_VOICE_TOOL_NAME,
@@ -279,6 +281,7 @@ async def _ask_ai(
     feedback_provider: Callable[[], Awaitable[list[str]]] | None = None,
     final_stream_sink: Callable[[str], Awaitable[None]] | None = None,
     final_stream_state: FinalStreamState | None = None,
+    task_mode: bool = False,
 ) -> Message | str:
     if isinstance(event, GroupMessageEvent) and not _is_group_enabled(event.group_id):
         return "这个群暂时没有开启 AI。"
@@ -337,6 +340,7 @@ async def _ask_ai(
     voice_reply_text = ""
     visual_reply_segment: MessageSegment | None = None
     sticker_handles_this_turn: set[str] = set()
+    subagent_task_started = False
     replay_prefix: list[dict[str, Any]] = []
     replay_covered_message_ids: tuple[int, ...] = ()
     replay_digest_prefix = ""
@@ -421,6 +425,7 @@ async def _ask_ai(
         ),
         include_video_analysis=video_analyzer is not None,
         include_source_tools=source_store is not None,
+        include_subagents=subagent_coordinator is not None,
     )
     current_tool_catalog_version = tool_catalog_fingerprint(tools)
     if turn_journal is not None and journal_turn_id is not None:
@@ -541,8 +546,36 @@ async def _ask_ai(
 
     async def _execute_tool_impl(name: str, arguments: dict[str, object]) -> str:
         nonlocal visual_reply_segment, voice_reply_segment, voice_reply_text
+        nonlocal subagent_task_started
 
         logger.info(f"LLM Tool Call: {name}")
+
+        if name == RUN_SUBAGENTS_TOOL_NAME:
+            if subagent_task_started:
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "error": "本轮已经启动过一次 Sub-Agent 任务，请使用现有结果。",
+                    },
+                    ensure_ascii=False,
+                )
+            goal = str(arguments.get("goal") or "").strip()
+            if not goal:
+                return json.dumps(
+                    {"ok": False, "error": "Sub-Agent 任务目标不能为空。"},
+                    ensure_ascii=False,
+                )
+            if subagent_coordinator is None:
+                return json.dumps(
+                    {"ok": False, "error": "Sub-Agent 任务模式暂时没有开启。"},
+                    ensure_ascii=False,
+                )
+            subagent_task_started = True
+            result = await run_subagent_goal(goal)
+            return json.dumps(
+                {"ok": True, "result": result},
+                ensure_ascii=False,
+            )
 
         if name == USE_SKILL_TOOL_NAME:
             requested = str(arguments.get("name") or "").strip()
@@ -2168,52 +2201,101 @@ async def _ask_ai(
                 DatabaseError,
             ) as exc:
                 logger.warning(f"Final context projection journal failed: {exc}")
-        answer = await ask_deepseek_with_tools(
-            user_text,
-            (
-                []
-                if replay_prefix or isinstance(event, GroupMessageEvent)
-                else memory.get(conversation_id)
-            ),
-            tools,
-            execute_tool,
-            group_context=group_prompt_context,
-            memory_context=memory_prompt_context,
-            current_user=_current_user_identity(event),
-            tool_choice=tool_choice,
-            profile=selected_profile,
-            max_tool_rounds=(
-                settings.tool_max_rounds
-                if sandbox_tools_enabled
-                else settings.tool_simple_max_rounds
-            ),
-            tool_context="\n\n".join(context_parts),
-            trace=turn_trace,
-            event_sink=(
-                record_loop_event if journal_turn_id is not None else None
-            ),
-            replay_prefix=replay_prefix or None,
-            feedback_provider=feedback_provider,
-            final_text_sink=final_stream_sink,
-            final_stream_state=final_stream_state,
-            approval_checker=(
-                lambda _policy, name, arguments: approval_from_user_text(
-                    user_text,
-                    name,
-                    arguments,
+        async def run_subagent_goal(goal: str) -> str:
+            if subagent_coordinator is None:
+                return "Sub-Agent 任务模式暂时没有开启。"
+
+            async def report_subagent_progress(text: str) -> None:
+                if agent_executor is not None:
+                    await execute_tool(SAY_TOOL_NAME, {"text": text[:200]})
+
+            trigger_message_id = (
+                message_ledger.canonical_id_for_native(
+                    scope_from_event(event),
+                    event.message_id,
                 )
-            ),
-            handoff_tool=(
-                agent_executor.handoff_tool
-                if agent_executor is not None
+                if message_ledger is not None
                 else None
-            ),
-            compensate_tool=(
-                agent_executor.compensate_tool
-                if agent_executor is not None
-                else None
-            ),
-        )
+            )
+            return await subagent_coordinator.run(
+                scope_key=scope_from_event(event).key,
+                conversation_id=conversation_id,
+                requester_user_id=event.user_id,
+                trigger_message_id=trigger_message_id,
+                objective=goal,
+                context=(
+                    group_prompt_context
+                    + "\n\n"
+                    + memory_prompt_context
+                    + "\n\n"
+                    + "\n\n".join(context_parts)
+                ),
+                selected_profile=selected_profile,
+                tools=tools,
+                execute_tool=execute_tool,
+                parent_trace=turn_trace,
+                progress=report_subagent_progress,
+            )
+
+        if subagent_coordinator is not None:
+            context_parts.append(
+                "[自动 Sub-Agent 编排]\n"
+                "用户不需要输入 /task。当前请求如果包含多个互相依赖的步骤、需要两个"
+                "以上专业角色协作，或明显是长任务，调用 run_subagents，并把用户的"
+                "完整目标和交付要求放进 goal。普通闲聊、常识问答、一次搜索、单张识图"
+                "或单个工具能完成的请求不要调用。Sub-Agent 系统会自己用 say 报告"
+                "每个角色开始和完成的工作，主 Agent 不要重复刷进度。"
+            )
+
+        if task_mode:
+            answer = await run_subagent_goal(user_text)
+        else:
+            answer = await ask_deepseek_with_tools(
+                user_text,
+                (
+                    []
+                    if replay_prefix or isinstance(event, GroupMessageEvent)
+                    else memory.get(conversation_id)
+                ),
+                tools,
+                execute_tool,
+                group_context=group_prompt_context,
+                memory_context=memory_prompt_context,
+                current_user=_current_user_identity(event),
+                tool_choice=tool_choice,
+                profile=selected_profile,
+                max_tool_rounds=(
+                    settings.tool_max_rounds
+                    if sandbox_tools_enabled
+                    else settings.tool_simple_max_rounds
+                ),
+                tool_context="\n\n".join(context_parts),
+                trace=turn_trace,
+                event_sink=(
+                    record_loop_event if journal_turn_id is not None else None
+                ),
+                replay_prefix=replay_prefix or None,
+                feedback_provider=feedback_provider,
+                final_text_sink=final_stream_sink,
+                final_stream_state=final_stream_state,
+                approval_checker=(
+                    lambda _policy, name, arguments: approval_from_user_text(
+                        user_text,
+                        name,
+                        arguments,
+                    )
+                ),
+                handoff_tool=(
+                    agent_executor.handoff_tool
+                    if agent_executor is not None
+                    else None
+                ),
+                compensate_tool=(
+                    agent_executor.compensate_tool
+                    if agent_executor is not None
+                    else None
+                ),
+            )
     except DeepSeekConfigError:
         return f"模型配置 {selected_profile.name} 缺少可用的 API Key。"
     except DatabaseError as exc:

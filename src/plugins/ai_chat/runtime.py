@@ -59,6 +59,11 @@ from .skills import SkillRegistry
 from .stickers import configure_learned_sticker_state
 from .tasks import RunningTaskRegistry
 from .storage.jobs import DurableJobStore
+from .subagents import (
+    SubAgentCoordinator,
+    SubAgentStore,
+    parse_profile_overrides,
+)
 from .turn_journal import TurnJournal
 from .voice import RecentVoiceStore
 from .video import RecentVideoStore
@@ -115,6 +120,8 @@ class AppContext:
     delivery_store: DeliveryStore | None = None
     job_store: DurableJobStore | None = None
     job_worker: DurableJobWorker | None = None
+    subagent_store: SubAgentStore | None = None
+    subagent_coordinator: SubAgentCoordinator | None = None
     mirror_state: MirrorStateStore | None = None
     bridge_manager: BridgeManager | None = None
     usage_store: UsageStore | None = None
@@ -173,6 +180,7 @@ class AppContext:
             ("reminder store", self.reminder_store),
             ("delivery store", self.delivery_store),
             ("durable job store", self.job_store),
+            ("Sub-Agent task store", self.subagent_store),
             ("usage store", self.usage_store),
             ("semantic index state", self.semantic_index_state),
             ("maintenance state", self.maintenance_state),
@@ -747,6 +755,38 @@ def build_app_context(
             job_worker = None
             logger.error(f"Durable application job queue could not be opened: {exc}")
 
+    subagent_store: SubAgentStore | None = None
+    subagent_coordinator: SubAgentCoordinator | None = None
+    if settings.subagents_enabled:
+        try:
+            profile_overrides = parse_profile_overrides(
+                settings.subagent_profiles_json
+            )
+            for profile_name in profile_overrides.values():
+                model_catalog.resolve(profile_name)
+            subagent_store = SubAgentStore(store_source("subagents.sqlite3"))
+            subagent_coordinator = SubAgentCoordinator(
+                subagent_store,
+                model_catalog,
+                logger=logger,
+                max_steps=settings.subagent_max_steps,
+                max_parallelism=settings.subagent_max_parallelism,
+                max_tool_rounds=settings.subagent_max_tool_rounds,
+                timeout_seconds=settings.subagent_timeout_seconds,
+                profile_overrides=profile_overrides,
+            )
+            if subagent_store.recovered_tasks:
+                logger.warning(
+                    "Marked %s interrupted Sub-Agent task(s) as failed.",
+                    subagent_store.recovered_tasks,
+                )
+        except (OSError, RuntimeError, ValueError, sqlite3.Error, DatabaseError) as exc:
+            if subagent_store is not None:
+                subagent_store.close()
+            subagent_store = None
+            subagent_coordinator = None
+            logger.error(f"Sub-Agent task system could not be opened: {exc}")
+
     return AppContext(
         settings=settings,
         state_dir=state_dir,
@@ -779,6 +819,8 @@ def build_app_context(
         delivery_store=delivery_store,
         job_store=job_store,
         job_worker=job_worker,
+        subagent_store=subagent_store,
+        subagent_coordinator=subagent_coordinator,
         mirror_state=mirror_state,
         bridge_manager=bridge_manager,
         usage_store=usage_store,

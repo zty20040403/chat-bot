@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.9.9-22c55e?style=for-the-badge">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.10.0-22c55e?style=for-the-badge">
   <img alt="Python" src="https://img.shields.io/badge/Python-3.12-3776ab?style=for-the-badge&amp;logo=python&amp;logoColor=white">
   <img alt="NoneBot2" src="https://img.shields.io/badge/NoneBot2-OneBot_V11-ea5252?style=for-the-badge">
   <img alt="PostgreSQL" src="https://img.shields.io/badge/PostgreSQL-Durable-4169e1?style=for-the-badge&amp;logo=postgresql&amp;logoColor=white">
@@ -284,8 +284,9 @@ NapCat 日志出现连接成功后，可以在 QQ 中测试：
 | `/qq表情 名称` | 发送 QQ 自带表情 |
 | `/表情状态` | 查看表情库状态 |
 | `/记忆` | 查看或管理长期记忆 |
-| `/任务` | 查看当前任务 |
-| `/停止` | 取消当前任务 |
+| `/task 任务内容` | 让主控拆分任务并派给固定专业 Sub-Agent |
+| `/任务` | 查看当前普通任务和 Sub-Agent 任务 |
+| `/停止 task#编号` | 取消指定 Sub-Agent 任务 |
 | `/usage` | 查看当前会话用量 |
 | `/pin`、`/pins` | 固定消息或查看固定列表 |
 | `/ai_reset` | 重置当前会话的 AI 上下文边界 |
@@ -313,6 +314,23 @@ OpenAI/CLIProxy 模型可以按当前用户、当前会话覆盖推理强度：
 自然语言请求不依赖关键词硬编码。`@机器人 看看这张图`、`帮我查一下最新消息`、
 `创建一个 Python 项目并把文件发出来` 等请求会进入同一个 Agent Loop，由当前模型决定
 是否调用相应工具。
+
+## Sub-Agent 任务模式
+
+普通 `@Kenneth` 请求如果明显包含多个专业领域、互相依赖的步骤或长时间工作，主 Agent 会
+自动调用 `run_subagents`；`/task` 只是强制进入任务模式的手动入口。主控先生成受宿主校验的
+无环任务图，再把步骤派给七个固定角色：主控、搜索、代码、文件、媒体、分析和运维。每个
+角色开始和完成时都会通过 `say` 汇报正在做什么。执行角色不能自行创建新 Agent，最多步骤、
+并行数、工具轮次和总超时均由宿主配置。
+
+```text
+/task 分析刚才的视频，核实里面提到的产品参数，再生成一份 PDF 报告
+/task 读取群文件里的项目，修复测试并把修改后的文件发回来
+```
+
+每个角色只能看到与职责匹配的工具。例如搜索 Agent 不能执行 Shell，代码 Agent 只能在
+隔离沙盒中运行命令，运维 Agent 默认只能查看权威告警和任务状态。步骤、依赖、模型、工具、
+结果与错误都写入 PostgreSQL，并在管理台“任务与投递”页面中展示。
 
 ## 上下文与记忆
 

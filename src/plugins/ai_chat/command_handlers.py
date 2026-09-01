@@ -79,14 +79,31 @@ def _format_elapsed(seconds: int) -> str:
 
 def _task_status_text(event: MessageEvent) -> str:
     tasks = _running_tasks_for_event(event)
-    if not tasks:
-        return "当前会话没有正在运行的 AI 任务。"
+    subagent_tasks = (
+        subagent_store.recent(limit=5, scope_key=scope_from_event(event).key)
+        if subagent_store is not None
+        else []
+    )
+    active_subagents = [
+        task
+        for task in subagent_tasks
+        if task.status in {"received", "planning", "running", "verifying", "cancelling"}
+    ]
+    if not tasks and not active_subagents:
+        return (
+            "当前会话没有正在运行的任务。\n"
+            "使用 /task 任务内容，可以让主控拆分并派给专业 Sub-Agent。"
+        )
     lines = ["正在运行的任务："]
     lines.extend(
         f"- {task.task_id} · {task.elapsed_seconds}s · {task.summary or '未命名任务'}"
         for task in tasks
     )
-    lines.append("\n停止：/停止 任务ID；不写 ID 时停止最新任务。")
+    lines.extend(
+        f"- {task.handle} · {task.status} · {task.objective[:80]}"
+        for task in active_subagents
+    )
+    lines.append("\n停止：/停止 task#编号；不写 ID 时停止当前前台任务。")
     return "\n".join(lines)
 
 
@@ -1186,7 +1203,7 @@ async def handle_control_command(bot: Bot, event: MessageEvent) -> None:
             control_command,
             _reply_message(
                 event,
-                "常用命令：/模型、/effort、/shell、/任务、/停止、"
+                "常用命令：/模型、/effort、/shell、/task 复杂任务、/任务、/停止、"
                 "/feedback、/btw、/pin、/unpin、/pins、/usage、/version。"
                 "普通问题直接 @我。",
             ),
@@ -1273,7 +1290,22 @@ async def handle_pins_command(event: MessageEvent) -> None:
     )
 
 
-async def handle_task_status(event: MessageEvent) -> None:
+async def handle_task_status(
+    bot: Bot,
+    event: MessageEvent,
+    args: Message = CommandArg(),
+) -> None:
+    objective = args.extract_plain_text().strip()
+    if objective and objective.lower() not in {"status", "list", "ls", "状态", "列表"}:
+        await _finish_tracked_ai(
+            task_status,
+            bot,
+            event,
+            objective,
+            label="Sub-Agent task",
+            task_mode=True,
+        )
+        return
     await _finish_safely(
         task_status,
         _reply_message(event, _task_status_text(event)),
@@ -1292,6 +1324,18 @@ async def handle_task_stop(
     args: Message = CommandArg(),
 ) -> None:
     task_id = args.extract_plain_text().strip() or None
+    subagent_match = re.fullmatch(r"task#?([1-9][0-9]*)", task_id or "", re.IGNORECASE)
+    if subagent_match and subagent_coordinator is not None:
+        subagent_id = int(subagent_match.group(1))
+        if subagent_coordinator.cancel(subagent_id):
+            message = f"已请求停止 Sub-Agent 任务 task#{subagent_id}。"
+        else:
+            message = "这个 Sub-Agent 任务不存在，或已经结束。"
+        await _finish_safely(
+            task_stop,
+            _reply_message(event, message),
+        )
+        return
     stopped = (
         running_tasks.cancel_for_group(event.group_id, task_id)
         if isinstance(event, GroupMessageEvent)
