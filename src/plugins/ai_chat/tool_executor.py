@@ -99,6 +99,7 @@ from .media_library import (
 from .model_catalog import (
     ModelProfile,
 )
+from .subagents import route_subagent_request
 from .observability import (
     telemetry,
 )
@@ -376,6 +377,10 @@ async def _ask_ai(
         event,
         user_text,
         available_video,
+    )
+    automatic_subagent_route = route_subagent_request(
+        user_text,
+        has_media=bool(available_image_sources or available_video),
     )
 
     should_resolve_voice = (
@@ -2247,7 +2252,29 @@ async def _ask_ai(
                 "每个角色开始和完成的工作，主 Agent 不要重复刷进度。"
             )
 
-        if task_mode:
+        use_automatic_subagents = bool(
+            subagent_coordinator is not None
+            and isinstance(event, GroupMessageEvent)
+            and automatic_subagent_route.delegate
+            and not any(
+                (
+                    force_search,
+                    force_ocr,
+                    force_voice_reply,
+                    force_voice_transcription,
+                    alert_query_required,
+                    video_analysis_required,
+                )
+            )
+        )
+        if use_automatic_subagents:
+            logger.info(
+                "Automatic Sub-Agent route: domains=%s reasons=%s",
+                ",".join(automatic_subagent_route.domains),
+                ",".join(automatic_subagent_route.reasons),
+            )
+
+        if task_mode or use_automatic_subagents:
             answer = await run_subagent_goal(user_text)
         else:
             answer = await ask_deepseek_with_tools(

@@ -44,6 +44,13 @@ class AgentSpec:
     allowed_tools: frozenset[str]
 
 
+@dataclass(frozen=True)
+class SubAgentRouteDecision:
+    delegate: bool
+    domains: tuple[str, ...] = ()
+    reasons: tuple[str, ...] = ()
+
+
 COMMON_READ_TOOLS = frozenset(
     {
         "get_message_by_id",
@@ -182,6 +189,79 @@ AGENT_SPECS: dict[SubAgentRole, AgentSpec] = {
 }
 
 WORKER_ROLES = tuple(role for role in AGENT_SPECS if role != "supervisor")
+
+
+_ROUTE_DOMAIN_PATTERNS: dict[str, re.Pattern[str]] = {
+    "research": re.compile(
+        r"(?:搜索|查(?:一下|找|资料|参数|来源|官网|文献|新闻)|调研|核实|考证|来源|链接)"
+    ),
+    "media": re.compile(r"(?:图片|这张图|截图|视频|音频|语音|字幕|帖子|分享)"),
+    "analysis": re.compile(r"(?:分析|对比|比较|评估|统计|归纳|综合|核对)"),
+    "document": re.compile(
+        r"(?:pdf|报告|文档|表格|ppt|幻灯片|压缩包|交付物|发到群|发回来|生成文件)"
+    ),
+    "code": re.compile(r"(?:代码|编程|项目|修复|测试|构建|打包|脚本)"),
+    "operations": re.compile(
+        r"(?:部署|安装|配置|服务器|数据库|服务|告警|日志|监控|rebuild|重启)"
+    ),
+}
+_ROUTE_SEQUENCE_PATTERN = re.compile(
+    r"(?:先.+(?:再|然后|之后|最后)|(?:然后|再|接着|最后|并且|同时).+)"
+)
+_ROUTE_MULTI_SOURCE_PATTERN = re.compile(
+    r"(?:(?:至少|多个|两个|三个|四个|多方).{0,6}(?:来源|网站|资料)|"
+    r"(?:来源|网站|资料).{0,6}(?:对比|比较|交叉)|交叉核实)"
+)
+_ROUTE_LONG_ACTION_PATTERN = re.compile(
+    r"(?:部署|完整项目|生成.{0,12}(?:pdf|报告|文档|文件)|"
+    r"(?:修复|编写|修改).{0,12}(?:测试|构建|打包)|"
+    r"(?:下载|读取).{0,12}(?:分析|整理|生成))"
+)
+
+
+def route_subagent_request(
+    user_text: str,
+    *,
+    has_media: bool = False,
+) -> SubAgentRouteDecision:
+    """Route obvious multi-stage work before the main ReAct loop starts."""
+
+    normalized = re.sub(r"\s+", " ", user_text.strip().lower())
+    if not normalized:
+        return SubAgentRouteDecision(False)
+
+    domains = {
+        name
+        for name, pattern in _ROUTE_DOMAIN_PATTERNS.items()
+        if pattern.search(normalized)
+    }
+    if has_media and any(
+        marker in normalized
+        for marker in ("这", "看", "分析", "识别", "产品", "内容")
+    ):
+        domains.add("media")
+
+    has_sequence = bool(_ROUTE_SEQUENCE_PATTERN.search(normalized))
+    has_multi_source = bool(_ROUTE_MULTI_SOURCE_PATTERN.search(normalized))
+    has_long_action = bool(_ROUTE_LONG_ACTION_PATTERN.search(normalized))
+    reasons: list[str] = []
+
+    if has_multi_source and "document" in domains:
+        reasons.append("multi_source_artifact")
+    if "document" in domains and len(domains - {"document"}) >= 2:
+        reasons.append("cross_domain_artifact")
+    if has_sequence and len(domains) >= 3:
+        reasons.append("multi_stage_workflow")
+    if has_long_action and (
+        len(domains) >= 2 or bool(domains & {"code", "operations"})
+    ):
+        reasons.append("long_running_delivery")
+
+    return SubAgentRouteDecision(
+        bool(reasons),
+        tuple(sorted(domains)),
+        tuple(dict.fromkeys(reasons)),
+    )
 
 
 @dataclass(frozen=True)

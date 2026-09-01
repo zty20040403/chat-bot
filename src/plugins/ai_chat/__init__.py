@@ -118,6 +118,7 @@ from .model_catalog import (
     ModelProfile,
     SUPPORTED_REASONING_EFFORTS,
 )
+from .subagents import route_subagent_request
 from .message_ir import MessageBody, TextNode, render_fallback_text
 from .observability import observed_ai_turn, telemetry
 from .onebot_codec import (
@@ -242,7 +243,7 @@ from . import onebot_delivery as _onebot_delivery
 SEND_RETRY_DELAY_SECONDS = 2.0
 SEND_RETRY_MAX_CHARS = 800
 TURN_PROMPT_VERSION = "qqbot-turn-v13"
-BOT_VERSION = "0.10.0"
+BOT_VERSION = "0.10.1"
 EMPTY_MENTION_FOLLOW_UP = "你觉得呢"
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 proactive_check_gate = ProactiveCheckGate()

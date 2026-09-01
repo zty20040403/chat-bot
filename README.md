@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.10.0-22c55e?style=for-the-badge">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.10.1-22c55e?style=for-the-badge">
   <img alt="Python" src="https://img.shields.io/badge/Python-3.12-3776ab?style=for-the-badge&amp;logo=python&amp;logoColor=white">
   <img alt="NoneBot2" src="https://img.shields.io/badge/NoneBot2-OneBot_V11-ea5252?style=for-the-badge">
   <img alt="PostgreSQL" src="https://img.shields.io/badge/PostgreSQL-Durable-4169e1?style=for-the-badge&amp;logo=postgresql&amp;logoColor=white">
@@ -317,8 +317,9 @@ OpenAI/CLIProxy 模型可以按当前用户、当前会话覆盖推理强度：
 
 ## Sub-Agent 任务模式
 
-普通 `@Kenneth` 请求如果明显包含多个专业领域、互相依赖的步骤或长时间工作，主 Agent 会
-自动调用 `run_subagents`；`/task` 只是强制进入任务模式的手动入口。主控先生成受宿主校验的
+普通 `@Kenneth` 请求如果明显包含多个专业领域、互相依赖的步骤或长时间工作，宿主路由器会
+在主 ReAct Loop 前自动升级为 Sub-Agent；模糊情况仍允许主模型调用 `run_subagents`。`/task`
+只是强制进入任务模式的手动入口。主控先生成受宿主校验的
 无环任务图，再把步骤派给七个固定角色：主控、搜索、代码、文件、媒体、分析和运维。每个
 角色开始和完成时都会通过 `say` 汇报正在做什么。执行角色不能自行创建新 Agent，最多步骤、
 并行数、工具轮次和总超时均由宿主配置。

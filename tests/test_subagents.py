@@ -17,6 +17,7 @@ from src.plugins.ai_chat.subagents import (
     TaskStep,
     _validate_plan,
     parse_profile_overrides,
+    route_subagent_request,
 )
 from src.plugins.ai_chat.model_catalog import ModelCatalog, ModelProfile
 from src.plugins.ai_chat.ai_tools import available_tools
@@ -175,6 +176,30 @@ class SubAgentPlanTests(unittest.TestCase):
         )
         names = {tool["function"]["name"] for tool in tools}
         self.assertIn("run_subagents", names)
+
+    def test_routes_multi_source_media_report_automatically(self) -> None:
+        decision = route_subagent_request(
+            "查一下这款产品的详细参数，对比三个来源，再整理成 PDF 发到群里",
+            has_media=True,
+        )
+        self.assertTrue(decision.delegate)
+        self.assertIn("multi_source_artifact", decision.reasons)
+        self.assertEqual(
+            set(decision.domains),
+            {"analysis", "document", "media", "research"},
+        )
+
+    def test_does_not_route_single_tool_requests(self) -> None:
+        for request, has_media in (
+            ("看看这张图片", True),
+            ("查一下今天天气", False),
+            ("分析这段话", False),
+            ("帮我写一份 PDF", False),
+        ):
+            with self.subTest(request=request):
+                self.assertFalse(
+                    route_subagent_request(request, has_media=has_media).delegate
+                )
 
 
 class SubAgentCoordinatorTests(unittest.IsolatedAsyncioTestCase):
