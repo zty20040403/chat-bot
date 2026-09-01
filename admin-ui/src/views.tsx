@@ -7,6 +7,8 @@ import {
   Database,
   ExternalLink,
   GitBranch,
+  Maximize2,
+  Minimize2,
   Play,
   RotateCcw,
   ShieldCheck,
@@ -148,6 +150,7 @@ function stageState(stage: any[]): string {
 }
 
 function SubAgentFlow({ detail, loading, error, now, roles }: { detail: any; loading: boolean; error: string; now: number; roles: any[] }) {
+  const [expanded, setExpanded] = useState(false)
   const task = detail?.task
   const runs = rows(detail?.runs)
   const running = runs.filter((run) => run.status === 'running').length
@@ -192,11 +195,25 @@ function SubAgentFlow({ detail, loading, error, now, roles }: { detail: any; loa
     }],
   ] : []
 
+  useEffect(() => {
+    if (!expanded) return
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setExpanded(false)
+    }
+    window.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.body.style.overflow = previousOverflow
+      window.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [expanded])
+
   if (loading && !task) return <div className="subagent-flow-state">正在读取 Agent 执行图...</div>
   if (error) return <div className="inline-error">{error}</div>
   if (!task) return null
   return (
-    <div className="subagent-flow">
+    <div className={`subagent-flow ${expanded ? 'expanded' : ''}`}>
       <div className="subagent-flow-head">
         <div>
           <span className="eyebrow">执行拓扑 · {task.handle}</span>
@@ -207,6 +224,9 @@ function SubAgentFlow({ detail, loading, error, now, roles }: { detail: any; loa
           <span><small>峰值并行</small><strong>{peak}</strong></span>
           <span><small>执行阶段</small><strong>{workerStages.length}</strong></span>
         </div>
+        <button className="icon-button flow-expand-button" type="button" title={expanded ? '退出放大视图' : '放大执行拓扑'} aria-label={expanded ? '退出放大视图' : '放大执行拓扑'} onClick={() => setExpanded((current) => !current)}>
+          {expanded ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+        </button>
       </div>
       <div className="agent-flow-scroll">
         <div className="agent-flow-canvas">
