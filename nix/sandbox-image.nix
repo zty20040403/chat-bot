@@ -34,6 +34,11 @@ let
     ];
   };
 
+  sandboxFontConfigPackage = pkgs.runCommand "kennethbot-fontconfig" {} ''
+    mkdir -p $out/etc/kennethbot
+    cp ${sandboxFontConfig} $out/etc/kennethbot/fonts.conf
+  '';
+
   cjkPdfTool = pkgs.writeTextFile {
     name = "kennethbot-pdf";
     destination = "/bin/kennethbot-pdf";
@@ -356,7 +361,7 @@ pkgs.dockerTools.buildLayeredImage {
   tag = "latest";
   maxLayers = 120;
   contents = tools ++ [
-    sandboxFontConfig
+    sandboxFontConfigPackage
     pkgs.dockerTools.binSh
     pkgs.dockerTools.usrBinEnv
   ];
@@ -391,7 +396,7 @@ pkgs.dockerTools.buildLayeredImage {
       "USER=sandbox"
       "LANG=C.UTF-8"
       "LC_ALL=C.UTF-8"
-      "FONTCONFIG_FILE=${sandboxFontConfig}"
+      "FONTCONFIG_FILE=/etc/kennethbot/fonts.conf"
       "PDF_CJK_FONT=${pkgs.sarasa-gothic}/share/fonts/truetype/Sarasa-Regular.ttc"
       "PDF_CJK_BOLD_FONT=${pkgs.sarasa-gothic}/share/fonts/truetype/Sarasa-Bold.ttc"
       "PYTHONUNBUFFERED=1"
