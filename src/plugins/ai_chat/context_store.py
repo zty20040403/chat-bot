@@ -72,9 +72,9 @@ class ContextStore:
         self,
         path: DatabaseSource,
         *,
-        input_budget_tokens: int = 6000,
-        high_watermark_tokens: int = 4500,
-        low_watermark_tokens: int = 2200,
+        input_budget_tokens: int = 32768,
+        high_watermark_tokens: int = 32768,
+        low_watermark_tokens: int = 16384,
         compartment_target_tokens: int = 1200,
         raw_tail_min_messages: int = 8,
         max_compartments: int = 12,
@@ -116,7 +116,12 @@ class ContextStore:
         protected_message_ids: tuple[int, ...] = (),
         exclude_canonical_message_ids: tuple[int, ...] = (),
         materialize: bool = True,
+        token_budget: int | None = None,
     ) -> ContextProjection:
+        projection_budget = min(
+            max(int(token_budget or self.input_budget_tokens), 1000),
+            self.input_budget_tokens,
+        )
         floor = ledger.visible_message_floor(scope)
         self._sync_visibility(scope.key, floor)
         materialized = (
@@ -156,8 +161,9 @@ class ContextStore:
         raw_text, raw_ids, raw_tokens, degraded = self._fit_raw_tail(
             raw_messages,
             raw_lines,
+            token_budget=projection_budget,
         )
-        remaining = max(self.input_budget_tokens - raw_tokens, 0)
+        remaining = max(projection_budget - raw_tokens, 0)
         chosen: list[tuple[CompartmentRecord, str]] = []
         for age, compartment in enumerate(reversed(compartments)):
             if len(chosen) >= self.max_compartments:
@@ -370,7 +376,11 @@ class ContextStore:
             candidate.scope_key,
             candidate.expected_cursor,
             list(candidate.messages),
-            summaries=(normalized[0][:3200], normalized[1][:1600], normalized[2][:800]),
+            summaries=(
+                normalized[0][:4000],
+                normalized[1][:2000],
+                normalized[2][:500],
+            ),
             summary_p4=" ".join(summary_p4.split())[:300],
             topic=" ".join(topic.split())[:300],
             importance=_bounded_score(importance),
@@ -646,6 +656,8 @@ class ContextStore:
         self,
         messages: list[CanonicalMessage],
         lines: list[str],
+        *,
+        token_budget: int,
     ) -> tuple[str, list[int], int, bool]:
         if not messages:
             return "", [], 0, False
@@ -655,7 +667,7 @@ class ContextStore:
             if index in chosen_indexes:
                 continue
             cost = estimate_tokens(lines[index])
-            if chosen_indexes and used + cost > self.input_budget_tokens:
+            if chosen_indexes and used + cost > token_budget:
                 # The live tail is a chronological suffix, not a bag of
                 # individually cheap messages. Skipping one line and then
                 # admitting older lines creates invisible holes that change
@@ -663,7 +675,7 @@ class ContextStore:
                 break
             chosen_indexes.add(index)
             used += cost
-            if used >= self.input_budget_tokens:
+            if used >= token_budget:
                 break
         ordered = sorted(chosen_indexes)
         chosen_lines = [lines[index] for index in ordered]
@@ -679,8 +691,8 @@ class ContextStore:
         self,
         messages: list[CanonicalMessage],
     ) -> tuple[str, str, str]:
-        p1 = self._bounded_summary_lines(messages, per_message=260, cap=3200)
-        p2 = self._bounded_summary_lines(messages, per_message=110, cap=1600)
+        p1 = self._bounded_summary_lines(messages, per_message=300, cap=4000)
+        p2 = self._bounded_summary_lines(messages, per_message=140, cap=2000)
         prompt_messages = [message for message in messages if message.prompt_text]
         participants: list[str] = []
         for message in prompt_messages:
@@ -698,7 +710,7 @@ class ContextStore:
             f"{', '.join(participants[:8]) or '未知'}；关键词："
             f"{', '.join(keywords) or '无明显关键词'}。"
         )
-        return p1, p2, p3
+        return p1, p2, p3[:500]
 
     def _bounded_summary_lines(
         self,

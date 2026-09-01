@@ -7,7 +7,10 @@ import nonebot
 nonebot.init()
 
 from src.plugins.ai_chat.context_pipeline import TurnContextPlan
-from src.plugins.ai_chat.context_policy import choose_context_policy
+from src.plugins.ai_chat.context_policy import (
+    chronological_projection_budget,
+    choose_context_policy,
+)
 
 
 def _plan(
@@ -109,6 +112,23 @@ class ContextPolicyTests(unittest.TestCase):
 
         self.assertGreater(complex_policy.token_budget.total, simple.token_budget.total)
         self.assertLessEqual(complex_policy.token_budget.total, 1760)
+
+    def test_chronological_projection_uses_model_window_ceiling(self) -> None:
+        self.assertEqual(
+            chronological_projection_budget(
+                64000,
+                model_max_input_tokens=20000,
+            ),
+            8000,
+        )
+        self.assertEqual(
+            chronological_projection_budget(
+                64000,
+                model_max_input_tokens=200000,
+            ),
+            32768,
+        )
+        self.assertEqual(chronological_projection_budget(12000), 12000)
 
 
 if __name__ == "__main__":

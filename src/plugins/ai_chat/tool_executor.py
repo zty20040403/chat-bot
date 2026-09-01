@@ -69,6 +69,7 @@ from .config import (
     settings,
 )
 from .context_policy import (
+    chronological_projection_budget,
     choose_context_policy,
 )
 from .context_store import (
@@ -1857,6 +1858,12 @@ async def _ask_ai(
                             replay_covered_message_ids
                         ),
                         materialize=False,
+                        token_budget=chronological_projection_budget(
+                            settings.context_input_budget_tokens,
+                            model_max_input_tokens=(
+                                selected_profile.max_input_tokens
+                            ),
+                        ),
                     )
                 except (
                     OSError,
@@ -2128,7 +2135,7 @@ async def _ask_ai(
                 }
             )
             context_plan_payload["resolver_version"] = (
-                "chronological-projection-v2"
+                "chronological-projection-v3"
             )
             context_plan_payload["context_hash"] = hashlib.sha256(
                 (group_prompt_context + "\n\n" + memory_prompt_context).encode(

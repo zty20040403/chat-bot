@@ -339,15 +339,15 @@ class Settings:
                 True,
             ),
             context_input_budget_tokens=min(
-                max(_get_int("AI_CONTEXT_INPUT_BUDGET_TOKENS", 6000), 1000),
+                max(_get_int("AI_CONTEXT_INPUT_BUDGET_TOKENS", 32768), 1000),
                 64000,
             ),
             context_high_watermark_tokens=min(
-                max(_get_int("AI_CONTEXT_HIGH_WATERMARK_TOKENS", 4500), 500),
+                max(_get_int("AI_CONTEXT_HIGH_WATERMARK_TOKENS", 32768), 500),
                 64000,
             ),
             context_low_watermark_tokens=min(
-                max(_get_int("AI_CONTEXT_LOW_WATERMARK_TOKENS", 2200), 250),
+                max(_get_int("AI_CONTEXT_LOW_WATERMARK_TOKENS", 16384), 250),
                 32000,
             ),
             context_compartment_target_tokens=min(

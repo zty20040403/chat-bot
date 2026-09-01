@@ -137,6 +137,36 @@ class ContextStoreTests(unittest.TestCase):
         self.assertNotIn("old joke", projection.text)
         self.assertEqual(len(projection.raw_message_ids), 1)
 
+    def test_per_turn_budget_limits_the_chronological_suffix(self) -> None:
+        managed = ContextStore(
+            ":memory:",
+            input_budget_tokens=4000,
+            historian_managed=True,
+        )
+        self.addCleanup(managed.close)
+        for index in range(12):
+            self.ledger.record_message(
+                self.group_a,
+                native_message_id=f"budget-{index}",
+                sender_native_user_id="1000",
+                sender_display="User",
+                body=MessageBody(
+                    (TextNode(0, f"timeline {index} " + "x" * 500),)
+                ),
+                occurred_at=300 + index,
+            )
+
+        projection = managed.build_projection(
+            self.ledger,
+            self.group_a,
+            token_budget=1000,
+        )
+
+        self.assertLess(projection.raw_message_ids[0], 12)
+        self.assertIn("timeline 11", projection.text)
+        self.assertNotIn("timeline 0 ", projection.text)
+        self.assertTrue(projection.degraded)
+
     def test_historian_publication_uses_cursor_cas(self) -> None:
         self.seed()
         candidate = self.context.capture_candidate(self.ledger, self.group_a)

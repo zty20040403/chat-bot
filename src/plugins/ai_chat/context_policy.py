@@ -15,6 +15,8 @@ from .context_pipeline.router import (
 
 ContextMode = Literal["minimal", "focused", "expanded"]
 
+RAW_TAIL_HIGH_CEILING = 32_768
+
 _ROSTER_REFERENCE = re.compile(
     r"(?:@|艾特|群里谁|谁说|群友|群成员|大家|他们|她们|有人)"
 )
@@ -140,6 +142,19 @@ def proactive_context_policy() -> ContextPolicy:
             tool_reserve=100,
         ),
     )
+
+
+def chronological_projection_budget(
+    configured_max_tokens: int,
+    *,
+    model_max_input_tokens: int = 0,
+) -> int:
+    """Size the protected chronological transcript for the selected model."""
+    configured = min(max(int(configured_max_tokens), 1000), 64_000)
+    if model_max_input_tokens <= 0:
+        return min(configured, RAW_TAIL_HIGH_CEILING)
+    prompt_share = max(int(model_max_input_tokens * 0.40), 1024)
+    return min(configured, prompt_share, RAW_TAIL_HIGH_CEILING)
 
 
 def _adaptive_budget(

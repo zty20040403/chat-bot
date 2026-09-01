@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.9.8-22c55e?style=for-the-badge">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.9.9-22c55e?style=for-the-badge">
   <img alt="Python" src="https://img.shields.io/badge/Python-3.12-3776ab?style=for-the-badge&amp;logo=python&amp;logoColor=white">
   <img alt="NoneBot2" src="https://img.shields.io/badge/NoneBot2-OneBot_V11-ea5252?style=for-the-badge">
   <img alt="PostgreSQL" src="https://img.shields.io/badge/PostgreSQL-Durable-4169e1?style=for-the-badge&amp;logo=postgresql&amp;logoColor=white">
@@ -35,7 +35,7 @@ Kennethbot 通过 NapCatQQ 接收 OneBot V11 事件，使用 NoneBot2 处理消�
 <table>
   <tr>
     <td width="50%"><strong>多模型路由</strong><br>兼容 OpenAI Chat 与 Anthropic Messages；按群、用户选择模型 profile。</td>
-    <td width="50%"><strong>上下文与记忆</strong><br>理解引用、@、发送者和最近话题；群聊、私聊、个人记忆严格隔离。</td>
+    <td width="50%"><strong>上下文与记忆</strong><br>按模型窗口保留连续原文时间线，旧消息进入 P1/P2/P3 分层章节；群聊、私聊、个人记忆严格隔离。</td>
   </tr>
   <tr>
     <td><strong>可靠 Agent 内核</strong><br>工具风险、显式批准、幂等去重、硬超时、取消补偿、持久接管与逐步审计回放。</td>
