@@ -5,6 +5,7 @@ import base64
 import hashlib
 import json
 import re
+import shlex
 import sqlite3
 import time
 from dataclasses import asdict
@@ -75,6 +76,9 @@ AGENT_TOOL_PROMPT = (
     "有新的实际进展时可以持续汇报，但不要重复发送没有信息量的内容。"
     "先创建合适运行环境的沙盒，再写入或导入文件、执行构建和测试；"
     "需要交付时，用 send_file_from_sandbox 或 send_image_from_sandbox 发到当前群。"
+    "生成含中文的 PDF 时必须使用沙盒内的 kennethbot-pdf input.md output.pdf，"
+    "再用 pdffonts 确认字体已嵌入、pdftotext 确认中文可提取；"
+    "禁止用 Helvetica 等默认西文字体直接生成中文 PDF。"
     "本次任务创建的普通沙盒会在最终回复前由宿主统一销毁；"
     "因此必须先发送需要保留的文件或图片。只有 sandbox_exec 明确使用 "
     "background=true 时，沙盒才由持久队列接管并跨重启保留；"
@@ -855,6 +859,56 @@ class AgentToolExecutor:
             path,
             max_bytes=self.max_file_bytes or None,
         )
+        pdf_validation: dict[str, object] | None = None
+        if content.startswith(b"%PDF-"):
+            quoted_path = shlex.quote(path)
+            font_result = await self.sandbox_manager.exec(
+                self.owner,
+                sandbox_id,
+                f"pdffonts {quoted_path}",
+                30,
+            )
+            if font_result.returncode != 0:
+                return _json_result(
+                    ok=False,
+                    error="PDF 结构校验失败，文件未发送。请重新生成后再试。",
+                    details=font_result.stderr.strip(),
+                )
+
+            text_result = await self.sandbox_manager.exec(
+                self.owner,
+                sandbox_id,
+                f"pdftotext {quoted_path} -",
+                30,
+            )
+            if text_result.returncode != 0:
+                return _json_result(
+                    ok=False,
+                    error="PDF 文字校验失败，文件未发送。请重新生成后再试。",
+                    details=text_result.stderr.strip(),
+                )
+
+            extracted_text = text_result.stdout.strip()
+            embedded_font = any(
+                re.search(
+                    r"\s+yes\s+(?:yes|no)\s+(?:yes|no)\s+\d+\s+\d+\s*$",
+                    line.lower(),
+                )
+                for line in font_result.stdout.splitlines()
+            )
+            if extracted_text and not embedded_font:
+                return _json_result(
+                    ok=False,
+                    error=(
+                        "PDF 含文字但字体没有嵌入，中文可能显示为方框，文件未发送。"
+                        "请使用 kennethbot-pdf 重新生成。"
+                    ),
+                )
+            pdf_validation = {
+                "checked": True,
+                "embedded_font": embedded_font,
+                "extractable_text": bool(extracted_text),
+            }
         response = await self.bot.call_api(
             "upload_group_file",
             group_id=self.event.group_id,
@@ -866,6 +920,7 @@ class AgentToolExecutor:
             filename=filename,
             size=len(content),
             uploaded=bool(response is not False),
+            pdf_validation=pdf_validation,
         )
 
     async def _send_image_from_sandbox(

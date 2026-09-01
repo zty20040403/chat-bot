@@ -433,7 +433,8 @@ SANDBOX_EXEC_TOOL: ToolDefinition = {
         "description": (
             "在指定沙盒的 /workspace 中执行 shell 命令，适合安装依赖、构建、测试、"
             "运行程序和打包文件。常用开发、PDF/Office、媒体、OCR 和数据"
-            "工具已预装，先用 command -v 确认再考虑额外安装。不要用于读写宿主机。"
+            "工具已预装；中文 PDF 使用 kennethbot-pdf，并用 pdffonts、pdftotext 验收。"
+            "先用 command -v 确认再考虑额外安装。不要用于读写宿主机。"
             "预计超过一次对话等待时间时，"
             "设置 background=true 交给可恢复的持久任务队列。"
         ),

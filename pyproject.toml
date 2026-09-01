@@ -1,6 +1,6 @@
 [project]
 name = "qq-deepseek-bot"
-version = "0.10.1"
+version = "0.10.2"
 description = "A QQ group bot powered by DeepSeek."
 requires-python = ">=3.9"
 dependencies = [

@@ -124,6 +124,7 @@ class FakeSandboxManager:
         }
         self.created: list[str] = []
         self.destroyed: list[str] = []
+        self.executed: list[str] = []
 
     async def create(self, owner: str, runtime: str) -> dict[str, str]:
         del owner
@@ -171,6 +172,29 @@ class FakeSandboxManager:
         if len(content) > max_bytes:
             raise ValueError("too large")
         return content
+
+    async def exec(
+        self,
+        owner: str,
+        sandbox_id: str,
+        command: str,
+        timeout_seconds: int | None = None,
+    ) -> SimpleNamespace:
+        del owner, sandbox_id, timeout_seconds
+        self.executed.append(command)
+        if command.startswith("pdffonts "):
+            return SimpleNamespace(
+                returncode=0,
+                stdout=(
+                    "name type encoding emb sub uni object ID\n"
+                    "-----------------------------------------\n"
+                    "ABCDEE+Sarasa TrueType Identity-H yes yes yes 7 0\n"
+                ),
+                stderr="",
+            )
+        if command.startswith("pdftotext "):
+            return SimpleNamespace(returncode=0, stdout="中文报告\n", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
 
 
 class FakeContentSource:
@@ -488,6 +512,66 @@ class AgentToolExecutorTests(unittest.IsolatedAsyncioTestCase):
             self.bot.uploads[0]["file"],
             "base64://" + base64.b64encode(b"done").decode("ascii"),
         )
+
+    async def test_send_pdf_checks_embedded_font_before_upload(self) -> None:
+        self.sandbox.files[("s123abc", "report.pdf")] = b"%PDF-fake"
+
+        result = json.loads(
+            await self.executor.execute(
+                "send_file_from_sandbox",
+                {"sandbox_id": "s123abc", "path": "report.pdf"},
+            )
+            or "{}"
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            result["pdf_validation"],
+            {
+                "checked": True,
+                "embedded_font": True,
+                "extractable_text": True,
+            },
+        )
+        self.assertEqual(
+            self.sandbox.executed,
+            ["pdffonts report.pdf", "pdftotext report.pdf -"],
+        )
+
+    async def test_send_pdf_rejects_text_without_embedded_font(self) -> None:
+        self.sandbox.files[("s123abc", "broken.pdf")] = b"%PDF-fake"
+
+        async def exec_without_embedded_font(
+            owner: str,
+            sandbox_id: str,
+            command: str,
+            timeout_seconds: int | None = None,
+        ) -> SimpleNamespace:
+            del owner, sandbox_id, timeout_seconds
+            if command.startswith("pdffonts "):
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout=(
+                        "name type encoding emb sub uni object ID\n"
+                        "-----------------------------------------\n"
+                        "Helvetica Type 1 WinAnsi no no no 2 0\n"
+                    ),
+                    stderr="",
+                )
+            return SimpleNamespace(returncode=0, stdout="中文报告\n", stderr="")
+
+        with patch.object(self.sandbox, "exec", exec_without_embedded_font):
+            result = json.loads(
+                await self.executor.execute(
+                    "send_file_from_sandbox",
+                    {"sandbox_id": "s123abc", "path": "broken.pdf"},
+                )
+                or "{}"
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertIn("字体没有嵌入", result["error"])
+        self.assertEqual(self.bot.uploads, [])
 
     async def test_task_sandboxes_are_destroyed_once_after_delivery(self) -> None:
         first = json.loads(

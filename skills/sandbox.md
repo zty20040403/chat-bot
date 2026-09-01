@@ -9,6 +9,9 @@ Summary: 在隔离 Docker 沙盒中创建、修改、测试并交付项目。
    Python/Node/Go/Rust/Java、Poppler/qpdf/LibreOffice/Pandoc、FFmpeg、
    ImageMagick、Tesseract、数据分析库和数据库客户端。先用
    `command -v` 或 Python import 检查，不要一上来就重复安装。
+   含中文的 PDF 统一使用 `kennethbot-pdf input.md output.pdf`，随后运行
+   `pdffonts output.pdf` 确认字体已嵌入，并用 `pdftotext output.pdf -`
+   确认中文可提取。不要用默认 Helvetica 生成中文 PDF。
 5. 先运行测试或最小启动检查，再声称完成。工具失败时报告实际错误，不可伪造成功。
 6. 交付用 `send_file_from_sandbox` 或 `send_image_from_sandbox`；不再需要时销毁沙盒。
 7. 沙盒不是公网部署环境，也不能访问宿主机、机器人密钥或其他用户的数据。

@@ -132,7 +132,9 @@ AGENT_SPECS: dict[SubAgentRole, AgentSpec] = {
         description="读取群文件、PDF、表格和文档并生成交付物。",
         instructions=(
             "先取得真实文件，再解析内容；不得根据文件名猜测。生成文档后检查文件"
-            "存在且可读取，并通过文件句柄交付。"
+            "存在且可读取，并通过文件句柄交付。含中文的 PDF 必须使用沙盒里的 "
+            "kennethbot-pdf 生成，再用 pdffonts 检查字体嵌入、pdftotext 检查中文；"
+            "验收失败不得发送。"
         ),
         allowed_tools=(
             COMMON_READ_TOOLS
