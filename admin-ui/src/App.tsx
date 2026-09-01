@@ -6,6 +6,7 @@ import {
   BookOpen,
   Boxes,
   BrainCircuit,
+  Clock3,
   Database,
   FileClock,
   Gauge,
@@ -89,6 +90,7 @@ export function App() {
   const plane = useControlPlane(runtime)
   const [route, setRoute] = useState<RouteState>(() => parseRoute(window.location.hash))
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [clock, setClock] = useState(() => new Date())
   const active = route.active
   const activeEntry = NAVIGATION.find((item) => item.id === active) ?? NAVIGATION[0]
   const detailEntry = route.detail ? DETAIL_META[route.detail] : null
@@ -104,6 +106,11 @@ export function App() {
       window.removeEventListener('popstate', syncRoute)
       window.removeEventListener('hashchange', syncRoute)
     }
+  }, [])
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setClock(new Date()), 1000)
+    return () => window.clearInterval(timer)
   }, [])
 
   if (!plane.authenticated) {
@@ -150,7 +157,7 @@ export function App() {
         <header className="topbar">
           <button className="menu-button" title="打开导航" onClick={() => setSidebarOpen(true)}><Menu size={19} /></button>
           <div className="topbar-title"><h1>{detailEntry?.title ?? activeEntry.label}</h1><p>{detailEntry?.description ?? activeEntry.description}</p></div>
-          <div className="topbar-status"><StatusBadge value={plane.online ? 'online' : 'offline'} label={plane.online ? '实时' : '断开'} /><span>{plane.updatedAt ? `更新于 ${new Date(plane.updatedAt).toLocaleTimeString('zh-CN', { hour12: false })}` : '正在加载'}</span><button className="icon-button topbar-refresh" title="刷新全部数据" onClick={() => void plane.refreshAll()}><RefreshCw className={plane.loading.size ? 'spin' : ''} size={16} /></button>{runtime.requiresToken && <button className="text-button" onClick={() => plane.setToken('')}>退出</button>}</div>
+          <div className="topbar-status"><StatusBadge value={plane.online ? 'online' : 'offline'} label={plane.online ? '实时' : '断开'} /><span>{plane.updatedAt ? `更新于 ${new Date(plane.updatedAt).toLocaleTimeString('zh-CN', { hour12: false })}` : '正在加载'}</span><div className="live-clock" title="当前北京时间"><Clock3 size={14} /><time dateTime={clock.toISOString()}><span className="clock-date">{clock.toLocaleDateString('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit' })}</span>{clock.toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })}</time></div><button className="icon-button topbar-refresh" title="刷新全部数据" onClick={() => void plane.refreshAll()}><RefreshCw className={plane.loading.size ? 'spin' : ''} size={16} /></button>{runtime.requiresToken && <button className="text-button" onClick={() => plane.setToken('')}>退出</button>}</div>
         </header>
         {plane.error && <div className="error-banner"><span>{plane.error}</span><button title="关闭错误提示" onClick={plane.clearError}><X size={16} /></button></div>}
         <main>

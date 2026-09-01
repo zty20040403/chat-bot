@@ -334,10 +334,17 @@ class SubAgentStore:
         self._legacy_sqlite = not isinstance(source, PostgresDatabase)
         self.path, self._connection = open_store_connection(source)
         self._lock = threading.RLock()
+        self._change_listener: Callable[[int], None] | None = None
         if self._legacy_sqlite:
             self._configure()
             self._migrate()
         self.recovered_tasks = self.recover_interrupted()
+
+    def set_change_listener(
+        self,
+        listener: Callable[[int], None] | None,
+    ) -> None:
+        self._change_listener = listener
 
     def close(self) -> None:
         with self._lock:
@@ -468,6 +475,12 @@ class SubAgentStore:
     def start_run(self, run_id: int, *, now: int | None = None) -> bool:
         timestamp = int(time.time() if now is None else now)
         with self._transaction() as cursor:
+            row = cursor.execute(
+                "SELECT task_id FROM subagent_runs WHERE run_id = ?",
+                (int(run_id),),
+            ).fetchone()
+            if row is None:
+                return False
             cursor.execute(
                 """
                 UPDATE subagent_runs
@@ -477,7 +490,17 @@ class SubAgentStore:
                 """,
                 (timestamp, int(run_id)),
             )
-            return cursor.rowcount == 1
+            changed = cursor.rowcount == 1
+            task_id = int(row["task_id"])
+        if changed:
+            self.append_event(
+                task_id,
+                "run.running",
+                {"run_id": int(run_id)},
+                run_id=run_id,
+                now=timestamp,
+            )
+        return changed
 
     def finish_run(
         self,
@@ -552,6 +575,17 @@ class SubAgentStore:
                     timestamp,
                 ),
             )
+        self._notify_changed(task_id)
+
+    def _notify_changed(self, task_id: int) -> None:
+        listener = self._change_listener
+        if listener is None:
+            return
+        try:
+            listener(int(task_id))
+        except Exception:
+            # Observability must never make the durable task transition fail.
+            return
 
     def add_artifacts(
         self,

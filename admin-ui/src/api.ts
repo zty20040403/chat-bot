@@ -55,7 +55,7 @@ export const RESOURCE_PATHS: Record<ResourceName, string> = {
 
 export const EVENT_RESOURCES: Record<string, ResourceName[]> = {
   overview: ['overview'],
-  observability: ['observability', 'traces'],
+  observability: ['observability'],
   alerts: ['alerts', 'observability'],
   deliveries: ['deliveries'],
   usage: ['usage'],

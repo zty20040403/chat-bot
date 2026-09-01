@@ -111,18 +111,34 @@ export function useControlPlane(runtime: KennethbotAdminRuntime) {
   useEffect(() => {
     if (!authenticated) return
     const controller = new AbortController()
+    const pendingResources = new Set<ResourceName>()
+    let refreshTimer: number | null = null
     let retry = 1000
+    const flushResources = () => {
+      refreshTimer = null
+      const resources = [...pendingResources]
+      pendingResources.clear()
+      if (resources.length) void refreshMany(resources, controller.signal)
+    }
     const run = async () => {
       while (!controller.signal.aborted) {
         try {
           await client.events(controller.signal, (event: RealtimeEvent) => {
+            if (event.type === 'ready') {
+              eventSequence.current = event.sequence || 0
+              if (event.versions) setVersions((current) => ({ ...current, ...event.versions }))
+              return
+            }
             if (event.sequence && event.sequence <= eventSequence.current) return
             eventSequence.current = Math.max(eventSequence.current, event.sequence || 0)
             if (event.versions) setVersions((current) => ({ ...current, ...event.versions }))
             if (event.type === 'resources.changed') {
               const resources = event.resources.flatMap((resource) => EVENT_RESOURCES[resource] ?? [])
-              resources.push('audit', 'versions')
-              void refreshMany(resources, controller.signal)
+              if (event.versions) resources.push('audit', 'versions')
+              resources.forEach((resource) => pendingResources.add(resource))
+              if (refreshTimer === null) {
+                refreshTimer = window.setTimeout(flushResources, 80)
+              }
             }
           })
           retry = 1000
@@ -136,7 +152,10 @@ export function useControlPlane(runtime: KennethbotAdminRuntime) {
       }
     }
     void run()
-    return () => controller.abort()
+    return () => {
+      controller.abort()
+      if (refreshTimer !== null) window.clearTimeout(refreshTimer)
+    }
   }, [authenticated, client, refreshMany])
 
   useEffect(() => {

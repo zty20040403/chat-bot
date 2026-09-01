@@ -62,6 +62,9 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; fo
 .topbar-title h1 { margin: 0; font-size: 17px; font-weight: 720; line-height: 1.15; }
 .topbar-title p { margin: 0; color: var(--muted); font-size: 11px; }
 .topbar-status { margin-left: auto; display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; }
+.live-clock { min-width: 142px; height: 32px; display: flex; align-items: center; justify-content: center; gap: 7px; padding: 0 10px; border-left: 1px solid var(--border); border-right: 1px solid var(--border); color: var(--foreground); font-variant-numeric: tabular-nums; }
+.live-clock time { display: flex; align-items: center; gap: 7px; white-space: nowrap; }
+.clock-date { color: var(--muted); }
 .topbar-refresh { width: 30px; height: 30px; }
 .text-button { border: 0; background: transparent; color: var(--muted); padding: 4px; }
 .text-button:hover { color: var(--foreground); }
@@ -369,6 +372,8 @@ dd { margin: 0; font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
   .topbar { padding: 0 14px; }
   .topbar-title p { display: none; }
   .topbar-status > span:not(.badge) { display: none; }
+  .live-clock { min-width: auto; padding: 0 7px; border-left: 0; }
+  .clock-date { display: none; }
   main { padding: 19px 14px 42px; }
   .error-banner { margin: 10px 14px 0; }
   .page-header h1 { font-size: 19px; }

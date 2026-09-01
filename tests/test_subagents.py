@@ -32,6 +32,8 @@ class SubAgentStoreTests(unittest.TestCase):
         self.store.close()
 
     def test_task_run_events_and_result_are_durable(self) -> None:
+        changed_tasks: list[int] = []
+        self.store.set_change_listener(changed_tasks.append)
         task = self.store.create_task(
             scope_key="qq:group:123",
             conversation_id="group:123:user:456",
@@ -79,7 +81,10 @@ class SubAgentStoreTests(unittest.TestCase):
         self.assertEqual(stored.status, "completed")
         self.assertEqual(stored.result["answer"], "报告")
         self.assertEqual(self.store.runs(task.task_id)[0].status, "succeeded")
-        self.assertGreaterEqual(len(self.store.events(task.task_id)), 4)
+        events = self.store.events(task.task_id)
+        self.assertGreaterEqual(len(events), 5)
+        self.assertIn("run.running", [item["event_type"] for item in events])
+        self.assertEqual(changed_tasks, [task.task_id] * len(events))
 
     def test_cancel_marks_active_task(self) -> None:
         task = self.store.create_task(

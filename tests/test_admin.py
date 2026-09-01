@@ -11,7 +11,12 @@ from fastapi import FastAPI
 
 nonebot.init()
 
-from src.plugins.ai_chat.admin import AdminEventBroker, AdminServices, register_admin
+from src.plugins.ai_chat.admin import (
+    AdminEventBroker,
+    AdminServices,
+    _changed_database_resources,
+    register_admin,
+)
 from src.plugins.ai_chat.delivery import DeliveryStore
 from src.plugins.ai_chat.model_catalog import ModelCatalog
 from src.plugins.ai_chat.quota import UsageStore
@@ -394,6 +399,31 @@ class AdminTests(unittest.TestCase):
         self.assertEqual(event["type"], "resources.changed")
         self.assertEqual(event["sequence"], 1)
         self.assertEqual(event["resources"], ["groups", "overview"])
+
+    def test_runtime_event_omits_control_versions(self) -> None:
+        broker = AdminEventBroker(lambda: {"subagents": 7})
+        queue = broker.subscribe()
+        broker.publish_runtime("subagents", "tasks")
+        event = queue.get_nowait()
+        broker.unsubscribe(queue)
+
+        self.assertEqual(event["resources"], ["subagents", "tasks"])
+        self.assertNotIn("versions", event)
+
+    def test_database_change_feed_maps_only_changed_resources(self) -> None:
+        previous = {
+            "usage_events": (3, 0, 0),
+            "vision_jobs": (4, 2, 0),
+        }
+        current = {
+            "usage_events": (4, 0, 0),
+            "vision_jobs": (4, 2, 0),
+        }
+
+        self.assertEqual(
+            _changed_database_resources(previous, current),
+            {"usage", "overview", "observability"},
+        )
 
     def test_dashboard_api_requires_token_and_returns_runtime_state(self) -> None:
         deliveries = DeliveryStore(":memory:")
