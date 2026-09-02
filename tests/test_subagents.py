@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import nonebot
 
@@ -100,6 +100,38 @@ class SubAgentStoreTests(unittest.TestCase):
         self.assertTrue(self.store.request_cancel(task.task_id))
         self.assertTrue(self.store.cancellation_requested(task.task_id))
         self.assertEqual(self.store.get(task.task_id).status, "cancelling")  # type: ignore[union-attr]
+
+    def test_restart_settles_running_and_pending_runs(self) -> None:
+        task = self.store.create_task(
+            scope_key="qq:group:1",
+            conversation_id="group:1:user:2",
+            requester_user_id=2,
+            trigger_message_id=None,
+            objective="重启中的任务",
+            max_parallelism=2,
+            max_steps=4,
+        )
+        first = self.store.create_run(
+            task.task_id,
+            TaskStep("first", "researcher", "检索", "资料"),
+            allowed_tools=[],
+            model_profile="test",
+        )
+        self.store.create_run(
+            task.task_id,
+            TaskStep("second", "document", "写报告", "PDF", ("first",)),
+            allowed_tools=[],
+            model_profile="test",
+        )
+        self.store.set_task_state(task.task_id, "running")
+        self.store.start_run(first.run_id)
+
+        self.assertEqual(self.store.recover_interrupted(), 1)
+        self.assertEqual(self.store.get(task.task_id).status, "failed")  # type: ignore[union-attr]
+        self.assertEqual(
+            [run.status for run in self.store.runs(task.task_id)],
+            ["failed", "skipped"],
+        )
 
 
 class SubAgentPlanTests(unittest.TestCase):
@@ -350,8 +382,119 @@ class SubAgentCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         task = store.recent(limit=1)[0]
-        self.assertEqual(task.status, "completed")
+        self.assertEqual(task.status, "partial")
+        self.assertEqual(store.runs(task.task_id)[0].status, "partial")
         self.assertTrue(task.result["deliveries"][0]["ok"])
+        store.close()
+
+    async def test_failed_worker_blocks_dependent_step_but_still_synthesizes(self) -> None:
+        store = SubAgentStore(":memory:")
+        profile = ModelProfile(
+            name="test",
+            provider="test",
+            protocol="openai-chat",
+            model="test-model",
+            base_url="http://127.0.0.1",
+            api_key_required=False,
+        )
+        catalog = ModelCatalog({"test": profile}, default_profile="test")
+        coordinator = SubAgentCoordinator(store, catalog, logger=AsyncMock())
+        plan = {
+            "steps": [
+                {
+                    "id": "research",
+                    "agent": "researcher",
+                    "depends_on": [],
+                    "objective": "查资料",
+                    "deliverable": "事实",
+                },
+                {
+                    "id": "write",
+                    "agent": "document",
+                    "depends_on": ["research"],
+                    "objective": "写报告",
+                    "deliverable": "PDF",
+                },
+            ]
+        }
+        worker_result = json.dumps(
+            {"status": "failed", "summary": "来源不可访问", "warnings": []},
+            ensure_ascii=False,
+        )
+        with (
+            patch(
+                "src.plugins.ai_chat.subagents.ask_deepseek_json",
+                new=AsyncMock(return_value=plan),
+            ),
+            patch(
+                "src.plugins.ai_chat.subagents.ask_deepseek_with_tools",
+                new=AsyncMock(return_value=worker_result),
+            ) as worker,
+            patch(
+                "src.plugins.ai_chat.subagents.ask_deepseek",
+                new=AsyncMock(return_value="资料获取失败，未生成报告。"),
+            ),
+        ):
+            await coordinator.run(
+                scope_key="qq:group:1",
+                conversation_id="group:1:user:2",
+                requester_user_id=2,
+                trigger_message_id=3,
+                objective="查资料并写报告",
+                context="",
+                selected_profile=profile,
+                tools=[],
+                execute_tool=AsyncMock(return_value='{"ok":true}'),
+            )
+
+        task = store.recent(limit=1)[0]
+        self.assertEqual(task.status, "partial")
+        self.assertEqual([run.status for run in store.runs(task.task_id)], ["failed", "skipped"])
+        self.assertEqual(worker.await_count, 1)
+        store.close()
+
+    async def test_progress_failure_does_not_fail_the_task(self) -> None:
+        store = SubAgentStore(":memory:")
+        profile = ModelProfile(
+            name="test",
+            provider="test",
+            protocol="openai-chat",
+            model="test-model",
+            base_url="http://127.0.0.1",
+            api_key_required=False,
+        )
+        catalog = ModelCatalog({"test": profile}, default_profile="test")
+        logger = Mock()
+        coordinator = SubAgentCoordinator(store, catalog, logger=logger)
+        with (
+            patch(
+                "src.plugins.ai_chat.subagents.ask_deepseek_json",
+                new=AsyncMock(return_value={"steps": []}),
+            ),
+            patch(
+                "src.plugins.ai_chat.subagents.ask_deepseek_with_tools",
+                new=AsyncMock(return_value='{"status":"success","summary":"完成"}'),
+            ),
+            patch(
+                "src.plugins.ai_chat.subagents.ask_deepseek",
+                new=AsyncMock(return_value="完成"),
+            ),
+        ):
+            await coordinator.run(
+                scope_key="qq:group:1",
+                conversation_id="group:1:user:2",
+                requester_user_id=2,
+                trigger_message_id=3,
+                objective="查资料",
+                context="",
+                selected_profile=profile,
+                tools=[],
+                execute_tool=AsyncMock(return_value='{"ok":true}'),
+                progress=AsyncMock(side_effect=RuntimeError("QQ offline")),
+            )
+
+        self.assertEqual(store.recent(limit=1)[0].status, "completed")
+        self.assertTrue(logger.warning.called)
         store.close()
 
 

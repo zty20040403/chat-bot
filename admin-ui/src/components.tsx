@@ -53,7 +53,7 @@ export function StatusBadge({ value, label }: { value: unknown; label?: string }
     ? 'success'
     : ['failed', 'offline', 'blocked', 'rejected', 'critical', 'error', 'off_topic'].includes(normalized)
       ? 'danger'
-      : ['running', 'pending', 'degraded', 'warning', 'review', 'medium'].includes(normalized)
+      : ['running', 'pending', 'partial', 'skipped', 'degraded', 'warning', 'review', 'medium'].includes(normalized)
         ? 'warning'
         : 'neutral'
   return <span className={`badge ${tone}`}>{text}</span>

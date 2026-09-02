@@ -197,6 +197,7 @@ td strong { font-weight: 650; }
 .flow-link::after { content: ""; position: absolute; right: 0; top: 9px; width: 0; height: 0; border-top: 5px solid transparent; border-bottom: 5px solid transparent; border-left: 8px solid var(--flow-color); }
 .flow-link.running { --flow-color: var(--blue); }
 .flow-link.succeeded { --flow-color: var(--accent); }
+.flow-link.partial { --flow-color: var(--amber); }
 .flow-link.failed { --flow-color: var(--red); }
 .flow-energy { display: none; position: absolute; z-index: 2; top: 10px; left: -7px; width: 7px; height: 7px; border-radius: 50%; background: #fff; border: 2px solid var(--blue); box-shadow: 0 0 8px 3px rgba(37,99,235,.38); }
 .flow-link.running .flow-energy { display: block; animation: energy-transfer 1.45s linear infinite; }

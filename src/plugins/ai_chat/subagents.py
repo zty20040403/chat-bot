@@ -544,6 +544,50 @@ class SubAgentStore:
             )
         return changed
 
+    def settle_unfinished_runs(
+        self,
+        task_id: int,
+        *,
+        running_status: str,
+        pending_status: str,
+        error: str,
+        now: int | None = None,
+    ) -> int:
+        timestamp = int(time.time() if now is None else now)
+        transitions: list[tuple[int, str]] = []
+        with self._transaction() as cursor:
+            rows = cursor.execute(
+                """
+                SELECT run_id, status FROM subagent_runs
+                WHERE task_id = ? AND status IN ('pending', 'running')
+                ORDER BY run_id
+                """,
+                (int(task_id),),
+            ).fetchall()
+            for row in rows:
+                status = (
+                    running_status if str(row["status"]) == "running" else pending_status
+                )
+                cursor.execute(
+                    """
+                    UPDATE subagent_runs
+                    SET status = ?, last_error = ?, finished_at = ?
+                    WHERE run_id = ? AND status IN ('pending', 'running')
+                    """,
+                    (status, str(error)[:4000], timestamp, int(row["run_id"])),
+                )
+                if cursor.rowcount == 1:
+                    transitions.append((int(row["run_id"]), status))
+        for run_id, status in transitions:
+            self.append_event(
+                task_id,
+                f"run.{status}",
+                {"run_id": run_id, "error": str(error)[:1000]},
+                run_id=run_id,
+                now=timestamp,
+            )
+        return len(transitions)
+
     def append_event(
         self,
         task_id: int,
@@ -703,25 +747,30 @@ class SubAgentStore:
 
     def recover_interrupted(self, *, now: int | None = None) -> int:
         timestamp = int(time.time() if now is None else now)
-        with self._transaction() as cursor:
-            cursor.execute(
+        with self._lock:
+            rows = self._connection.execute(
                 """
-                UPDATE subagent_runs SET status = 'failed',
-                    last_error = 'bot restarted while this agent was running',
-                    finished_at = ? WHERE status = 'running'
-                """,
-                (timestamp,),
-            )
-            cursor.execute(
-                """
-                UPDATE subagent_tasks SET status = 'failed',
-                    last_error = 'bot restarted while this task was running',
-                    updated_at = ?, finished_at = ?
+                SELECT task_id FROM subagent_tasks
                 WHERE status IN ('received', 'planning', 'running', 'verifying', 'cancelling')
-                """,
-                (timestamp, timestamp),
+                ORDER BY task_id
+                """
+            ).fetchall()
+        task_ids = [int(row["task_id"]) for row in rows]
+        for task_id in task_ids:
+            self.settle_unfinished_runs(
+                task_id,
+                running_status="failed",
+                pending_status="skipped",
+                error="机器人重启时任务仍在执行",
+                now=timestamp,
             )
-            return max(int(cursor.rowcount), 0)
+            self.set_task_state(
+                task_id,
+                "failed",
+                error="机器人重启时任务仍在执行",
+                now=timestamp,
+            )
+        return len(task_ids)
 
     def _configure(self) -> None:
         with self._lock:
@@ -870,6 +919,8 @@ class SubAgentStore:
 
 ProgressCallback = Callable[[str], Awaitable[None]]
 ToolExecutor = Callable[[str, dict[str, object]], Awaitable[str]]
+WorkerOutcomeState = Literal["success", "partial", "failed", "skipped"]
+WorkerReportedState = Literal["success", "partial", "failed"]
 
 
 @dataclass(frozen=True)
@@ -878,11 +929,16 @@ class StepOutcome:
     run: RunRecord
     result: dict[str, Any]
     trace: DeepSeekTrace
+    state: WorkerOutcomeState = "success"
     error: str = ""
 
     @property
     def succeeded(self) -> bool:
-        return not self.error
+        return self.state == "success"
+
+    @property
+    def usable(self) -> bool:
+        return self.state in {"success", "partial"}
 
 
 class SubAgentCoordinator:
@@ -967,14 +1023,32 @@ class SubAgentCoordinator:
                     progress=progress,
                 )
         except asyncio.CancelledError:
+            self.store.settle_unfinished_runs(
+                task.task_id,
+                running_status="cancelled",
+                pending_status="skipped",
+                error="任务已取消",
+            )
             self.store.set_task_state(task.task_id, "cancelled", error="任务已取消")
             raise
         except TimeoutError:
             message = f"任务超过 {self.timeout_seconds} 秒，已停止。"
+            self.store.settle_unfinished_runs(
+                task.task_id,
+                running_status="failed",
+                pending_status="skipped",
+                error=message,
+            )
             self.store.set_task_state(task.task_id, "failed", error=message)
             return f"{task.handle} {message}"
         except Exception as exc:
             message = str(exc) or exc.__class__.__name__
+            self.store.settle_unfinished_runs(
+                task.task_id,
+                running_status="failed",
+                pending_status="skipped",
+                error=message,
+            )
             self.store.set_task_state(task.task_id, "failed", error=message)
             self.logger.warning("Sub-Agent task %s failed: %s", task.handle, message)
             return f"{task.handle} 执行失败：{message}"
@@ -993,10 +1067,10 @@ class SubAgentCoordinator:
         progress: ProgressCallback | None,
     ) -> str:
         self.store.set_task_state(task.task_id, "planning")
-        if progress is not None:
-            await progress(
-                f"{task.handle} · 主控 Agent：正在拆解目标、安排依赖和验收标准。"
-            )
+        await self._notify_progress(
+            progress,
+            f"{task.handle} · 主控 Agent：正在拆解目标、安排依赖和验收标准。",
+        )
         planner_trace = DeepSeekTrace(trace_id=task.trace_id)
         planner_profile = self._profile_for("supervisor", selected_profile)
         plan_payload = await ask_deepseek_json(
@@ -1023,9 +1097,11 @@ class SubAgentCoordinator:
                 allowed_tools=allowed,
                 model_profile=profile.name,
             )
-        if progress is not None:
-            labels = "、".join(AGENT_SPECS[step.role].title for step in steps)
-            await progress(f"{task.handle} 已拆成 {len(steps)} 步：{labels}。")
+        labels = "、".join(AGENT_SPECS[step.role].title for step in steps)
+        await self._notify_progress(
+            progress,
+            f"{task.handle} 已拆成 {len(steps)} 步：{labels}。",
+        )
 
         completed: dict[str, StepOutcome] = {}
         pending = {step.key: step for step in steps}
@@ -1045,20 +1121,38 @@ class SubAgentCoordinator:
         while pending:
             if self.store.cancellation_requested(task.task_id):
                 raise asyncio.CancelledError
-            ready = [
+            settled = [
                 step
                 for step in pending.values()
                 if all(dependency in completed for dependency in step.dependencies)
             ]
-            if not ready:
+            blocked = [
+                step
+                for step in settled
+                if any(not completed[dependency].usable for dependency in step.dependencies)
+            ]
+            for step in blocked:
+                outcome = self._skip_step(task, step, runs[step.key], completed)
+                completed[step.key] = outcome
+                pending.pop(step.key, None)
+                await self._notify_progress(
+                    progress,
+                    f"{task.handle} · {AGENT_SPECS[step.role].title} Agent："
+                    "因上游步骤失败，已跳过。",
+                )
+
+            ready = [step for step in settled if step not in blocked]
+            if not ready and not blocked:
                 raise RuntimeError("任务依赖图无法继续执行")
             ready = ready[: self.max_parallelism]
-            if progress is not None:
-                for step in ready:
-                    await progress(
-                        f"{task.handle} · {AGENT_SPECS[step.role].title} Agent："
-                        f"{step.objective[:120]}"
-                    )
+            for step in ready:
+                await self._notify_progress(
+                    progress,
+                    f"{task.handle} · {AGENT_SPECS[step.role].title} Agent："
+                    f"{step.objective[:120]}",
+                )
+            if not ready:
+                continue
             outcomes = await asyncio.gather(
                 *(
                     self._run_step(
@@ -1081,12 +1175,14 @@ class SubAgentCoordinator:
                 completed[outcome.step.key] = outcome
                 pending.pop(outcome.step.key, None)
                 _merge_trace(parent_trace, outcome.trace)
-            if progress is not None:
-                finished = "、".join(
-                    f"{AGENT_SPECS[item.step.role].title}{'完成' if item.succeeded else '失败'}"
-                    for item in outcomes
-                )
-                await progress(f"{task.handle} 进度：{finished}。")
+            finished = "、".join(
+                f"{AGENT_SPECS[item.step.role].title}{_outcome_progress_label(item)}"
+                for item in outcomes
+            )
+            await self._notify_progress(
+                progress,
+                f"{task.handle} 进度：{finished}。",
+            )
 
         delivery_results = await self._deliver_requested_artifacts(
             task,
@@ -1097,10 +1193,10 @@ class SubAgentCoordinator:
         )
 
         self.store.set_task_state(task.task_id, "verifying")
-        if progress is not None:
-            await progress(
-                f"{task.handle} · 主控 Agent：正在核对各 Agent 的结果并整理最终答复。"
-            )
+        await self._notify_progress(
+            progress,
+            f"{task.handle} · 主控 Agent：正在核对各 Agent 的结果并整理最终答复。",
+        )
         final_trace = DeepSeekTrace(trace_id=task.trace_id)
         final_profile = self._profile_for("supervisor", selected_profile)
         final_input = _synthesis_input(task.objective, completed)
@@ -1116,7 +1212,7 @@ class SubAgentCoordinator:
             trace=final_trace,
         )
         _merge_trace(parent_trace, final_trace)
-        failures = [item for item in completed.values() if not item.succeeded]
+        degraded = [item for item in completed.values() if not item.succeeded]
         delivery_failed = any(not bool(item.get("ok")) for item in delivery_results)
         result = {
             "answer": final_text,
@@ -1124,14 +1220,14 @@ class SubAgentCoordinator:
             "steps": {
                 key: {
                     "role": outcome.step.role,
-                    "status": "succeeded" if outcome.succeeded else "failed",
+                    "status": outcome.state,
                     "result": outcome.result,
                     "error": outcome.error,
                 }
                 for key, outcome in completed.items()
             },
         }
-        status = "partial" if failures or delivery_failed else "completed"
+        status = "partial" if degraded or delivery_failed else "completed"
         self.store.set_task_state(task.task_id, status, result=result)
         return f"{task.handle}\n{final_text}" if final_text else f"{task.handle} 已完成。"
 
@@ -1171,20 +1267,28 @@ class SubAgentCoordinator:
                         "filename": filename,
                     }
                 else:
-                    if progress is not None:
-                        await progress(
-                            f"{task.handle} · 主控 Agent：正在发送交付文件"
-                            f"{f' {filename}' if filename else ''}。"
-                        )
-                    raw_result = await execute_tool(
-                        "send_file_from_sandbox",
-                        {
-                            "sandbox_id": sandbox_id,
-                            "path": path,
-                            "filename": filename,
-                        },
+                    await self._notify_progress(
+                        progress,
+                        f"{task.handle} · 主控 Agent：正在发送交付文件"
+                        f"{f' {filename}' if filename else ''}。",
                     )
-                    payload = _tool_result_payload(raw_result)
+                    try:
+                        raw_result = await execute_tool(
+                            "send_file_from_sandbox",
+                            {
+                                "sandbox_id": sandbox_id,
+                                "path": path,
+                                "filename": filename,
+                            },
+                        )
+                        payload = _tool_result_payload(raw_result)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        payload = {
+                            "ok": False,
+                            "error": str(exc) or exc.__class__.__name__,
+                        }
                     payload.setdefault("handle", handle)
                     payload.setdefault("filename", filename)
                 raw_artifact["delivery"] = payload
@@ -1236,11 +1340,29 @@ class SubAgentCoordinator:
                 trace=trace,
             )
             result = _parse_worker_result(answer)
-            self.store.finish_run(run.run_id, "succeeded", result=result)
+            state = _worker_outcome_state(result)
+            error = _worker_failure_message(result) if state == "failed" else ""
+            self.store.finish_run(
+                run.run_id,
+                {
+                    "success": "succeeded",
+                    "partial": "partial",
+                    "failed": "failed",
+                }[state],
+                result=result,
+                error=error,
+            )
             artifacts = result.get("artifacts")
             if isinstance(artifacts, list):
                 self.store.add_artifacts(task.task_id, run.run_id, artifacts)
-            return StepOutcome(step=step, run=run, result=result, trace=trace)
+            return StepOutcome(
+                step=step,
+                run=run,
+                result=result,
+                trace=trace,
+                state=state,
+                error=error,
+            )
         except asyncio.CancelledError:
             self.store.finish_run(run.run_id, "cancelled", error="任务已取消")
             raise
@@ -1252,8 +1374,56 @@ class SubAgentCoordinator:
                 run=run,
                 result={"status": "failed", "summary": "", "warnings": [error]},
                 trace=trace,
+                state="failed",
                 error=error,
             )
+
+    def _skip_step(
+        self,
+        task: TaskRecord,
+        step: TaskStep,
+        run: RunRecord,
+        completed: Mapping[str, StepOutcome],
+    ) -> StepOutcome:
+        failed_dependencies = [
+            dependency
+            for dependency in step.dependencies
+            if dependency in completed and not completed[dependency].usable
+        ]
+        error = "上游步骤未成功：" + "、".join(failed_dependencies)
+        result = {
+            "status": "skipped",
+            "summary": "",
+            "facts": [],
+            "artifacts": [],
+            "citations": [],
+            "warnings": [error],
+            "unresolved": [step.objective],
+            "confidence": 0.0,
+        }
+        self.store.finish_run(run.run_id, "skipped", result=result, error=error)
+        return StepOutcome(
+            step=step,
+            run=run,
+            result=result,
+            trace=DeepSeekTrace(trace_id=task.trace_id),
+            state="skipped",
+            error=error,
+        )
+
+    async def _notify_progress(
+        self,
+        progress: ProgressCallback | None,
+        message: str,
+    ) -> None:
+        if progress is None:
+            return
+        try:
+            await progress(message)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.logger.warning("Sub-Agent progress update failed: %s", exc)
 
     def _profile_for(self, role: str, default: ModelProfile) -> ModelProfile:
         requested = str(self.profile_overrides.get(role) or "").strip()
@@ -1431,7 +1601,7 @@ def _parse_worker_result(answer: str) -> dict[str, Any]:
         payload = json.loads(content)
     except json.JSONDecodeError:
         return {
-            "status": "success",
+            "status": "partial",
             "summary": answer.strip(),
             "facts": [],
             "artifacts": [],
@@ -1442,7 +1612,71 @@ def _parse_worker_result(answer: str) -> dict[str, Any]:
         }
     if not isinstance(payload, dict):
         raise RuntimeError("Sub-Agent result must be a JSON object")
-    return payload
+    return _normalize_worker_result(payload)
+
+
+def _normalize_worker_result(payload: Mapping[str, Any]) -> dict[str, Any]:
+    result = dict(payload)
+    raw_status = str(payload.get("status") or "").strip().casefold()
+    if raw_status in {"failed", "failure", "error", "cancelled", "skipped"}:
+        status = "failed"
+    elif raw_status in {"partial", "degraded", "incomplete"}:
+        status = "partial"
+    elif raw_status in {"success", "succeeded", "completed", "ok"}:
+        status = "success"
+    else:
+        status = "partial" if _string_list(payload.get("unresolved")) else "success"
+
+    result["status"] = status
+    result["summary"] = str(payload.get("summary") or "").strip()
+    for key in ("facts", "citations", "warnings", "unresolved"):
+        result[key] = _string_list(payload.get(key))
+    artifacts = payload.get("artifacts")
+    result["artifacts"] = (
+        [dict(item) for item in artifacts if isinstance(item, Mapping)]
+        if isinstance(artifacts, list)
+        else []
+    )
+    try:
+        confidence = float(payload.get("confidence", 0.5))
+    except (TypeError, ValueError):
+        confidence = 0.5
+    result["confidence"] = min(max(confidence, 0.0), 1.0)
+    return result
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _worker_outcome_state(result: Mapping[str, Any]) -> WorkerReportedState:
+    status = str(result.get("status") or "success").strip().casefold()
+    if status == "partial":
+        return "partial"
+    if status in {"failed", "failure", "error", "cancelled", "skipped"}:
+        return "failed"
+    return "success"
+
+
+def _worker_failure_message(result: Mapping[str, Any]) -> str:
+    for key in ("summary", "unresolved", "warnings"):
+        value = result.get(key)
+        if isinstance(value, list) and value:
+            return str(value[0])[:4000]
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:4000]
+    return "Sub-Agent 报告执行失败"
+
+
+def _outcome_progress_label(outcome: StepOutcome) -> str:
+    return {
+        "success": "完成",
+        "partial": "部分完成",
+        "failed": "失败",
+        "skipped": "跳过",
+    }[outcome.state]
 
 
 def _sandbox_artifact_key(handle: str) -> tuple[str, str] | None:
@@ -1482,7 +1716,7 @@ def _synthesis_input(objective: str, completed: Mapping[str, StepOutcome]) -> st
             "role": outcome.step.role,
             "objective": outcome.step.objective,
             "deliverable": outcome.step.deliverable,
-            "status": "succeeded" if outcome.succeeded else "failed",
+            "status": outcome.state,
             "result": outcome.result,
             "error": outcome.error,
         }

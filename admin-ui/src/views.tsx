@@ -176,7 +176,8 @@ function stageState(stage: any[]): string {
   const states = stage.map((node) => String(node.status))
   if (states.some((state) => state === 'failed' || state === 'cancelled')) return 'failed'
   if (states.some((state) => state === 'running' || state === 'planning' || state === 'verifying')) return 'running'
-  if (states.every((state) => state === 'succeeded' || state === 'completed' || state === 'partial')) return 'succeeded'
+  if (states.some((state) => state === 'partial' || state === 'skipped')) return 'partial'
+  if (states.every((state) => state === 'succeeded' || state === 'completed')) return 'succeeded'
   return 'pending'
 }
 
@@ -189,12 +190,15 @@ function SubAgentFlow({ detail, loading, error, now, roles }: { detail: any; loa
   const roleTitles = new Map(roles.map((role) => [String(role.role), String(role.title)]))
   const runsByStep = new Map(runs.map((run) => [String(run.step_key), run]))
   const latestRunFinish = runs.reduce((latest, run) => Math.max(latest, Number(run.finished_at ?? 0)), 0)
-  const workerStages = planLayers(task?.plan?.steps).map((layer) => layer.map((step) => runsByStep.get(String(step.id)) ?? {
-    handle: String(step.id),
-    role: step.agent,
-    objective: step.objective,
-    dependencies: step.depends_on,
-    status: 'pending',
+  const workerStages = planLayers(task?.plan?.steps).map((layer) => layer.map((step) => {
+    const run = runsByStep.get(String(step.id))
+    return run ?? {
+      handle: String(step.id),
+      role: step.agent,
+      objective: step.objective,
+      dependencies: step.depends_on,
+      status: 'pending',
+    }
   }))
   const planningStatus = ['received', 'planning'].includes(String(task?.status)) ? 'running' : task?.plan?.steps ? 'succeeded' : 'failed'
   const deliveryStatus = task?.status === 'verifying'
