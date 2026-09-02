@@ -81,6 +81,28 @@ function planLayers(value: unknown): any[][] {
   return layers
 }
 
+const AGENT_ROLE_LABELS: Record<string, string> = {
+  supervisor: '主控',
+  researcher: '搜索',
+  coder: '代码',
+  document: '文件',
+  media: '媒体',
+  analyst: '分析',
+  operator: '运维',
+}
+
+function compactAgentLayer(layer: any[]): string {
+  const counts = new Map<string, number>()
+  layer.forEach((step) => {
+    const role = String(step.agent ?? step.role ?? step.id)
+    const label = AGENT_ROLE_LABELS[role] ?? role
+    counts.set(label, (counts.get(label) ?? 0) + 1)
+  })
+  return [...counts.entries()]
+    .map(([label, count]) => count > 1 ? `${label} ×${count}` : label)
+    .join(' + ')
+}
+
 function PlanFlow({ steps }: { steps: unknown }) {
   const layers = planLayers(steps)
   if (!layers.length) return <>-</>
@@ -90,12 +112,21 @@ function PlanFlow({ steps }: { steps: unknown }) {
         <span className="plan-layer-wrap" key={index}>
           {index > 0 && <b aria-hidden="true">→</b>}
           <span className={layer.length > 1 ? 'plan-layer parallel' : 'plan-layer'}>
-            {layer.map((step) => String(step.agent ?? step.role ?? step.id)).join(' + ')}
+            {compactAgentLayer(layer)}
           </span>
         </span>
       ))}
     </div>
   )
+}
+
+function compactScope(value: unknown): string {
+  const scope = String(value ?? '')
+  const group = scope.match(/(?:^|:)group:(\d+)/)
+  if (group) return `群 ${group[1]}`
+  const user = scope.match(/(?:^|:)private:(\d+)/)
+  if (user) return `私聊 ${user[1]}`
+  return scope.replace(/^onebot-v11:/, '') || '-'
 }
 
 function runDuration(run: any, now: number): number {
@@ -423,10 +454,12 @@ export function TasksView({ plane, onOpenDetail }: { plane: Plane; onOpenDetail:
     <>
       <PageHeader title="任务与投递" description="前台 Agent、持久任务和消息投递的统一操作面" action={<RefreshButton onClick={() => void plane.refreshMany(['tasks', 'subagents', 'jobs', 'deliveries'])} />} />
       <Section title="Sub-Agent 编排" description="使用 /task 任务内容，由主控拆分并派给固定专业 Agent">
-        <div className="model-strip">
-          {agentRoles.map((role) => <div className="model-item" key={role.role}><div><strong>{role.title}</strong><code>{role.role}</code><small>{role.description}</small></div><StatusBadge value="configured" label={`${rows(role.allowed_tools).length} 个工具`} /></div>)}
+        <div className="agent-role-strip">
+          {agentRoles.map((role) => <div className="agent-role-summary" key={role.role} title={`${role.description} · ${rows(role.allowed_tools).length} 个工具`}><div><strong>{role.title}</strong><code>{role.role}</code></div><span><b>{rows(role.allowed_tools).length}</b><small>工具</small></span></div>)}
         </div>
-        <DataTable><thead><tr><th>更新时间</th><th>任务</th><th>范围</th><th>目标</th><th>执行关系</th><th>状态</th><th></th></tr></thead><tbody>{subagentTasks.slice(0, 5).map((task) => <tr className={selectedTaskId === Number(task.task_id) ? 'selected-task-row' : ''} key={task.task_id}><td>{fmtTime(task.updated_at)}</td><td><code>{task.handle}</code><small className="cell-sub">{String(task.trace_id ?? '').slice(0, 12)}</small></td><td><code>{task.scope_key}</code></td><td>{task.objective}</td><td><PlanFlow steps={task.plan?.steps} /></td><td><StatusBadge value={task.status} /></td><td className="actions"><button className="icon-button" title="查看 Agent 执行拓扑" onClick={() => setSelectedTaskId(Number(task.task_id))}><GitBranch size={15} /></button>{['received', 'planning', 'running', 'verifying', 'cancelling'].includes(task.status) && <button className="icon-button danger" title="取消 Sub-Agent 任务" onClick={() => void plane.mutate('subagents', `/subagents/${task.task_id}/cancel`, 'POST', {}, ['subagents', 'tasks'])}><Square size={15} /></button>}</td></tr>)}</tbody></DataTable>
+        <div className="subagent-task-list">
+          {subagentTasks.slice(0, 5).map((task) => <article className={`subagent-task-row ${selectedTaskId === Number(task.task_id) ? 'selected' : ''}`} key={task.task_id}><div className="subagent-task-copy"><div className="subagent-task-heading"><code>{task.handle}</code><span>{compactScope(task.scope_key)}</span><time>{fmtTime(task.updated_at)}</time></div><p title={task.objective}>{task.objective}</p><PlanFlow steps={task.plan?.steps} /></div><div className="subagent-task-side"><StatusBadge value={task.status} /><div className="subagent-task-actions"><button className="icon-button" title="查看 Agent 执行拓扑" aria-label={`查看 ${task.handle} 执行拓扑`} onClick={() => setSelectedTaskId(Number(task.task_id))}><GitBranch size={15} /></button>{['received', 'planning', 'running', 'verifying', 'cancelling'].includes(task.status) && <button className="icon-button danger" title="取消 Sub-Agent 任务" aria-label={`取消 ${task.handle}`} onClick={() => void plane.mutate('subagents', `/subagents/${task.task_id}/cancel`, 'POST', {}, ['subagents', 'tasks'])}><Square size={15} /></button>}</div></div></article>)}
+        </div>
         {!subagentTasks.length && <EmptyState>还没有 Sub-Agent 任务</EmptyState>}
         <SubAgentFlow detail={subagentDetail} loading={subagentDetailLoading} error={subagentDetailError} now={clock} roles={agentRoles} />
       </Section>
