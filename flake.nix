@@ -65,6 +65,7 @@
           ./migrations)
         (lib.fileset.fileFilter (file: file.hasExt "py") ./tests)
         (lib.fileset.fileFilter (file: file.hasExt "js") ./tools)
+        ./tools/qwen_control.py
         (lib.fileset.fileFilter (
             file:
               file.hasExt "py"
@@ -206,6 +207,7 @@
     nixosModules = {
       default = import ./nix/module.nix {inherit self;};
       qq-deepseek-bot = self.nixosModules.default;
+      qwen-control = import ./nix/qwen-control.nix;
     };
   };
 }

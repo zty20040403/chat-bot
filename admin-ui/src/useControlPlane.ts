@@ -23,6 +23,7 @@ const INITIAL_RESOURCES: ResourceName[] = [
   'sources',
   'databases',
   'groups',
+  'localModel',
   'tools',
   'traces',
   'contextPlans',
@@ -161,7 +162,7 @@ export function useControlPlane(runtime: KennethbotAdminRuntime) {
   useEffect(() => {
     if (!authenticated) return
     const timer = window.setInterval(() => {
-      void refreshMany(['overview', 'observability', 'alerts', 'databases', 'usage', 'subagents', 'contextDebug'])
+      void refreshMany(['overview', 'observability', 'alerts', 'databases', 'usage', 'subagents', 'contextDebug', 'localModel'])
     }, 30000)
     return () => window.clearInterval(timer)
   }, [authenticated, refreshMany])

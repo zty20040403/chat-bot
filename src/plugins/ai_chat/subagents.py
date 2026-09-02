@@ -2782,6 +2782,7 @@ def _merge_trace(parent: DeepSeekTrace | None, child: DeepSeekTrace) -> None:
     parent.output_tokens += child.output_tokens
     parent.total_tokens += child.total_tokens
     parent.model_routes.extend(child.model_routes)
+    parent.model_routing.extend(child.model_routing)
     parent.messages.extend(child.messages)
 
 

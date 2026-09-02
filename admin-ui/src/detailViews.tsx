@@ -23,6 +23,7 @@ import {
   fmtTime,
 } from './components'
 import type { ResourceName } from './api'
+import { ModelRouteSummary } from './LocalModelPanel'
 import type { useControlPlane } from './useControlPlane'
 
 type Plane = ReturnType<typeof useControlPlane>
@@ -206,7 +207,7 @@ function detailColumns(detail: DetailViewId, plane: Plane): DetailColumn[] {
     { label: '开始时间', render: (item) => fmtTime(item.started_at) },
     { label: 'Trace ID', render: (item) => <code>{item.trace_id || '-'}</code> },
     { label: '回合', render: (item) => item.turn_handle },
-    { label: '模型', render: (item) => <>{item.profile}<small className="cell-sub">{item.model}</small></> },
+    { label: '模型路由', render: (item) => <ModelRouteSummary trace={item} detailed /> },
     { label: '状态', render: (item) => <StatusBadge value={item.status} /> },
     { label: '耗时', render: (item) => fmtDuration(item.duration_seconds) },
     { label: '工具', render: (item) => `${item.tool_call_count} / ${item.tool_failures} 失败` },

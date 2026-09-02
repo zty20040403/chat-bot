@@ -8,13 +8,14 @@ import threading
 import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import asdict, dataclass
-from typing import Any, Optional
+from typing import Any, Literal, Optional
+from uuid import UUID
 
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 from fastapi.routing import APIRoute
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from .admin_control import (
     AdminControlStore,
@@ -25,6 +26,7 @@ from .admin_control import (
 from .admin_dashboard import ADMIN_FAVICON_SVG, admin_asset_path, dashboard_html
 from .conversation_scope import ConversationScope
 from .model_catalog import SUPPORTED_REASONING_EFFORTS
+from .local_model import LocalModelControlError
 from .tool_policy import (
     TOOL_POLICIES,
     admin_tool_manifest,
@@ -51,6 +53,7 @@ class AdminServices:
     background_tasks: Any = None
     model_catalog: Any = None
     llm_gateway: Any = None
+    local_model: Any = None
     model_preferences: Any = None
     reasoning_preferences: Any = None
     user_profiles: Any = None
@@ -76,6 +79,12 @@ class AdminMutationContext:
 
 class ModelSelectionRequest(BaseModel):
     profile: str | None = None
+
+
+class LocalModelControlRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    action: Literal["start", "stop"]
+    request_id: UUID
 
 
 class ReasoningEffortRequest(BaseModel):
@@ -304,7 +313,7 @@ class AdminRealtimeMonitor:
                     )
                     first = False
                 if now >= next_process:
-                    changed.update(("overview", "observability", "sandboxes"))
+                    changed.update(("overview", "observability", "sandboxes", "local-model"))
                     next_process = now + 2.0
                 if now >= next_external:
                     changed.update(("alerts", "databases", "stickers"))
@@ -493,6 +502,54 @@ def register_admin(
             "persistent": control_store.persistent,
             "versions": control_store.versions(),
         }
+
+    @router.get("/api/local-model")
+    def local_model_status(authorization: Optional[str] = Header(default=None)) -> dict[str, object]:
+        authorize(authorization)
+        runtime = services.local_model
+        if runtime is None:
+            return versioned("local-model", {"configured": False, "can_control": False})
+        snapshot = runtime.snapshot()
+        health = services.llm_gateway.health_snapshot().get(runtime.profile.name, {}) if services.llm_gateway else {}
+        selected = getattr(services.settings, "model_simple_chat_profile", "") == runtime.profile.name
+        can_control = bool(expected_token and snapshot["control_configured"])
+        return versioned("local-model", {
+            **snapshot, "configured": True, "can_control": can_control,
+            "control_reason": "" if can_control else "启停需要同时配置管理台 Token 和 WSL 管理接口凭据",
+            "simple_chat_selected": selected,
+            "serving_simple_chat": bool(selected and snapshot["ready"] and health.get("status") != "open"),
+            "circuit_state": health.get("status", "unknown"),
+            "request_count": health.get("request_count", 0),
+            "average_latency_ms": health.get("average_latency_ms"),
+            "metrics_since": services.started_at,
+        })
+
+    @router.post("/api/local-model/control")
+    async def local_model_control(
+        body: LocalModelControlRequest,
+        authorization: Optional[str] = Header(default=None),
+        context: AdminMutationContext = Depends(mutation_context),
+    ) -> dict[str, object]:
+        authorize(authorization)
+        if not expected_token:
+            raise HTTPException(status_code=403, detail="启停千问必须先设置 AI_ADMIN_TOKEN")
+        if context.expected_version is None:
+            raise HTTPException(status_code=428, detail="启停操作必须携带 If-Match 资源版本")
+        runtime = services.local_model
+        if runtime is None or not runtime.control_configured:
+            raise HTTPException(status_code=503, detail="尚未配置 WSL 千问管理接口")
+        try:
+            result = await asyncio.to_thread(
+                mutate, context, "local-model",
+                action="local_model." + body.action, target=runtime.profile.name,
+                before={"state": runtime.snapshot()["state"]},
+                operation=lambda _version: runtime.control(body.action, str(body.request_id)),
+            )
+        except LocalModelControlError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from None
+        finally:
+            event_broker.publish("local-model", "overview", "audit")
+        return mutation_payload(result, **result.value)
 
     @router.get("/api/overview", dependencies=[])
     def overview(

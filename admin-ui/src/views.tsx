@@ -16,6 +16,7 @@ import {
   X,
 } from 'lucide-react'
 import { TokenUsageChart } from './TokenUsageChart'
+import { LocalModelPanel, ModelRouteSummary } from './LocalModelPanel'
 import {
   DataTable,
   DraftSelect,
@@ -376,9 +377,14 @@ export function GroupsView({ plane }: { plane: Plane }) {
   return (
     <>
       <PageHeader title="模型、群与用户" description="统一调配群友模型，同时保留管理员个人配置" action={<RefreshButton loading={plane.loading.has('groups')} onClick={() => void plane.refresh('groups')} />} />
+      <LocalModelPanel plane={plane} />
       <Section title="可用模型" description="密钥只在服务端使用，控制台不会返回凭据">
         <div className="model-strip">
-          {profiles.map((profile) => <div className="model-item" key={profile.name}><div><strong>{profile.name}</strong><code>{profile.model}</code><small>{profile.supports_reasoning_effort ? `推理档位 · ${profile.reasoning_effort || '服务端默认'}` : '不支持推理档位'}</small></div><StatusBadge value={profile.configured ? 'configured' : 'unconfigured'} label={profile.configured ? '可用' : '未配置'} /></div>)}
+          {profiles.map((profile) => {
+            const local = plane.data.localModel?.profile === profile.name ? plane.data.localModel : null
+            const unavailable = local && (!local.ready || local.circuit_state === 'open')
+            return <div className="model-item" key={profile.name}><div><strong>{profile.name}</strong><code>{profile.model}</code><small>{profile.supports_reasoning_effort ? `推理档位 · ${profile.reasoning_effort || '服务端默认'}` : '不支持推理档位'}</small></div><StatusBadge value={!profile.configured ? 'unconfigured' : unavailable ? 'warning' : 'configured'} label={!profile.configured ? '未配置' : unavailable ? '暂不可用' : '可用'} /></div>
+          })}
         </div>
       </Section>
       <div className="group-list">
@@ -511,7 +517,7 @@ export function TracesView({ plane, onOpenDetail }: { plane: Plane; onOpenDetail
     <>
       <PageHeader title="Trace 与上下文" description="每个回合的模型路由、工具调用、Token 和上下文决策" action={<RefreshButton onClick={() => void plane.refreshMany(['traces', 'contextPlans', 'observability'])} />} />
       <Section title="最近 Trace" description="Trace ID 可以关联模型、工具和投递日志" action={<ViewAllButton count={traces.length} onClick={() => onOpenDetail('traces')} />}>
-        <DataTable><thead><tr><th>开始时间</th><th>Trace ID</th><th>回合</th><th>模型</th><th>状态</th><th>耗时</th><th>工具</th><th>Token</th></tr></thead><tbody>{traces.slice(0, 5).map((trace) => <tr key={trace.trace_id}><td>{fmtTime(trace.started_at)}</td><td><code>{String(trace.trace_id).slice(0, 12)}</code></td><td>{trace.turn_handle}</td><td>{trace.profile}<small className="cell-sub">{trace.model}</small></td><td><StatusBadge value={trace.status} /></td><td>{fmtDuration(trace.duration_seconds)}</td><td>{trace.tool_call_count} / {trace.tool_failures} 失败</td><td>{fmtNumber(trace.total_tokens)}</td></tr>)}</tbody></DataTable>
+        <DataTable><thead><tr><th>开始时间</th><th>Trace ID</th><th>回合</th><th>模型</th><th>状态</th><th>耗时</th><th>工具</th><th>Token</th></tr></thead><tbody>{traces.slice(0, 5).map((trace) => <tr key={trace.trace_id}><td>{fmtTime(trace.started_at)}</td><td><code>{String(trace.trace_id).slice(0, 12)}</code></td><td>{trace.turn_handle}</td><td><ModelRouteSummary trace={trace} /></td><td><StatusBadge value={trace.status} /></td><td>{fmtDuration(trace.duration_seconds)}</td><td>{trace.tool_call_count} / {trace.tool_failures} 失败</td><td>{fmtNumber(trace.total_tokens)}</td></tr>)}</tbody></DataTable>
       </Section>
       <Section title="上下文决策" description="焦点消息、相关候选和 Reranker 置信度" action={<ViewAllButton count={plans.length} onClick={() => onOpenDetail('context-plans')} />}>
         <DataTable><thead><tr><th>决策时间</th><th>回合</th><th>范围</th><th>焦点</th><th>置信度</th><th>理由</th><th>状态</th></tr></thead><tbody>{plans.slice(0, 5).map((plan) => <tr key={`${plan.scope_key}-${plan.turn_handle}`}><td>{fmtTime(plan.created_at)}</td><td>{plan.turn_handle}</td><td><code>{plan.scope_key}</code></td><td>{plan.focus_message_id ? `msg#${plan.focus_message_id}` : '-'}</td><td>{Math.round(Number(plan.confidence ?? 0) * 100)}%</td><td className="capabilities">{rows(plan.reason_codes).map((reason) => <span key={reason}>{reason}</span>)}</td><td><StatusBadge value={plan.status} /></td></tr>)}</tbody></DataTable>

@@ -481,6 +481,9 @@ class TurnJournal:
                 now,
             )
             routes = _safe_model_routes(payload.get("model_routes"))
+            routing = _safe_model_routing(payload.get("model_routing"))
+            requested = routing[0] if routing else {}
+            actual = routing[-1] if routing else {}
             started_at = int(row["started_at"])
             finished_at = (
                 int(row["finished_at"])
@@ -510,7 +513,13 @@ class TurnJournal:
                     "output_tokens": int(row["output_tokens"]),
                     "total_tokens": int(row["total_tokens"]),
                     "model_routes": routes,
-                    "fallback": len(routes) > 1,
+                    "model_routing": routing,
+                    "requested_profile": requested.get("requested_profile", routes[0]["profile"] if routes else str(row["profile"])),
+                    "requested_model": requested.get("requested_model", routes[0]["model"] if routes else str(row["model"])),
+                    "actual_profile": actual.get("actual_profile", routes[-1]["profile"] if routes else str(row["profile"])),
+                    "actual_model": actual.get("actual_model", routes[-1]["model"] if routes else str(row["model"])),
+                    "routing_reason": next((item["reason"] for item in routing if item["fallback"] or not item["actual_profile"]), ""),
+                    "fallback": any(item["fallback"] for item in routing) if routing else len(routes) > 1,
                 }
             )
         return summaries
@@ -2006,6 +2015,26 @@ def _decode_trace_archive(
 def _safe_trace_id(value: Any) -> str:
     normalized = str(value or "").strip().lower()
     return normalized if re.fullmatch(r"[0-9a-f]{32}", normalized) else ""
+
+
+def _safe_model_routing(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    result = []
+    for raw in value:
+        if not isinstance(raw, dict):
+            continue
+        decision = {key: _safe_text(str(raw.get(key) or ""), 200) for key in (
+            "requested_profile", "requested_model", "actual_profile", "actual_model", "reason_code", "reason",
+        )}
+        decision["fallback"] = raw.get("fallback") is True
+        outcomes = raw.get("outcomes")
+        decision["outcomes"] = [
+            {key: _safe_text(str(item.get(key) or ""), 200) for key in ("profile", "status", "reason_code", "reason")}
+            for item in outcomes[:32] if isinstance(item, dict)
+        ] if isinstance(outcomes, list) else []
+        result.append(decision)
+    return result
 
 
 def _safe_model_routes(value: Any) -> list[dict[str, str]]:

@@ -38,6 +38,7 @@ from .ledger import MessageLedger
 from .lifecycle import BackgroundTaskSupervisor
 from .long_term_memory import LongTermMemoryStore, MemoryEntry
 from .llm_gateway import LLMGateway
+from .local_model import LocalModelRuntime
 from .memory import ConversationMemory, GroupContextMemory
 from .media_library import MediaLibrary
 from src.bot_storage.media_cleanup import LegacyMediaCleanup
@@ -112,6 +113,7 @@ class AppContext:
     recent_videos: RecentVideoStore
     sandbox_manager: DockerSandboxManager
     bridge_router: MirrorRouter
+    local_model: LocalModelRuntime | None = field(default=None, repr=False)
     message_ledger: MessageLedger | None = None
     context_store: ContextStore | None = None
     topic_graph_store: TopicGraphStore | None = None
@@ -157,6 +159,7 @@ class AppContext:
 
         for name, resource in (
             ("LLM gateway", self.llm_gateway),
+            ("local model health", self.local_model),
             ("bridge manager", self.bridge_manager),
             ("browser manager", self.browser_manager),
             ("rich renderer", self.rich_renderer),
@@ -297,7 +300,16 @@ def build_app_context(
         )
     if settings.dream_enabled and settings.dream_profile:
         model_catalog.resolve(settings.dream_profile)
+    local_profile = next((item for item in model_catalog.profiles if item.name == settings.local_model_profile), None)
+    local_model = LocalModelRuntime(
+        local_profile,
+        interval_seconds=settings.local_model_probe_interval_seconds,
+        timeout_seconds=settings.local_model_probe_timeout_seconds,
+        control_url=settings.qwen_control_url,
+        control_token=settings.qwen_control_token,
+    ) if local_profile is not None else None
     llm_gateway = LLMGateway(
+        local_model=local_model,
         catalog=model_catalog,
         fallback_enabled=settings.model_fallback_enabled,
         failure_threshold=settings.model_circuit_failure_threshold,
@@ -812,6 +824,7 @@ def build_app_context(
         reasoning_preferences=reasoning_preferences,
         model_catalog=model_catalog,
         llm_gateway=llm_gateway,
+        local_model=local_model,
         self_source=SelfSource(project_root),
         skill_registry=SkillRegistry(project_root / "skills"),
         recent_images=RecentImageStore(settings.ocr_recent_image_seconds),

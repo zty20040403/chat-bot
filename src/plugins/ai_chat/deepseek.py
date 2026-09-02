@@ -68,6 +68,7 @@ class DeepSeekTrace:
     output_tokens: int = 0
     total_tokens: int = 0
     model_routes: list[dict[str, str]] = field(default_factory=list)
+    model_routing: list[dict[str, Any]] = field(default_factory=list)
     trace_id: str = field(default_factory=current_trace_id)
     created_at: int = field(default_factory=lambda: int(time.time()))
 
@@ -98,6 +99,7 @@ class DeepSeekTrace:
                 "total_tokens": self.total_tokens,
             },
             "model_routes": self.model_routes,
+            "model_routing": self.model_routing,
             "messages": self.messages,
         }
 
@@ -274,12 +276,13 @@ def _extra_body(profile: ModelProfile) -> dict[str, object] | None:
     return None
 
 
-async def _create_completion(**kwargs: Any) -> Any:
+async def _create_completion(_trace: DeepSeekTrace | None = None, **kwargs: Any) -> Any:
     profile = _active_profile.get() or _resolve_profile()
     _catalog, gateway = _runtime()
     resilient = getattr(gateway, "create_completion_with_profile", None)
     if callable(resilient):
-        result = await resilient(profile, **kwargs)
+        options = {"route_sink": _trace.model_routing.append} if _trace is not None else {}
+        result = await resilient(profile, **kwargs, **options)
         _last_completion_profile.set(result.profile)
         return result.response
     response = await gateway.create_completion(profile, **kwargs)
@@ -289,11 +292,13 @@ async def _create_completion(**kwargs: Any) -> Any:
 
 async def _invoke_completion(
     profile: ModelProfile,
+    *,
+    trace: DeepSeekTrace | None = None,
     **kwargs: Any,
 ) -> Any:
     token = _active_profile.set(profile)
     try:
-        return await _create_completion(**kwargs)
+        return await _create_completion(_trace=trace, **kwargs)
     finally:
         _active_profile.reset(token)
 
@@ -410,6 +415,7 @@ async def ask_deepseek(
     response, emitted = await _completion_with_optional_stream(
         final_text_sink,
         selected_profile,
+        trace=trace,
         **_completion_kwargs(messages, selected_profile),
     )
     if trace is not None:
@@ -448,6 +454,7 @@ async def ask_deepseek_json(
         request["response_format"] = {"type": "json_object"}
     response = await _invoke_completion(
         selected_profile,
+        trace=trace,
         **request,
     )
     if trace is not None:
@@ -541,6 +548,7 @@ async def ask_deepseek_with_tools(
         response, emitted = await _completion_with_optional_stream(
             final_text_sink,
             selected_profile,
+            trace=trace,
             **_completion_kwargs(messages, selected_profile),
             tools=tools,
             tool_choice=next_tool_choice,
@@ -894,6 +902,7 @@ async def ask_deepseek_with_tools(
     response, emitted = await _completion_with_optional_stream(
         final_text_sink,
         selected_profile,
+        trace=trace,
         **_completion_kwargs(messages, selected_profile),
     )
     if trace is not None:

@@ -139,6 +139,23 @@ class TurnJournalTests(unittest.TestCase):
         self.assertNotIn("objective", summaries[0])
         self.assertNotIn("final_text", summaries[0])
 
+    def test_routing_decisions_survive_archive_and_distinguish_requested_actual(self) -> None:
+        turn = self.start(self.group_a, "hello")
+        trace = DeepSeekTrace(model_routing=[{
+            "requested_profile": "qwen-local", "requested_model": "qwen3.8-27b",
+            "actual_profile": "deepseek", "actual_model": "deepseek-test",
+            "reason_code": "service_stopped", "reason": "Qwen 服务未启动",
+            "fallback": True,
+            "outcomes": [{"profile": "qwen-local", "status": "skipped", "reason_code": "service_stopped", "reason": "Qwen 服务未启动", "unexpected": "not public"}],
+        }])
+        self.journal.finish_turn(turn.turn_id, status="succeeded", trace_payload=trace.to_payload())
+        summary = self.journal.recent_trace_summaries()[0]
+        self.assertEqual(summary["requested_profile"], "qwen-local")
+        self.assertEqual(summary["actual_profile"], "deepseek")
+        self.assertEqual(summary["routing_reason"], "Qwen 服务未启动")
+        self.assertTrue(summary["fallback"])
+        self.assertNotIn("unexpected", summary["model_routing"][0]["outcomes"][0])
+
     def test_context_plan_is_scoped_and_visible_to_admin(self) -> None:
         turn = self.start(self.group_a, "你觉得呢")
         self.journal.record_context_plan(

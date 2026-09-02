@@ -5,15 +5,16 @@ import json
 import logging
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from types import SimpleNamespace
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 import httpx
 from openai import APIConnectionError, APIStatusError, AsyncOpenAI, RateLimitError
 
 from .model_catalog import ModelCatalog, ModelProfile
+from .local_model import LocalModelRuntime
 from .observability import telemetry
 
 
@@ -68,6 +69,7 @@ class CompletionResult:
     response: Any
     profile: ModelProfile
     fallback_count: int = 0
+    routing: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -90,6 +92,8 @@ class ModelCircuit:
     last_error: str = ""
     last_failure_at: int = 0
     last_success_at: int = 0
+    request_count: int = 0
+    request_seconds: float = 0.0
 
 
 class ModelHealthRegistry:
@@ -132,6 +136,18 @@ class ModelHealthRegistry:
         circuit.last_success_at = int(time.time())
         circuit.total_successes += 1
         circuit.fallback_uses += int(used_as_fallback)
+
+    def record_latency(self, profile_name: str, seconds: float) -> None:
+        circuit = self._circuits.setdefault(profile_name, ModelCircuit())
+        circuit.request_count += 1
+        circuit.request_seconds += max(seconds, 0.0)
+
+    def readiness_recovered(self, profile_name: str) -> None:
+        circuit = self._circuits.get(profile_name)
+        if circuit is not None and circuit.last_error_kind in {"network", "model_unavailable"}:
+            circuit.opened_until = 0
+            circuit.consecutive_failures = 0
+            circuit.probe_in_flight = False
 
     def record_failure(
         self,
@@ -192,6 +208,8 @@ class ModelHealthRegistry:
                 "last_error": circuit.last_error,
                 "last_failure_at": circuit.last_failure_at,
                 "last_success_at": circuit.last_success_at,
+                "request_count": circuit.request_count,
+                "average_latency_ms": round(circuit.request_seconds * 1000 / circuit.request_count, 1) if circuit.request_count else None,
             }
         return result
 
@@ -364,6 +382,7 @@ class LLMGateway:
         failure_threshold: int = 2,
         cooldown_seconds: float = 120.0,
         long_cooldown_seconds: float = 3600.0,
+        local_model: LocalModelRuntime | None = None,
     ) -> None:
         self._providers: dict[str, CompletionProvider] = (
             {
@@ -374,6 +393,8 @@ class LLMGateway:
             else dict(providers)
         )
         self._catalog = catalog
+        self.local_model = local_model
+        self._ready_generation = 0
         self._fallback_enabled = bool(fallback_enabled)
         self.health = ModelHealthRegistry(
             failure_threshold=failure_threshold,
@@ -393,13 +414,45 @@ class LLMGateway:
     async def create_completion_with_profile(
         self,
         profile: ModelProfile,
+        *,
+        route_sink: Callable[[dict[str, Any]], None] | None = None,
         **kwargs: Any,
     ) -> CompletionResult:
         candidates = self._completion_candidates(profile, kwargs)
         attempted = 0
         last_error: BaseException | None = None
+        outcomes: list[dict[str, Any]] = []
+
+        def finish_route(actual: ModelProfile | None) -> dict[str, Any]:
+            first = outcomes[0] if outcomes else {}
+            routing = {
+                "requested_profile": profile.name, "requested_model": profile.model,
+                "actual_profile": actual.name if actual else "",
+                "actual_model": actual.model if actual else "",
+                "reason_code": first.get("reason_code", "direct"),
+                "reason": first.get("reason", "直接使用首选模型"),
+                "fallback": actual is not None and actual.name != profile.name,
+                "outcomes": list(outcomes), "created_at": int(time.time()),
+            }
+            if route_sink is not None:
+                route_sink(routing)
+            return routing
+
         for candidate in candidates:
+            if self.local_model is not None:
+                unavailable = self.local_model.unavailable_reason(candidate.name)
+                if unavailable is not None:
+                    code, reason = unavailable
+                    outcomes.append({"profile": candidate.name, "status": "skipped", "reason_code": code, "reason": reason})
+                    telemetry.observe_model(requested_profile=profile.name, actual_profile=candidate.name, provider=candidate.provider_identity, status="health_skipped", duration=0)
+                    continue
+                if candidate.name == self.local_model.profile.name:
+                    generation = self.local_model.snapshot()["ready_generation"]
+                    if generation != self._ready_generation:
+                        self.health.readiness_recovered(candidate.name)
+                        self._ready_generation = generation
             if not self.health.acquire(candidate.name):
+                outcomes.append({"profile": candidate.name, "status": "skipped", "reason_code": "circuit_open", "reason": "模型熔断冷却中"})
                 telemetry.observe_model(
                     requested_profile=profile.name,
                     actual_profile=candidate.name,
@@ -416,6 +469,7 @@ class LLMGateway:
                     response = await self._create_single(candidate, **request)
             except (LLMError, asyncio.TimeoutError, httpx.TimeoutException) as exc:
                 failure = classify_llm_failure(exc)
+                outcomes.append({"profile": candidate.name, "status": "failed", "reason_code": failure.kind.value, "reason": "模型请求失败：" + failure.kind.value})
                 telemetry.observe_model(
                     requested_profile=profile.name,
                     actual_profile=candidate.name,
@@ -432,9 +486,12 @@ class LLMGateway:
                     failure.retryable and self._fallback_enabled,
                 )
                 if not failure.retryable or not self._fallback_enabled:
+                    finish_route(None)
                     raise
                 continue
             except BaseException:
+                outcomes.append({"profile": candidate.name, "status": "failed", "reason_code": "interrupted", "reason": "模型请求被中断"})
+                finish_route(None)
                 telemetry.observe_model(
                     requested_profile=profile.name,
                     actual_profile=candidate.name,
@@ -443,6 +500,9 @@ class LLMGateway:
                     duration=time.monotonic() - request_started,
                 )
                 raise
+            finally:
+                self.health.record_latency(candidate.name, time.monotonic() - request_started)
+            outcomes.append({"profile": candidate.name, "status": "succeeded", "reason_code": "direct", "reason": "直接使用首选模型"})
             telemetry.observe_model(
                 requested_profile=profile.name,
                 actual_profile=candidate.name,
@@ -466,7 +526,9 @@ class LLMGateway:
                 fallback_count=max(attempted - 1, 1)
                 if candidate.name != profile.name
                 else 0,
+                routing=finish_route(candidate),
             )
+        finish_route(None)
         if last_error is not None:
             raise last_error
         raise LLMUnavailableError(
@@ -499,7 +561,10 @@ class LLMGateway:
             if self._catalog is not None
             else list(self.health._circuits)
         )
-        return self.health.snapshot(names)
+        snapshot = self.health.snapshot(names)
+        if self.local_model is not None:
+            snapshot.setdefault(self.local_model.profile.name, {})["readiness"] = self.local_model.snapshot()
+        return snapshot
 
     def _completion_candidates(
         self,

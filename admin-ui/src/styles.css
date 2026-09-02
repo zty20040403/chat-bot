@@ -116,6 +116,25 @@ td strong { font-weight: 650; }
 .icon-button:hover { border-color: var(--border-strong); color: var(--foreground); }
 .icon-button.danger:hover { color: var(--red); border-color: #fecaca; background: #fff7f7; }
 .icon-button.success:hover { color: var(--accent); border-color: #bbf7d0; background: #f5fff8; }
+.local-model-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.local-model-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 0; }
+.local-model-head > div { min-width: 0; display: grid; gap: 4px; overflow-wrap: anywhere; }
+.local-model-head code { color: var(--muted); font-size: 12px; }
+.local-model-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 150px), 1fr)); margin: 0; border-block: 1px solid var(--border); }
+.local-model-metrics > div { min-width: 0; padding: 16px 12px 16px 0; overflow-wrap: anywhere; }
+.local-model-metrics dt { color: var(--muted); font-size: 11px; margin-bottom: 8px; }
+.local-model-metrics dd { margin: 0; font-size: 14px; font-weight: 600; }
+.local-model-metrics dd span { display: block; }
+.local-model-meta { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding: 12px 0; color: var(--muted); font-size: 11px; }
+.local-model-confirm { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 10px 0; color: #92400e; }
+.local-model-confirm span { flex: 1 1 200px; overflow-wrap: anywhere; }
+.local-model-notice { font-size: 12px; overflow-wrap: anywhere; }
+.model-route-summary { min-width: 130px; max-width: 360px; display: grid; gap: 4px; overflow-wrap: anywhere; white-space: normal; }
+.model-route-reason { color: #92400e; }
+.model-route-summary summary { cursor: pointer; color: var(--muted); }
+.model-route-summary ol { margin: 8px 0; padding-left: 18px; }
+.model-route-summary li { padding-block: 4px; }
+.model-route-summary small { display: block; }
 .spin { animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .empty-state { min-height: 80px; display: grid; place-items: center; border: 1px dashed var(--border-strong); color: var(--muted); font-size: 12px; background: rgba(255,255,255,.45); }

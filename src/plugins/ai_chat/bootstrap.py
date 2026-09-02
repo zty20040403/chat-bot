@@ -75,6 +75,7 @@ def register_http_surfaces(
                 background_tasks=context.background_tasks,
                 model_catalog=context.model_catalog,
                 llm_gateway=context.llm_gateway,
+                local_model=context.local_model,
                 model_preferences=context.model_preferences,
                 reasoning_preferences=context.reasoning_preferences,
                 user_profiles=context.user_profiles,

@@ -93,6 +93,11 @@ class Settings:
     deepseek_thinking: str
     model_default_profile: str
     model_simple_chat_profile: str
+    local_model_profile: str
+    local_model_probe_interval_seconds: int
+    local_model_probe_timeout_seconds: int
+    qwen_control_url: str
+    qwen_control_token: str
     model_profiles_json: str
     model_fallback_enabled: bool
     model_circuit_failure_threshold: int
@@ -315,6 +320,11 @@ class Settings:
                 "",
             ).strip(),
             model_profiles_json=os.getenv("AI_MODEL_PROFILES_JSON", "").strip(),
+            local_model_profile=os.getenv("AI_LOCAL_MODEL_PROFILE", "qwen-local").strip(),
+            local_model_probe_interval_seconds=max(_get_int("AI_LOCAL_MODEL_PROBE_INTERVAL_SECONDS", 15), 1),
+            local_model_probe_timeout_seconds=min(max(_get_int("AI_LOCAL_MODEL_PROBE_TIMEOUT_SECONDS", 2), 1), 10),
+            qwen_control_url=os.getenv("AI_QWEN_CONTROL_URL", "").strip(),
+            qwen_control_token=os.getenv("AI_QWEN_CONTROL_TOKEN", "").strip(),
             model_fallback_enabled=_get_bool("AI_MODEL_FALLBACK_ENABLED", True),
             model_circuit_failure_threshold=min(
                 max(_get_int("AI_MODEL_CIRCUIT_FAILURE_THRESHOLD", 2), 1),

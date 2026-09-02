@@ -432,6 +432,8 @@ onebot_ingest_adapter = OneBotIngestAdapter(
 
 @driver.on_startup
 async def start_background_tasks() -> None:
+    if app_context.local_model is not None:
+        background_tasks.start("local-model-health", app_context.local_model.run_forever)
     if (
         settings.alert_notify_enabled
         and settings.alertmanager_url
