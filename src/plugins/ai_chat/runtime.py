@@ -273,6 +273,14 @@ def build_app_context(
         namespace="reasoning_preferences",
     )
     model_catalog = ModelCatalog.from_settings(settings)
+    if settings.model_simple_chat_profile:
+        try:
+            model_catalog.resolve(settings.model_simple_chat_profile)
+        except ValueError as exc:
+            raise RuntimeError(
+                "AI_SIMPLE_CHAT_PROFILE maps to unknown model profile "
+                f"{settings.model_simple_chat_profile!r}"
+            ) from exc
     for group_id, profile_name in settings.group_model_profiles.items():
         try:
             model_catalog.resolve(profile_name)
@@ -777,7 +785,7 @@ def build_app_context(
             )
             if subagent_store.recovered_tasks:
                 logger.warning(
-                    "Marked %s interrupted Sub-Agent task(s) as failed.",
+                    "Preserved %s interrupted Sub-Agent task(s) for checkpoint resume.",
                     subagent_store.recovered_tasks,
                 )
         except (OSError, RuntimeError, ValueError, sqlite3.Error, DatabaseError) as exc:

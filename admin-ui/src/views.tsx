@@ -153,8 +153,14 @@ function peakParallelism(runs: any[], now: number): number {
 function AgentFlowNode({ node, now, roleTitles }: { node: any; now: number; roleTitles: Map<string, string> }) {
   const duration = runDuration(node, now)
   const dependencies = rows(node.dependencies)
+  const contextHash = String(node.agent_context?.context_hash ?? '')
+  const contextChars = String(node.agent_context?.rendered_context ?? '').length
+  const nodeTitle = [
+    String(node.objective ?? ''),
+    contextHash ? `独立上下文 ${contextHash.slice(0, 12)} · ${fmtNumber(contextChars)} 字符` : '',
+  ].filter(Boolean).join('\n')
   return (
-    <article className={`agent-flow-node ${node.status} ${node.synthetic ? 'synthetic' : ''}`} title={node.objective}>
+    <article className={`agent-flow-node ${node.status} ${node.synthetic ? 'synthetic' : ''}`} title={nodeTitle}>
       <header>
         <span className={`agent-state-dot ${node.status}`} />
         <div>
@@ -166,7 +172,7 @@ function AgentFlowNode({ node, now, roleTitles }: { node: any; now: number; role
       <p>{node.objective}</p>
       <footer>
         <span>{node.model_profile || (node.synthetic ? '宿主控制' : '默认模型')}</span>
-        <span>{node.started_at ? fmtDuration(duration) : dependencies.length ? `等待 ${dependencies.join('、')}` : '等待调度'}</span>
+        <span>{node.started_at ? `${fmtDuration(duration)}${contextHash ? ` · ctx ${contextHash.slice(0, 6)}` : ''}` : dependencies.length ? `等待 ${dependencies.join('、')}` : '等待调度'}</span>
       </footer>
     </article>
   )
@@ -189,10 +195,15 @@ function SubAgentFlow({ detail, loading, error, now, roles }: { detail: any; loa
   const peak = peakParallelism(runs, now)
   const roleTitles = new Map(roles.map((role) => [String(role.role), String(role.title)]))
   const runsByStep = new Map(runs.map((run) => [String(run.step_key), run]))
+  const contextsByRun = new Map(rows(detail?.run_contexts).map((item) => [Number(item.run_id), item.context]))
   const latestRunFinish = runs.reduce((latest, run) => Math.max(latest, Number(run.finished_at ?? 0)), 0)
-  const workerStages = planLayers(task?.plan?.steps).map((layer) => layer.map((step) => {
+  const planSteps = [...rows(task?.plan?.steps), ...rows(task?.plan?.adaptive_steps)]
+  const workerStages = planLayers(planSteps).map((layer) => layer.map((step) => {
     const run = runsByStep.get(String(step.id))
-    return run ?? {
+    return run ? {
+      ...run,
+      agent_context: contextsByRun.get(Number(run.run_id)),
+    } : {
       handle: String(step.id),
       role: step.agent,
       objective: step.objective,
@@ -457,7 +468,7 @@ export function TasksView({ plane, onOpenDetail }: { plane: Plane; onOpenDetail:
   return (
     <>
       <PageHeader title="任务与投递" description="前台 Agent、持久任务和消息投递的统一操作面" action={<RefreshButton onClick={() => void plane.refreshMany(['tasks', 'subagents', 'jobs', 'deliveries'])} />} />
-      <Section title="Sub-Agent 编排" description="使用 /task 任务内容，由主控拆分并派给固定专业 Agent">
+      <Section title="Sub-Agent 编排" description="主 Agent 自动选择直接回答、单专家委派或多 Agent 工作流；/task 可强制进入工作流">
         <div className="agent-role-strip">
           {agentRoles.map((role) => <div className="agent-role-summary" key={role.role} title={`${role.description} · ${rows(role.allowed_tools).length} 个工具`}><div><strong>{role.title}</strong><code>{role.role}</code></div><span><b>{rows(role.allowed_tools).length}</b><small>工具</small></span></div>)}
         </div>

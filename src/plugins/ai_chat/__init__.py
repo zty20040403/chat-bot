@@ -47,6 +47,7 @@ from .bridges import (
 from .ai_tools import (
     CONTEXT_EXPAND_TOOL_NAME,
     CONTEXT_SEARCH_TOOL_NAME,
+    DELEGATE_AGENT_TOOL_NAME,
     FIND_STICKERS_TOOL_NAME,
     GROUP_MEMBERS_TOOL_NAME,
     INSPECT_SOURCE_TOOL_NAME,
@@ -57,6 +58,7 @@ from .ai_tools import (
     QUERY_ALERTS_TOOL_NAME,
     READ_IMAGE_TEXT_TOOL_NAME,
     REPLY_WITH_VOICE_TOOL_NAME,
+    RESUME_SUBAGENT_TOOL_NAME,
     RUN_SUBAGENTS_TOOL_NAME,
     SAY_TOOL_NAME,
     SEND_QQ_FACE_TOOL_NAME,
@@ -73,6 +75,7 @@ from .ai_tools import (
     available_tools,
     force_tool,
 )
+from .agent import ContextPacket
 from .config import settings
 from .context_policy import (
     ContextPolicy,
@@ -118,7 +121,7 @@ from .model_catalog import (
     ModelProfile,
     SUPPORTED_REASONING_EFFORTS,
 )
-from .subagents import route_subagent_request
+from .subagents import AgentExecutionHooks, route_subagent_request
 from .message_ir import MessageBody, TextNode, render_fallback_text
 from .observability import observed_ai_turn, telemetry
 from .onebot_codec import (

@@ -36,6 +36,7 @@ from src.plugins.ai_chat.ai_tools import (
 from src.plugins.ai_chat.adapters import OneBotIngestAdapter
 from src.plugins.ai_chat.context_pipeline import TurnContextPlan
 from src.plugins.ai_chat.media_library import MediaRecord
+from src.plugins.ai_chat.model_catalog import ModelCatalog
 
 
 def _group_event(user_id: int = 321, group_id: int = 789) -> GroupMessageEvent:
@@ -133,6 +134,65 @@ class NaturalToolRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("正常回答", first)
         self.assertIn("正常回答", second)
         self.assertEqual(ask_deepseek.await_count, 2)
+
+    async def test_simple_chat_profile_does_not_take_media_turns(self) -> None:
+        import json
+        import src.plugins.ai_chat as ai_chat
+
+        catalog = ModelCatalog.from_json(
+            json.dumps(
+                {
+                    "default": "strong",
+                    "profiles": {
+                        "strong": {
+                            "model": "strong-model",
+                            "api_key_required": False,
+                        },
+                        "qwen-local": {
+                            "model": "qwen3.8-27b",
+                            "api_key_required": False,
+                        },
+                    },
+                }
+            ),
+            default_profile="strong",
+            environ={},
+        )
+        selected: list[str] = []
+
+        async def fake_deepseek(
+            user_text,
+            history,
+            tools,
+            execute_tool,
+            **kwargs,
+        ) -> str:
+            del user_text, history, tools, execute_tool
+            selected.append(kwargs["profile"].name)
+            return "正常回答"
+
+        with (
+            patch.object(ai_chat, "model_profiles", catalog),
+            patch.object(ai_chat, "ask_deepseek_with_tools", new=fake_deepseek),
+        ):
+            await ai_chat._ask_ai(
+                AsyncMock(),
+                _group_event(),
+                "今天吃什么",
+                available_image_sources=[],
+                selected_profile_override=catalog.resolve("strong"),
+                simple_chat_profile="qwen-local",
+            )
+            await ai_chat._ask_ai(
+                AsyncMock(),
+                _group_event(),
+                "看看这张图",
+                available_image_sources=["https://example.test/image.jpg"],
+                selected_profile_override=catalog.resolve("strong"),
+                simple_chat_profile="qwen-local",
+            )
+
+        self.assertEqual(selected, ["qwen-local", "strong"])
 
     async def test_group_chat_does_not_send_personal_bot_history_to_model(self) -> None:
         captured_history = None

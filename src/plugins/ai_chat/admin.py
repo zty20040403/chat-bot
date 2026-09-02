@@ -213,6 +213,8 @@ _DATABASE_RESOURCE_MAP: dict[str, tuple[str, ...]] = {
     "subagent_runs": ("subagents", "tasks", "overview"),
     "subagent_events": ("subagents", "tasks", "overview"),
     "subagent_artifacts": ("subagents",),
+    "subagent_checkpoints": ("subagents", "tasks", "overview"),
+    "subagent_run_contexts": ("subagents", "tasks", "overview"),
     "bridge_sources": ("overview",),
     "bridge_deliveries": ("overview",),
     "bridge_cursors": ("overview",),
@@ -839,6 +841,8 @@ def register_admin(
                 }
                 for run in services.subagent_store.runs(task_id)
             ],
+            "checkpoints": services.subagent_store.checkpoints(task_id),
+            "run_contexts": services.subagent_store.run_contexts(task_id),
             "events": services.subagent_store.events(task_id),
         }
 

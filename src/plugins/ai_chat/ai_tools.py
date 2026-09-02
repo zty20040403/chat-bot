@@ -30,7 +30,9 @@ SEND_IMAGE_FROM_SANDBOX_TOOL_NAME = "send_image_from_sandbox"
 LIST_RECENT_FILES_TOOL_NAME = "list_recent_files"
 IMPORT_FILE_TO_SANDBOX_TOOL_NAME = "import_file_to_sandbox"
 SAY_TOOL_NAME = "say"
+DELEGATE_AGENT_TOOL_NAME = "delegate_agent"
 RUN_SUBAGENTS_TOOL_NAME = "run_subagents"
+RESUME_SUBAGENT_TOOL_NAME = "resume_subagent"
 MEMORY_ADD_TOOL_NAME = "memory_add"
 MEMORY_LIST_TOOL_NAME = "memory_list"
 MEMORY_REMOVE_TOOL_NAME = "memory_remove"
@@ -687,6 +689,67 @@ RUN_SUBAGENTS_TOOL: ToolDefinition = {
     },
 }
 
+DELEGATE_AGENT_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": DELEGATE_AGENT_TOOL_NAME,
+        "description": (
+            "把一个边界明确的专业子任务交给独立 Sub-Agent，并把结构化结果返回给"
+            "当前主 Agent。适用于一次资料核实、代码处理、文件读取、媒体分析、数据"
+            "分析或只读运维检查；它不会接管 QQ 对话。需要多个角色和依赖步骤时改用"
+            "run_subagents，简单工具调用不需要委派。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "role": {
+                    "type": "string",
+                    "enum": [
+                        "researcher",
+                        "coder",
+                        "document",
+                        "media",
+                        "analyst",
+                        "operator",
+                    ],
+                    "description": "最适合该子任务的专业角色。",
+                },
+                "objective": {
+                    "type": "string",
+                    "maxLength": 4000,
+                    "description": "边界清楚、可独立验收的子任务目标。",
+                },
+            },
+            "required": ["role", "objective"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+RESUME_SUBAGENT_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": RESUME_SUBAGENT_TOOL_NAME,
+        "description": (
+            "从持久检查点继续一个因机器人重启而中断的 Sub-Agent 任务。"
+            "已完成步骤不会重跑，每个 Agent 复用原来的独立上下文。仅当用户明确"
+            "要求继续 task#编号，或当前对话明确指向一个 interrupted 任务时调用。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "要继续的持久任务编号。",
+                }
+            },
+            "required": ["task_id"],
+            "additionalProperties": False,
+        },
+    },
+}
+
 MEMORY_ADD_TOOL: ToolDefinition = {
     "type": "function",
     "function": {
@@ -1334,7 +1397,9 @@ def available_tools(
             [REMINDER_SET_TOOL, REMINDER_LIST_TOOL, REMINDER_CANCEL_TOOL]
         )
     if include_subagents:
-        tools.append(RUN_SUBAGENTS_TOOL)
+        tools.extend(
+            [DELEGATE_AGENT_TOOL, RUN_SUBAGENTS_TOOL, RESUME_SUBAGENT_TOOL]
+        )
     return tools
 
 

@@ -92,6 +92,7 @@ class Settings:
     deepseek_model: str
     deepseek_thinking: str
     model_default_profile: str
+    model_simple_chat_profile: str
     model_profiles_json: str
     model_fallback_enabled: bool
     model_circuit_failure_threshold: int
@@ -309,6 +310,10 @@ class Settings:
                 os.getenv("AI_MODEL_DEFAULT_PROFILE", "deepseek").strip()
                 or "deepseek"
             ),
+            model_simple_chat_profile=os.getenv(
+                "AI_SIMPLE_CHAT_PROFILE",
+                "",
+            ).strip(),
             model_profiles_json=os.getenv("AI_MODEL_PROFILES_JSON", "").strip(),
             model_fallback_enabled=_get_bool("AI_MODEL_FALLBACK_ENABLED", True),
             model_circuit_failure_threshold=min(

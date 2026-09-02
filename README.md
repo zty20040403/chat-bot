@@ -224,6 +224,7 @@ DEEPSEEK_API_KEY=replace-with-your-key
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 DEEPSEEK_MODEL=deepseek-v4-flash
 AI_MODEL_DEFAULT_PROFILE=deepseek
+AI_SIMPLE_CHAT_PROFILE=qwen-local
 ```
 
 多模型配置使用一个 JSON 目录。Key 只通过环境变量引用，不要写进 JSON：
@@ -233,6 +234,9 @@ DEEPSEEK_API_KEY=replace-with-your-deepseek-key
 OPENAI_API_KEY=replace-with-your-openai-key
 AI_MODEL_PROFILES_JSON={"default":"deepseek","profiles":{"deepseek":{"provider":"deepseek","protocol":"openai-chat","base_url":"https://api.deepseek.com","api_key_env":"DEEPSEEK_API_KEY","model":"deepseek-v4-flash","aliases":["ds"],"fallback_profiles":["openai"]},"openai":{"provider":"openai","protocol":"openai-chat","base_url":"https://api.openai.com/v1","api_key_env":"OPENAI_API_KEY","model":"gpt-5-mini","capabilities":{"vision":true},"aliases":["gpt"]}}}
 ```
+
+`AI_SIMPLE_CHAT_PROFILE` 只接管没有显式模型覆盖、媒体输入、强制工具或
+Sub-Agent 委派的普通聊天；复杂任务仍使用会话原本选择的模型。
 
 当首选模型超时、断网、限流、欠费或密钥失效时，网关会在同一轮 Agent
 中切到兼容的备用模型，不会重复已经完成的工具操作。连续失败会临时熔断；
@@ -317,12 +321,19 @@ OpenAI/CLIProxy 模型可以按当前用户、当前会话覆盖推理强度：
 
 ## Sub-Agent 任务模式
 
-普通 `@Kenneth` 请求如果明显包含多个专业领域、互相依赖的步骤或长时间工作，宿主路由器会
-在主 ReAct Loop 前自动升级为 Sub-Agent；模糊情况仍允许主模型调用 `run_subagents`。`/task`
-只是强制进入任务模式的手动入口。主控先生成受宿主校验的
+Sub-Agent 内核区分三种执行方式：普通问答由主 Agent 直接完成；边界明确的单一专业子任务由
+主模型通过 `delegate_agent` 交给独立专家，专家返回结构化证据后仍由 Kenneth 统一回复；明显
+包含多个专业领域、互相依赖步骤或长时间工作的请求才使用 `run_subagents`。宿主路由器可以在
+主 ReAct Loop 前自动升级复杂任务，`/task` 只是强制进入工作流模式的手动入口。主控先生成受宿主校验的
 无环任务图，再把步骤派给七个固定角色：主控、搜索、代码、文件、媒体、分析和运维。每个
 角色开始和完成时都会通过 `say` 汇报正在做什么。执行角色不能自行创建新 Agent，最多步骤、
 并行数、工具轮次和总超时均由宿主配置。
+
+每个专家拥有声明式、带版本的模型策略、工具白名单、风险等级、重试次数、轮次和超时配置。
+宿主先构造任务级 `ContextPacket`，再按角色允许的通道投影成不可变的 `AgentContext`：搜索角色
+只看到会话、来源和上游证据，代码与文件角色才看到沙盒产物，个人记忆默认不下发给执行角色。
+每个 Run 的上下文哈希和快照单独写入 PostgreSQL；重试和重启续跑复用原快照，不会吸入后来
+出现的群消息。Agent 以统一结构返回摘要、事实、证据、产物、限制、未解决事项和置信度。
 
 ```text
 /task 分析刚才的视频，核实里面提到的产品参数，再生成一份 PDF 报告
@@ -331,7 +342,10 @@ OpenAI/CLIProxy 模型可以按当前用户、当前会话覆盖推理强度：
 
 每个角色只能看到与职责匹配的工具。例如搜索 Agent 不能执行 Shell，代码 Agent 只能在
 隔离沙盒中运行命令，运维 Agent 默认只能查看权威告警和任务状态。步骤、依赖、模型、工具、
-结果与错误都写入 PostgreSQL，并在管理台“任务与投递”页面中展示。
+上下文快照、工具风险与副作用、结果和错误都写入 PostgreSQL，并在管理台“任务与投递”页面中
+实时展示。网络类瞬时故障最多按角色策略安全重试；一旦出现不可重复副作用就停止自动重试。
+机器人重启后任务进入 `interrupted`，在原群由原发起人要求“继续 task#编号”即可从检查点恢复，
+已完成步骤不会重跑。业务步骤失败时，主控最多追加两个受限 repair 节点，不会任意重画计划。
 
 ## 上下文与记忆
 

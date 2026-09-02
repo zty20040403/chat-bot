@@ -61,6 +61,18 @@ TABLES: tuple[TableSpec, ...] = (
         ("artifact_id",),
         "artifact_id",
     ),
+    TableSpec(
+        "subagents.sqlite3",
+        "subagent_checkpoints",
+        ("checkpoint_id",),
+        "checkpoint_id",
+    ),
+    TableSpec(
+        "subagents.sqlite3",
+        "subagent_run_contexts",
+        ("context_id",),
+        "context_id",
+    ),
 )
 
 JSON_STATES = {

@@ -20,6 +20,7 @@ from src.plugins.ai_chat.subagents import (
     parse_profile_overrides,
     route_subagent_request,
 )
+from src.plugins.ai_chat.agent import AgentResult, ContextPacket, DEFAULT_AGENT_REGISTRY
 from src.plugins.ai_chat.model_catalog import ModelCatalog, ModelProfile
 from src.plugins.ai_chat.ai_tools import available_tools
 
@@ -101,7 +102,7 @@ class SubAgentStoreTests(unittest.TestCase):
         self.assertTrue(self.store.cancellation_requested(task.task_id))
         self.assertEqual(self.store.get(task.task_id).status, "cancelling")  # type: ignore[union-attr]
 
-    def test_restart_settles_running_and_pending_runs(self) -> None:
+    def test_restart_preserves_runs_for_checkpoint_recovery(self) -> None:
         task = self.store.create_task(
             scope_key="qq:group:1",
             conversation_id="group:1:user:2",
@@ -127,11 +128,66 @@ class SubAgentStoreTests(unittest.TestCase):
         self.store.start_run(first.run_id)
 
         self.assertEqual(self.store.recover_interrupted(), 1)
-        self.assertEqual(self.store.get(task.task_id).status, "failed")  # type: ignore[union-attr]
+        self.assertEqual(self.store.get(task.task_id).status, "interrupted")  # type: ignore[union-attr]
         self.assertEqual(
             [run.status for run in self.store.runs(task.task_id)],
-            ["failed", "skipped"],
+            ["interrupted", "pending"],
         )
+        checkpoint = self.store.checkpoints(task.task_id)[-1]
+        self.assertEqual(checkpoint["phase"], "process_interrupted")
+        self.assertEqual(checkpoint["state"]["interrupted_runs"], [first.run_id])
+
+    def test_checkpoints_are_ordered_and_emit_events(self) -> None:
+        task = self.store.create_task(
+            scope_key="qq:group:1",
+            conversation_id="group:1:user:2",
+            requester_user_id=2,
+            trigger_message_id=None,
+            objective="持久任务",
+            max_parallelism=2,
+            max_steps=4,
+        )
+        self.store.append_checkpoint(task.task_id, "received", {"value": 1}, now=101)
+        self.store.append_checkpoint(task.task_id, "planned", {"value": 2}, now=102)
+
+        checkpoints = self.store.checkpoints(task.task_id)
+        self.assertEqual([item["sequence"] for item in checkpoints], [1, 2])
+        self.assertEqual([item["state"]["value"] for item in checkpoints], [1, 2])
+        self.assertEqual(
+            [
+                item["event_type"]
+                for item in self.store.events(task.task_id)
+                if item["event_type"] == "checkpoint.created"
+            ],
+            ["checkpoint.created", "checkpoint.created"],
+        )
+
+    def test_retry_is_blocked_after_non_idempotent_side_effect(self) -> None:
+        task = self.store.create_task(
+            scope_key="qq:group:1",
+            conversation_id="group:1:user:2",
+            requester_user_id=2,
+            trigger_message_id=None,
+            objective="发送文件",
+            max_parallelism=1,
+            max_steps=1,
+        )
+        run = self.store.create_run(
+            task.task_id,
+            TaskStep("send", "document", "发送", "文件"),
+            allowed_tools=["send_file_from_sandbox"],
+            model_profile="test",
+        )
+        self.store.append_event(
+            task.task_id,
+            "agent.tool_finished",
+            {
+                "idempotency": "non-idempotent",
+                "state": "succeeded",
+            },
+            run_id=run.run_id,
+        )
+        self.assertFalse(self.store.run_retry_safe(run.run_id))
 
 
 class SubAgentPlanTests(unittest.TestCase):
@@ -213,7 +269,79 @@ class SubAgentPlanTests(unittest.TestCase):
             include_subagents=True,
         )
         names = {tool["function"]["name"] for tool in tools}
+        self.assertIn("delegate_agent", names)
         self.assertIn("run_subagents", names)
+        self.assertIn("resume_subagent", names)
+
+    def test_agent_manifest_is_versioned_and_policy_aware(self) -> None:
+        researcher = next(
+            item
+            for item in DEFAULT_AGENT_REGISTRY.manifest()
+            if item["role"] == "researcher"
+        )
+        self.assertEqual(researcher["version"], 1)
+        self.assertEqual(researcher["model_policy"], "fast")
+        self.assertEqual(researcher["risk_level"], "read-only")
+
+    def test_context_packet_is_bounded_and_scope_explicit(self) -> None:
+        packet = ContextPacket(
+            scope_key="qq:group:123",
+            conversation_id="group:123:user:456",
+            requester_user_id=456,
+            trigger_message_id=12,
+            objective="核实资料",
+            conversation_context="群聊" * 5000,
+            memory_context="记忆" * 5000,
+            supporting_context="补充" * 5000,
+            evidence_handles=("msg#12",),
+        )
+        rendered = packet.render_for_worker("researcher", upstream={}, max_chars=7000)
+        self.assertLessEqual(len(rendered), 7000)
+        self.assertIn("qq:group:123", rendered)
+        self.assertIn("msg#12", rendered)
+
+    def test_each_role_receives_an_independent_minimal_context(self) -> None:
+        packet = ContextPacket(
+            scope_key="qq:group:123",
+            conversation_id="group:123:user:456",
+            requester_user_id=456,
+            trigger_message_id=12,
+            objective="核实资料并写程序",
+            conversation_context="当前群聊",
+            memory_context="不应下发的个人记忆",
+            supporting_context="任务补充材料",
+            evidence_handles=("msg#12",),
+            artifact_handles=("sandbox#1:/workspace/input.csv",),
+        )
+        researcher = packet.for_agent(
+            DEFAULT_AGENT_REGISTRY.worker("researcher"),
+            upstream={},
+        )
+        coder = packet.for_agent(
+            DEFAULT_AGENT_REGISTRY.worker("coder"),
+            upstream={"research": {"summary": "已核实"}},
+        )
+
+        self.assertNotEqual(researcher.context_hash, coder.context_hash)
+        self.assertNotIn("不应下发的个人记忆", researcher.rendered_context)
+        self.assertNotIn("不应下发的个人记忆", coder.rendered_context)
+        self.assertNotIn("sandbox#1", researcher.rendered_context)
+        self.assertIn("sandbox#1", coder.rendered_context)
+        self.assertNotIn("已核实", researcher.rendered_context)
+        self.assertIn("已核实", coder.rendered_context)
+
+    def test_agent_result_keeps_structured_evidence(self) -> None:
+        result = AgentResult.from_payload(
+            {
+                "status": "completed",
+                "summary": "完成",
+                "facts": [{"claim": "事实", "evidence_ids": ["web#1"]}],
+                "confidence": 2,
+            }
+        ).as_payload()
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["facts"][0]["evidence_ids"], ["web#1"])
+        self.assertEqual(result["confidence"], 1.0)
 
     def test_routes_multi_source_media_report_automatically(self) -> None:
         decision = route_subagent_request(
@@ -241,6 +369,308 @@ class SubAgentPlanTests(unittest.TestCase):
 
 
 class SubAgentCoordinatorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_failed_step_gets_one_bounded_adaptive_repair(self) -> None:
+        store = SubAgentStore(":memory:")
+        profile = ModelProfile(
+            name="test",
+            provider="test",
+            protocol="openai-chat",
+            model="test-model",
+            base_url="http://127.0.0.1",
+            api_key_required=False,
+        )
+        coordinator = SubAgentCoordinator(
+            store,
+            ModelCatalog({"test": profile}, default_profile="test"),
+            logger=AsyncMock(),
+        )
+        plan = {
+            "goal": "核实数据",
+            "steps": [
+                {
+                    "id": "research",
+                    "agent": "researcher",
+                    "depends_on": [],
+                    "objective": "读取来源",
+                    "deliverable": "事实",
+                }
+            ],
+        }
+        repair = {
+            "action": "repair",
+            "role": "analyst",
+            "objective": "根据失败证据换一种方式核对",
+            "deliverable": "可核验结论",
+            "reason": "原来源不可用",
+        }
+        with (
+            patch(
+                "src.plugins.ai_chat.subagents.ask_deepseek_json",
+                new=AsyncMock(side_effect=[plan, repair]),
+            ),
+            patch(
+                "src.plugins.ai_chat.subagents.ask_deepseek_with_tools",
+                new=AsyncMock(
+                    side_effect=[
+                        '{"status":"failed","summary":"来源不可用"}',
+                        '{"status":"success","summary":"换源核实完成"}',
+                    ]
+                ),
+            ) as worker,
+            patch(
+                "src.plugins.ai_chat.subagents.ask_deepseek",
+                new=AsyncMock(return_value="已换源核实"),
+            ),
+        ):
+            answer = await coordinator.run(
+                scope_key="qq:group:1",
+                conversation_id="group:1:user:2",
+                requester_user_id=2,
+                trigger_message_id=3,
+                objective="核实数据",
+                context="必要上下文",
+                selected_profile=profile,
+                tools=[],
+                execute_tool=AsyncMock(return_value='{"ok":true}'),
+            )
+
+        self.assertIn("已换源核实", answer)
+        self.assertEqual(worker.await_count, 2)
+        task = store.recent(limit=1)[0]
+        runs = store.runs(task.task_id)
+        self.assertEqual([run.role for run in runs], ["researcher", "analyst"])
+        self.assertEqual([run.status for run in runs], ["failed", "succeeded"])
+        self.assertEqual(task.status, "completed")
+        self.assertEqual(len(store.run_contexts(task.task_id)), 2)
+        self.assertIn("adaptive_steps", task.plan)
+        store.close()
+
+    async def test_transient_worker_failure_retries_with_same_context(self) -> None:
+        store = SubAgentStore(":memory:")
+        profile = ModelProfile(
+            name="test",
+            provider="test",
+            protocol="openai-chat",
+            model="test-model",
+            base_url="http://127.0.0.1",
+            api_key_required=False,
+        )
+        coordinator = SubAgentCoordinator(
+            store,
+            ModelCatalog({"test": profile}, default_profile="test"),
+            logger=AsyncMock(),
+        )
+        with (
+            patch(
+                "src.plugins.ai_chat.subagents.ask_deepseek_with_tools",
+                new=AsyncMock(
+                    side_effect=[
+                        RuntimeError("network timeout"),
+                        '{"status":"success","summary":"恢复正常"}',
+                    ]
+                ),
+            ) as worker,
+            patch(
+                "src.plugins.ai_chat.subagents.asyncio.sleep",
+                new=AsyncMock(),
+            ),
+        ):
+            result = await coordinator.delegate(
+                role="researcher",
+                scope_key="qq:group:1",
+                conversation_id="group:1:user:2",
+                requester_user_id=2,
+                trigger_message_id=3,
+                objective="核实资料",
+                context="冻结上下文",
+                selected_profile=profile,
+                tools=[],
+                execute_tool=AsyncMock(return_value='{"ok":true}'),
+            )
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(worker.await_count, 2)
+        task = store.recent(limit=1)[0]
+        self.assertEqual(store.runs(task.task_id)[0].attempt, 2)
+        self.assertEqual(len(store.run_contexts(task.task_id)), 1)
+        self.assertIn(
+            "run.retry_scheduled",
+            [item["event_type"] for item in store.events(task.task_id)],
+        )
+        store.close()
+
+    async def test_resume_reuses_frozen_context_and_skips_completed_steps(self) -> None:
+        store = SubAgentStore(":memory:")
+        profile = ModelProfile(
+            name="test",
+            provider="test",
+            protocol="openai-chat",
+            model="test-model",
+            base_url="http://127.0.0.1",
+            api_key_required=False,
+        )
+        coordinator = SubAgentCoordinator(
+            store,
+            ModelCatalog({"test": profile}, default_profile="test"),
+            logger=AsyncMock(),
+        )
+        task = store.create_task(
+            scope_key="qq:group:1",
+            conversation_id="group:1:user:2",
+            requester_user_id=2,
+            trigger_message_id=3,
+            objective="先检索再分析",
+            max_parallelism=2,
+            max_steps=2,
+        )
+        first_step = TaskStep("research", "researcher", "检索", "事实")
+        second_step = TaskStep(
+            "analysis",
+            "analyst",
+            "分析",
+            "结论",
+            ("research",),
+        )
+        plan = {
+            "goal": task.objective,
+            "mode": "workflow",
+            "steps": [
+                {"id": "research", "agent": "researcher"},
+                {"id": "analysis", "agent": "analyst"},
+            ],
+        }
+        store.set_task_state(task.task_id, "running", plan=plan)
+        packet = ContextPacket.from_legacy(
+            scope_key=task.scope_key,
+            conversation_id=task.conversation_id,
+            requester_user_id=task.requester_user_id,
+            trigger_message_id=task.trigger_message_id,
+            objective=task.objective,
+            context="重启前冻结的上下文",
+        )
+        store.append_checkpoint(
+            task.task_id,
+            "plan_ready",
+            {"mode": "workflow", "plan": plan, "context_packet": packet.as_payload()},
+        )
+        first = store.create_run(
+            task.task_id,
+            first_step,
+            allowed_tools=[],
+            model_profile="test",
+        )
+        store.start_run(first.run_id)
+        store.finish_run(
+            first.run_id,
+            "succeeded",
+            result={"status": "success", "summary": "已检索"},
+        )
+        second = store.create_run(
+            task.task_id,
+            second_step,
+            allowed_tools=[],
+            model_profile="test",
+        )
+        frozen = packet.for_agent(
+            DEFAULT_AGENT_REGISTRY.worker("analyst"),
+            upstream={"research": {"status": "success", "summary": "已检索"}},
+        )
+        store.save_run_context(task.task_id, second.run_id, frozen)
+        store.start_run(second.run_id)
+        self.assertEqual(store.recover_interrupted(), 1)
+
+        with (
+            patch(
+                "src.plugins.ai_chat.subagents.ask_deepseek_with_tools",
+                new=AsyncMock(
+                    return_value='{"status":"success","summary":"已分析"}'
+                ),
+            ) as worker,
+            patch(
+                "src.plugins.ai_chat.subagents.ask_deepseek",
+                new=AsyncMock(return_value="恢复完成"),
+            ),
+        ):
+            answer = await coordinator.resume(
+                task.task_id,
+                scope_key=task.scope_key,
+                requester_user_id=task.requester_user_id,
+                selected_profile=profile,
+                tools=[],
+                execute_tool=AsyncMock(return_value='{"ok":true}'),
+            )
+
+        self.assertIn("恢复完成", answer)
+        self.assertEqual(worker.await_count, 1)
+        self.assertIn("重启前冻结的上下文", worker.await_args.args[0])
+        runs = store.runs(task.task_id)
+        self.assertEqual([run.attempt for run in runs], [1, 2])
+        self.assertEqual([run.status for run in runs], ["succeeded", "succeeded"])
+        self.assertEqual(store.get(task.task_id).status, "completed")  # type: ignore[union-attr]
+        store.close()
+
+    async def test_single_agent_delegation_skips_planner_and_synthesizer(self) -> None:
+        store = SubAgentStore(":memory:")
+        profile = ModelProfile(
+            name="test",
+            provider="test",
+            protocol="openai-chat",
+            model="test-model",
+            base_url="http://127.0.0.1",
+            api_key_required=False,
+        )
+        catalog = ModelCatalog({"test": profile}, default_profile="test")
+        coordinator = SubAgentCoordinator(store, catalog, logger=AsyncMock())
+        with (
+            patch(
+                "src.plugins.ai_chat.subagents.ask_deepseek_with_tools",
+                new=AsyncMock(
+                    return_value=json.dumps(
+                        {
+                            "status": "success",
+                            "summary": "查到一手来源",
+                            "facts": [
+                                {"claim": "参数已确认", "evidence_ids": ["web#1"]}
+                            ],
+                            "citations": ["https://example.com/source"],
+                        },
+                        ensure_ascii=False,
+                    )
+                ),
+            ) as worker,
+            patch(
+                "src.plugins.ai_chat.subagents.ask_deepseek_json",
+                new=AsyncMock(),
+            ) as planner,
+            patch(
+                "src.plugins.ai_chat.subagents.ask_deepseek",
+                new=AsyncMock(),
+            ) as synthesizer,
+        ):
+            result = await coordinator.delegate(
+                role="researcher",
+                scope_key="qq:group:1",
+                conversation_id="group:1:user:2",
+                requester_user_id=2,
+                trigger_message_id=3,
+                objective="核实产品参数",
+                context="必要上下文",
+                selected_profile=profile,
+                tools=[],
+                execute_tool=AsyncMock(return_value='{"ok":true}'),
+            )
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["mode"], "delegate")
+        self.assertEqual(result["role"], "researcher")
+        self.assertEqual(worker.await_count, 1)
+        planner.assert_not_awaited()
+        synthesizer.assert_not_awaited()
+        task = store.recent(limit=1)[0]
+        self.assertEqual(task.plan["mode"], "delegate")
+        self.assertEqual(store.runs(task.task_id)[0].role, "researcher")
+        store.close()
+
     async def test_plans_runs_and_synthesizes_fixed_agents(self) -> None:
         store = SubAgentStore(":memory:")
         profile = ModelProfile(
@@ -303,6 +733,11 @@ class SubAgentCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         task = store.recent(limit=1)[0]
         self.assertEqual(task.status, "completed")
         self.assertEqual([run.role for run in store.runs(task.task_id)], ["researcher", "document"])
+        contexts = store.run_contexts(task.task_id)
+        self.assertEqual([item["role"] for item in contexts], ["researcher", "document"])
+        self.assertEqual(len({item["context_hash"] for item in contexts}), 2)
+        self.assertNotIn("已核实", contexts[0]["context"]["rendered_context"])
+        self.assertIn("完成", contexts[1]["context"]["rendered_context"])
         store.close()
 
     async def test_explicit_group_delivery_is_completed_after_worker_rounds(self) -> None:

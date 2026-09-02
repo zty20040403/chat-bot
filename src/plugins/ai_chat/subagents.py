@@ -14,8 +14,21 @@ from typing import Any, Iterator, Literal
 
 from src.bot_storage import DatabaseSource, PostgresDatabase, open_store_connection
 
+from .agent import (
+    AGENT_SPECS,
+    DEFAULT_AGENT_REGISTRY,
+    WORKER_ROLES,
+    AgentContext,
+    AgentRegistry,
+    AgentResult,
+    AgentSpec,
+    ContextPacket,
+    SubAgentRole,
+)
 from .ai_tools import ToolDefinition
 from .deepseek import (
+    AgentLoopEvent,
+    DeepSeekConfigError,
     DeepSeekTrace,
     ask_deepseek,
     ask_deepseek_json,
@@ -24,173 +37,11 @@ from .deepseek import (
 from .model_catalog import ModelCatalog, ModelProfile
 
 
-SubAgentRole = Literal[
-    "supervisor",
-    "researcher",
-    "coder",
-    "document",
-    "media",
-    "analyst",
-    "operator",
-]
-
-
-@dataclass(frozen=True)
-class AgentSpec:
-    role: SubAgentRole
-    title: str
-    description: str
-    instructions: str
-    allowed_tools: frozenset[str]
-
-
 @dataclass(frozen=True)
 class SubAgentRouteDecision:
     delegate: bool
     domains: tuple[str, ...] = ()
     reasons: tuple[str, ...] = ()
-
-
-COMMON_READ_TOOLS = frozenset(
-    {
-        "get_message_by_id",
-        "search_messages",
-        "context_expand",
-        "context_search",
-        "memory_list",
-        "inspect_source",
-        "inspect_shared_content",
-        "get_shared_content",
-        "view_forward",
-        "view_bilibili",
-        "list_recent_files",
-        "job_status",
-        "say",
-    }
-)
-SANDBOX_TOOLS = frozenset(
-    {
-        "sandbox_create",
-        "sandbox_list",
-        "sandbox_exec",
-        "sandbox_write_file",
-        "sandbox_read_file",
-        "sandbox_destroy",
-        "import_file_to_sandbox",
-        "send_file_from_sandbox",
-        "send_image_from_sandbox",
-        "job_cancel",
-    }
-)
-BROWSER_TOOLS = frozenset(
-    {
-        "web_search",
-        "browser_navigate",
-        "browser_snapshot",
-        "browser_click",
-        "browser_type",
-        "browser_press_key",
-        "browser_wait_for",
-        "browser_scroll",
-        "browser_close",
-        "browser_clear",
-    }
-)
-
-
-AGENT_SPECS: dict[SubAgentRole, AgentSpec] = {
-    "supervisor": AgentSpec(
-        role="supervisor",
-        title="主控",
-        description="拆分目标、检查依赖、验收结果并统一回复。",
-        instructions="只负责任务设计和验收，不亲自调用执行工具。",
-        allowed_tools=frozenset(),
-    ),
-    "researcher": AgentSpec(
-        role="researcher",
-        title="搜索",
-        description="搜索互联网、浏览网页并交叉核实来源。",
-        instructions=(
-            "优先使用一手来源；区分事实、推断和未知信息。最终给出完整链接、"
-            "关键事实、冲突信息和仍未确认的内容。"
-        ),
-        allowed_tools=COMMON_READ_TOOLS | BROWSER_TOOLS,
-    ),
-    "coder": AgentSpec(
-        role="coder",
-        title="代码",
-        description="在隔离沙盒中编写、运行和验证代码。",
-        instructions=(
-            "所有代码和命令必须在任务沙盒中执行。完成前检查实际输出；需要交付时"
-            "发送文件，并报告执行结果和未解决问题。"
-        ),
-        allowed_tools=COMMON_READ_TOOLS | BROWSER_TOOLS | SANDBOX_TOOLS | {"use_skill"},
-    ),
-    "document": AgentSpec(
-        role="document",
-        title="文件",
-        description="读取群文件、PDF、表格和文档并生成交付物。",
-        instructions=(
-            "先取得真实文件，再解析内容；不得根据文件名猜测。生成文档后检查文件"
-            "存在且可读取，并通过文件句柄交付。含中文的 PDF 必须使用沙盒里的 "
-            "kennethbot-pdf 生成，再用 pdffonts 检查字体嵌入、pdftotext 检查中文；"
-            "验收失败不得发送。"
-        ),
-        allowed_tools=(
-            COMMON_READ_TOOLS
-            | SANDBOX_TOOLS
-            | {"read_image_text", "view_image", "use_skill"}
-        ),
-    ),
-    "media": AgentSpec(
-        role="media",
-        title="媒体",
-        description="理解图片、视频、字幕、语音和平台分享内容。",
-        instructions=(
-            "必须先实际读取媒体再评价。长视频先看元数据、字幕和关键帧；明确指出"
-            "可观察内容、推断内容和无法确认的部分。"
-        ),
-        allowed_tools=(
-            COMMON_READ_TOOLS
-            | BROWSER_TOOLS
-            | {
-                "read_image_text",
-                "view_image",
-                "view_video",
-                "transcribe_voice",
-            }
-        ),
-    ),
-    "analyst": AgentSpec(
-        role="analyst",
-        title="分析",
-        description="整理数据、比较证据、计算并形成可审计结论。",
-        instructions=(
-            "先确定统计口径，再计算和比较。结论必须对应证据；发现缺失数据时明确"
-            "说明，不要用猜测补齐。"
-        ),
-        allowed_tools=(
-            COMMON_READ_TOOLS
-            | SANDBOX_TOOLS
-            | {"query_alerts", "pin_message", "group_members"}
-        ),
-    ),
-    "operator": AgentSpec(
-        role="operator",
-        title="运维",
-        description="检查 Kennethbot、告警、任务、数据库和运行状态。",
-        instructions=(
-            "默认只读检查。涉及停止、重启、删除或修改服务时必须遵守宿主审批策略；"
-            "报告影响范围、当前状态和建议动作。"
-        ),
-        allowed_tools=(
-            COMMON_READ_TOOLS
-            | {"query_alerts", "sandbox_list", "job_status", "group_members"}
-        ),
-    ),
-}
-
-WORKER_ROLES = tuple(role for role in AGENT_SPECS if role != "supervisor")
 
 
 _ROUTE_DOMAIN_PATTERNS: dict[str, re.Pattern[str]] = {
@@ -502,6 +353,74 @@ class SubAgentStore:
             )
         return changed
 
+    def prepare_run_retry(
+        self,
+        run_id: int,
+        *,
+        max_attempts: int,
+        now: int | None = None,
+    ) -> bool:
+        timestamp = int(time.time() if now is None else now)
+        with self._transaction() as cursor:
+            row = cursor.execute(
+                "SELECT task_id, attempt FROM subagent_runs WHERE run_id = ?",
+                (int(run_id),),
+            ).fetchone()
+            if row is None or int(row["attempt"]) >= int(max_attempts):
+                return False
+            cursor.execute(
+                """
+                UPDATE subagent_runs
+                SET status = 'pending', last_error = '', started_at = NULL,
+                    finished_at = NULL
+                WHERE run_id = ? AND status = 'failed'
+                """,
+                (int(run_id),),
+            )
+            changed = cursor.rowcount == 1
+            task_id = int(row["task_id"])
+            attempt = int(row["attempt"])
+        if changed:
+            self.append_event(
+                task_id,
+                "run.retry_scheduled",
+                {
+                    "run_id": int(run_id),
+                    "attempt": attempt,
+                    "max_attempts": int(max_attempts),
+                    "scheduled_at": timestamp,
+                },
+                run_id=run_id,
+                now=timestamp,
+            )
+        return changed
+
+    def run_retry_safe(self, run_id: int) -> bool:
+        """Only retry when no successful non-idempotent side effect was observed."""
+
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT payload_json FROM subagent_events
+                WHERE run_id = ? AND event_type = 'agent.tool_finished'
+                ORDER BY sequence
+                """,
+                (int(run_id),),
+            ).fetchall()
+        for row in rows:
+            payload = _json_object(row["payload_json"])
+            if str(payload.get("idempotency") or "") not in {
+                "pure",
+                "idempotent",
+            } and str(payload.get("state") or "") in {
+                "succeeded",
+                "handed-off",
+                "outcome-unknown",
+                "",
+            }:
+                return False
+        return True
+
     def finish_run(
         self,
         run_id: int,
@@ -664,6 +583,180 @@ class SubAgentStore:
                     ),
                 )
 
+    def append_checkpoint(
+        self,
+        task_id: int,
+        phase: str,
+        state: Mapping[str, Any],
+        *,
+        run_id: int | None = None,
+        now: int | None = None,
+    ) -> dict[str, Any]:
+        timestamp = int(time.time() if now is None else now)
+        with self._transaction() as cursor:
+            row = cursor.execute(
+                """
+                SELECT COALESCE(MAX(sequence), 0) AS sequence
+                FROM subagent_checkpoints WHERE task_id = ?
+                """,
+                (int(task_id),),
+            ).fetchone()
+            sequence = int(row["sequence"] if row is not None else 0) + 1
+            stored = cursor.execute(
+                """
+                INSERT INTO subagent_checkpoints (
+                    task_id, run_id, sequence, phase, state_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                RETURNING checkpoint_id
+                """,
+                (
+                    int(task_id),
+                    run_id,
+                    sequence,
+                    str(phase)[:120],
+                    _json_dump(state),
+                    timestamp,
+                ),
+            ).fetchone()
+        checkpoint = {
+            "checkpoint_id": int(stored["checkpoint_id"]),
+            "task_id": int(task_id),
+            "run_id": run_id,
+            "sequence": sequence,
+            "phase": str(phase)[:120],
+            "state": dict(state),
+            "created_at": timestamp,
+        }
+        self.append_event(
+            task_id,
+            "checkpoint.created",
+            {
+                "checkpoint_id": checkpoint["checkpoint_id"],
+                "phase": checkpoint["phase"],
+            },
+            run_id=run_id,
+            now=timestamp,
+        )
+        return checkpoint
+
+    def checkpoints(self, task_id: int, *, limit: int = 200) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT * FROM subagent_checkpoints WHERE task_id = ?
+                ORDER BY sequence ASC LIMIT ?
+                """,
+                (int(task_id), min(max(int(limit), 1), 1000)),
+            ).fetchall()
+        return [
+            {
+                "checkpoint_id": int(row["checkpoint_id"]),
+                "task_id": int(row["task_id"]),
+                "run_id": int(row["run_id"]) if row["run_id"] is not None else None,
+                "sequence": int(row["sequence"]),
+                "phase": str(row["phase"]),
+                "state": _json_object(row["state_json"]),
+                "created_at": int(row["created_at"]),
+            }
+            for row in rows
+        ]
+
+    def save_run_context(
+        self,
+        task_id: int,
+        run_id: int,
+        context: AgentContext,
+        *,
+        now: int | None = None,
+    ) -> AgentContext:
+        """Persist the immutable context visible to one Agent run."""
+
+        timestamp = int(time.time() if now is None else now)
+        payload = context.as_payload()
+        with self._transaction() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO subagent_run_contexts (
+                    task_id, run_id, role, scope_key, context_hash,
+                    context_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id) DO NOTHING
+                """,
+                (
+                    int(task_id),
+                    int(run_id),
+                    context.role,
+                    context.scope_key,
+                    context.context_hash,
+                    _json_dump(payload),
+                    timestamp,
+                ),
+            )
+            inserted = cursor.rowcount == 1
+            row = cursor.execute(
+                """
+                SELECT task_id, run_id, role, scope_key, context_hash, context_json
+                FROM subagent_run_contexts WHERE run_id = ?
+                """,
+                (int(run_id),),
+            ).fetchone()
+        if row is None or int(row["task_id"]) != int(task_id):
+            raise RuntimeError("Sub-Agent context does not belong to this task")
+        stored = AgentContext.from_payload(_json_object(row["context_json"]))
+        if (
+            stored.role != str(row["role"])
+            or stored.scope_key != str(row["scope_key"])
+            or stored.context_hash != str(row["context_hash"])
+        ):
+            raise RuntimeError("Sub-Agent context snapshot failed integrity validation")
+        if inserted:
+            self.append_event(
+                task_id,
+                "run.context_frozen",
+                {
+                    "run_id": int(run_id),
+                    "role": context.role,
+                    "context_hash": context.context_hash,
+                    "agent_definition_version": context.agent_definition_version,
+                },
+                run_id=run_id,
+                now=timestamp,
+            )
+        return stored
+
+    def run_context(self, run_id: int) -> AgentContext | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT context_json FROM subagent_run_contexts WHERE run_id = ?",
+                (int(run_id),),
+            ).fetchone()
+        if row is None:
+            return None
+        return AgentContext.from_payload(_json_object(row["context_json"]))
+
+    def run_contexts(self, task_id: int) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT * FROM subagent_run_contexts
+                WHERE task_id = ? ORDER BY context_id
+                """,
+                (int(task_id),),
+            ).fetchall()
+        return [
+            {
+                "context_id": int(row["context_id"]),
+                "task_id": int(row["task_id"]),
+                "run_id": int(row["run_id"]),
+                "role": str(row["role"]),
+                "scope_key": str(row["scope_key"]),
+                "context_hash": str(row["context_hash"]),
+                "context": _json_object(row["context_json"]),
+                "created_at": int(row["created_at"]),
+            }
+            for row in rows
+        ]
+
     def request_cancel(self, task_id: int, *, now: int | None = None) -> bool:
         timestamp = int(time.time() if now is None else now)
         with self._transaction() as cursor:
@@ -671,7 +764,9 @@ class SubAgentStore:
                 """
                 UPDATE subagent_tasks
                 SET cancel_requested = ?, status = 'cancelling', updated_at = ?
-                WHERE task_id = ? AND status IN ('received', 'planning', 'running', 'verifying')
+                WHERE task_id = ? AND status IN (
+                    'received', 'planning', 'running', 'verifying', 'interrupted'
+                )
                 """,
                 (True, timestamp, int(task_id)),
             )
@@ -687,6 +782,39 @@ class SubAgentStore:
                 (int(task_id),),
             ).fetchone()
         return bool(row is not None and row["cancel_requested"])
+
+    def prepare_resume(self, task_id: int, *, now: int | None = None) -> bool:
+        timestamp = int(time.time() if now is None else now)
+        with self._transaction() as cursor:
+            cursor.execute(
+                """
+                UPDATE subagent_tasks
+                SET status = 'running', last_error = '', updated_at = ?,
+                    finished_at = NULL
+                WHERE task_id = ? AND status = 'interrupted'
+                    AND cancel_requested = ?
+                """,
+                (timestamp, int(task_id), False),
+            )
+            changed = cursor.rowcount == 1
+            if changed:
+                cursor.execute(
+                    """
+                    UPDATE subagent_runs
+                    SET status = 'pending', last_error = '', started_at = NULL,
+                        finished_at = NULL
+                    WHERE task_id = ? AND status = 'interrupted'
+                    """,
+                    (int(task_id),),
+                )
+        if changed:
+            self.append_event(
+                task_id,
+                "task.resumed",
+                {"reason": "checkpoint_resume"},
+                now=timestamp,
+            )
+        return changed
 
     def get(self, task_id: int) -> TaskRecord | None:
         with self._lock:
@@ -757,17 +885,56 @@ class SubAgentStore:
             ).fetchall()
         task_ids = [int(row["task_id"]) for row in rows]
         for task_id in task_ids:
-            self.settle_unfinished_runs(
+            interrupted_runs: list[int] = []
+            with self._transaction() as cursor:
+                rows = cursor.execute(
+                    """
+                    SELECT run_id FROM subagent_runs
+                    WHERE task_id = ? AND status = 'running'
+                    ORDER BY run_id
+                    """,
+                    (task_id,),
+                ).fetchall()
+                interrupted_runs = [int(row["run_id"]) for row in rows]
+                cursor.execute(
+                    """
+                    UPDATE subagent_runs
+                    SET status = 'interrupted', last_error = ?, finished_at = NULL
+                    WHERE task_id = ? AND status = 'running'
+                    """,
+                    ("机器人重启，等待从检查点恢复", task_id),
+                )
+                cursor.execute(
+                    """
+                    UPDATE subagent_tasks
+                    SET status = 'interrupted', last_error = ?, updated_at = ?,
+                        finished_at = NULL
+                    WHERE task_id = ?
+                    """,
+                    ("机器人重启，等待从检查点恢复", timestamp, task_id),
+                )
+            for run_id in interrupted_runs:
+                self.append_event(
+                    task_id,
+                    "run.interrupted",
+                    {"run_id": run_id, "reason": "process_restart"},
+                    run_id=run_id,
+                    now=timestamp,
+                )
+            self.append_checkpoint(
                 task_id,
-                running_status="failed",
-                pending_status="skipped",
-                error="机器人重启时任务仍在执行",
+                "process_interrupted",
+                {
+                    "reason": "process_restart",
+                    "interrupted_runs": interrupted_runs,
+                    "pending_runs_preserved": True,
+                },
                 now=timestamp,
             )
-            self.set_task_state(
+            self.append_event(
                 task_id,
-                "failed",
-                error="机器人重启时任务仍在执行",
+                "task.interrupted",
+                {"reason": "process_restart"},
                 now=timestamp,
             )
         return len(task_ids)
@@ -851,6 +1018,30 @@ class SubAgentStore:
                     created_at INTEGER NOT NULL,
                     UNIQUE(task_id, handle)
                 );
+                CREATE TABLE IF NOT EXISTS subagent_checkpoints (
+                    checkpoint_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id INTEGER NOT NULL REFERENCES subagent_tasks(task_id) ON DELETE CASCADE,
+                    run_id INTEGER REFERENCES subagent_runs(run_id) ON DELETE SET NULL,
+                    sequence INTEGER NOT NULL,
+                    phase TEXT NOT NULL,
+                    state_json TEXT NOT NULL DEFAULT '{}',
+                    created_at INTEGER NOT NULL,
+                    UNIQUE(task_id, sequence)
+                );
+                CREATE INDEX IF NOT EXISTS idx_subagent_checkpoints_task_sequence
+                    ON subagent_checkpoints(task_id, sequence);
+                CREATE TABLE IF NOT EXISTS subagent_run_contexts (
+                    context_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id INTEGER NOT NULL REFERENCES subagent_tasks(task_id) ON DELETE CASCADE,
+                    run_id INTEGER NOT NULL UNIQUE REFERENCES subagent_runs(run_id) ON DELETE CASCADE,
+                    role TEXT NOT NULL,
+                    scope_key TEXT NOT NULL,
+                    context_hash TEXT NOT NULL,
+                    context_json TEXT NOT NULL,
+                    created_at INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_subagent_run_contexts_task
+                    ON subagent_run_contexts(task_id, run_id);
                 """
             )
 
@@ -924,6 +1115,17 @@ WorkerReportedState = Literal["success", "partial", "failed"]
 
 
 @dataclass(frozen=True)
+class AgentExecutionHooks:
+    approval_checker: Callable[[Any, str, dict[str, Any]], Any] | None = None
+    handoff_tool: Callable[
+        [str, dict[str, Any], str], Awaitable[str | None]
+    ] | None = None
+    compensate_tool: Callable[
+        [str, dict[str, Any], str], Awaitable[str | None]
+    ] | None = None
+
+
+@dataclass(frozen=True)
 class StepOutcome:
     step: TaskStep
     run: RunRecord
@@ -953,6 +1155,7 @@ class SubAgentCoordinator:
         max_tool_rounds: int = 6,
         timeout_seconds: int = 600,
         profile_overrides: Mapping[str, str] | None = None,
+        registry: AgentRegistry | None = None,
     ) -> None:
         self.store = store
         self.model_catalog = model_catalog
@@ -961,20 +1164,14 @@ class SubAgentCoordinator:
         self.max_parallelism = min(max(int(max_parallelism), 1), 6)
         self.max_tool_rounds = min(max(int(max_tool_rounds), 1), 12)
         self.timeout_seconds = min(max(int(timeout_seconds), 30), 3600)
+        self.max_adaptive_repairs = min(self.max_parallelism, 2)
         self.profile_overrides = dict(profile_overrides or {})
+        self.registry = registry or DEFAULT_AGENT_REGISTRY
         self._active: dict[int, asyncio.Task[Any]] = {}
 
     @staticmethod
     def manifest() -> list[dict[str, object]]:
-        return [
-            {
-                "role": spec.role,
-                "title": spec.title,
-                "description": spec.description,
-                "allowed_tools": sorted(spec.allowed_tools),
-            }
-            for spec in AGENT_SPECS.values()
-        ]
+        return DEFAULT_AGENT_REGISTRY.manifest()
 
     def cancel(self, task_id: int) -> bool:
         changed = self.store.request_cancel(task_id)
@@ -983,6 +1180,102 @@ class SubAgentCoordinator:
             running.cancel()
             return True
         return changed
+
+    async def resume(
+        self,
+        task_id: int,
+        *,
+        scope_key: str,
+        requester_user_id: int,
+        selected_profile: ModelProfile,
+        tools: Sequence[ToolDefinition],
+        execute_tool: ToolExecutor,
+        parent_trace: DeepSeekTrace | None = None,
+        progress: ProgressCallback | None = None,
+        hooks: AgentExecutionHooks | None = None,
+    ) -> str:
+        """Resume an interrupted task without replanning or widening context."""
+
+        task = self.store.get(task_id)
+        if task is None:
+            raise ValueError(f"Sub-Agent 任务 task#{task_id} 不存在。")
+        if task.scope_key != scope_key or task.requester_user_id != requester_user_id:
+            raise ValueError("不能恢复其他群或其他用户发起的 Sub-Agent 任务。")
+        if task.status != "interrupted":
+            raise ValueError(f"{task.handle} 当前状态是 {task.status}，不能断点续跑。")
+        context = _checkpoint_context_packet(self.store.checkpoints(task_id))
+        if context is None:
+            raise RuntimeError(f"{task.handle} 缺少可恢复的上下文检查点。")
+        if context.scope_key != task.scope_key:
+            raise RuntimeError(f"{task.handle} 的检查点作用域不一致。")
+        if not self.store.prepare_resume(task_id):
+            raise RuntimeError(f"{task.handle} 未能进入恢复状态。")
+
+        current = asyncio.current_task()
+        if current is not None:
+            self._active[task.task_id] = current
+        self.store.append_checkpoint(
+            task.task_id,
+            "resume_started",
+            {"mode": str(task.plan.get("mode") or "workflow")},
+        )
+        await self._notify_progress(
+            progress,
+            f"{task.handle} 正在从检查点继续，已完成步骤不会重跑。",
+        )
+        try:
+            async with asyncio.timeout(self.timeout_seconds):
+                result = await self._resume_task(
+                    task,
+                    context=context,
+                    selected_profile=selected_profile,
+                    tools=tools,
+                    execute_tool=execute_tool,
+                    parent_trace=parent_trace,
+                    progress=progress,
+                    hooks=hooks,
+                )
+                resumed_task = self.store.get(task.task_id)
+                self.store.append_checkpoint(
+                    task.task_id,
+                    "resume_completed",
+                    {
+                        "status": resumed_task.status if resumed_task is not None else "unknown"
+                    },
+                )
+                return result
+        except asyncio.CancelledError:
+            self.store.settle_unfinished_runs(
+                task.task_id,
+                running_status="cancelled",
+                pending_status="skipped",
+                error="任务已取消",
+            )
+            self.store.set_task_state(task.task_id, "cancelled", error="任务已取消")
+            raise
+        except TimeoutError:
+            message = f"任务恢复后超过 {self.timeout_seconds} 秒，已停止。"
+            self.store.settle_unfinished_runs(
+                task.task_id,
+                running_status="failed",
+                pending_status="skipped",
+                error=message,
+            )
+            self.store.set_task_state(task.task_id, "failed", error=message)
+            return f"{task.handle} {message}"
+        except Exception as exc:
+            message = str(exc) or exc.__class__.__name__
+            self.store.settle_unfinished_runs(
+                task.task_id,
+                running_status="failed",
+                pending_status="skipped",
+                error=message,
+            )
+            self.store.set_task_state(task.task_id, "failed", error=message)
+            self.logger.warning("Sub-Agent resume %s failed: %s", task.handle, message)
+            return f"{task.handle} 恢复失败：{message}"
+        finally:
+            self._active.pop(task.task_id, None)
 
     async def run(
         self,
@@ -998,6 +1291,8 @@ class SubAgentCoordinator:
         execute_tool: ToolExecutor,
         parent_trace: DeepSeekTrace | None = None,
         progress: ProgressCallback | None = None,
+        context_packet: ContextPacket | None = None,
+        hooks: AgentExecutionHooks | None = None,
     ) -> str:
         task = self.store.create_task(
             scope_key=scope_key,
@@ -1011,16 +1306,30 @@ class SubAgentCoordinator:
         current = asyncio.current_task()
         if current is not None:
             self._active[task.task_id] = current
+        packet = context_packet or ContextPacket.from_legacy(
+            scope_key=scope_key,
+            conversation_id=conversation_id,
+            requester_user_id=requester_user_id,
+            trigger_message_id=trigger_message_id,
+            objective=objective,
+            context=context,
+        )
+        self.store.append_checkpoint(
+            task.task_id,
+            "task_received",
+            {"mode": "workflow", "context_packet": packet.as_payload()},
+        )
         try:
             async with asyncio.timeout(self.timeout_seconds):
                 return await self._run_task(
                     task,
-                    context=context,
+                    context=packet,
                     selected_profile=selected_profile,
                     tools=tools,
                     execute_tool=execute_tool,
                     parent_trace=parent_trace,
                     progress=progress,
+                    hooks=hooks,
                 )
         except asyncio.CancelledError:
             self.store.settle_unfinished_runs(
@@ -1055,16 +1364,150 @@ class SubAgentCoordinator:
         finally:
             self._active.pop(task.task_id, None)
 
+    async def delegate(
+        self,
+        *,
+        role: str,
+        scope_key: str,
+        conversation_id: str,
+        requester_user_id: int,
+        trigger_message_id: int | None,
+        objective: str,
+        context: str,
+        selected_profile: ModelProfile,
+        tools: Sequence[ToolDefinition],
+        execute_tool: ToolExecutor,
+        parent_trace: DeepSeekTrace | None = None,
+        context_packet: ContextPacket | None = None,
+        hooks: AgentExecutionHooks | None = None,
+    ) -> dict[str, Any]:
+        """Run one bounded specialist without planner and synthesis model calls."""
+
+        spec = self.registry.worker(role)
+        task = self.store.create_task(
+            scope_key=scope_key,
+            conversation_id=conversation_id,
+            requester_user_id=requester_user_id,
+            trigger_message_id=trigger_message_id,
+            objective=objective,
+            max_parallelism=1,
+            max_steps=1,
+        )
+        step = TaskStep(
+            key="delegate",
+            role=spec.role,
+            objective=objective,
+            deliverable="向主 Agent 返回有证据的结构化结果",
+        )
+        plan = {"goal": objective, "mode": "delegate", "steps": [_step_payload(step)]}
+        self.store.set_task_state(task.task_id, "running", plan=plan)
+        profile = self._profile_for(spec.role, selected_profile)
+        tools_by_name = {_tool_name(tool): tool for tool in tools if _tool_name(tool)}
+        allowed = sorted(spec.allowed_tools & tools_by_name.keys())
+        run = self.store.create_run(
+            task.task_id,
+            step,
+            allowed_tools=allowed,
+            model_profile=profile.name,
+        )
+        packet = context_packet or ContextPacket.from_legacy(
+            scope_key=scope_key,
+            conversation_id=conversation_id,
+            requester_user_id=requester_user_id,
+            trigger_message_id=trigger_message_id,
+            objective=objective,
+            context=context,
+        )
+        self.store.append_checkpoint(
+            task.task_id,
+            "delegate_ready",
+            {
+                "mode": "delegate",
+                "plan": plan,
+                "context_packet": packet.as_payload(),
+            },
+            run_id=run.run_id,
+        )
+        current = asyncio.current_task()
+        if current is not None:
+            self._active[task.task_id] = current
+        try:
+            async with asyncio.timeout(min(self.timeout_seconds, spec.timeout_seconds)):
+                outcome = await self._run_step_reliably(
+                    task,
+                    step,
+                    run,
+                    context=packet,
+                    upstream={},
+                    selected_profile=selected_profile,
+                    tools_by_name=tools_by_name,
+                    execute_tool=execute_tool,
+                    hooks=hooks,
+                )
+                deliveries = await self._deliver_requested_artifacts(
+                    task,
+                    {step.key: outcome},
+                    execute_tool=execute_tool,
+                    delivered_artifacts=set(),
+                    progress=None,
+                )
+                delivery_failed = any(not bool(item.get("ok")) for item in deliveries)
+                if outcome.state == "failed":
+                    status = "failed"
+                elif outcome.state == "partial" or delivery_failed:
+                    status = "partial"
+                else:
+                    status = "completed"
+                result = {
+                    "mode": "delegate",
+                    "role": spec.role,
+                    "agent": run.handle,
+                    "result": outcome.result,
+                    "deliveries": deliveries,
+                }
+                self.store.set_task_state(
+                    task.task_id,
+                    status,
+                    result=result,
+                    error=outcome.error,
+                )
+                self.store.append_checkpoint(
+                    task.task_id,
+                    "delegate_completed",
+                    result,
+                    run_id=run.run_id,
+                )
+                return {"task": task.handle, "status": status, **result}
+        except TimeoutError:
+            message = f"{spec.title} Agent 超过 {min(self.timeout_seconds, spec.timeout_seconds)} 秒。"
+            self.store.settle_unfinished_runs(
+                task.task_id,
+                running_status="failed",
+                pending_status="skipped",
+                error=message,
+            )
+            self.store.set_task_state(task.task_id, "failed", error=message)
+            return {
+                "task": task.handle,
+                "status": "failed",
+                "mode": "delegate",
+                "role": spec.role,
+                "error": message,
+            }
+        finally:
+            self._active.pop(task.task_id, None)
+
     async def _run_task(
         self,
         task: TaskRecord,
         *,
-        context: str,
+        context: ContextPacket,
         selected_profile: ModelProfile,
         tools: Sequence[ToolDefinition],
         execute_tool: ToolExecutor,
         parent_trace: DeepSeekTrace | None,
         progress: ProgressCallback | None,
+        hooks: AgentExecutionHooks | None,
     ) -> str:
         self.store.set_task_state(task.task_id, "planning")
         await self._notify_progress(
@@ -1074,7 +1517,7 @@ class SubAgentCoordinator:
         planner_trace = DeepSeekTrace(trace_id=task.trace_id)
         planner_profile = self._profile_for("supervisor", selected_profile)
         plan_payload = await ask_deepseek_json(
-            _planner_prompt(self.max_steps),
+            _planner_prompt(self.max_steps, self.registry),
             _planner_input(task.objective, context),
             profile=planner_profile,
             trace=planner_trace,
@@ -1086,26 +1529,194 @@ class SubAgentCoordinator:
             "steps": [_step_payload(step) for step in steps],
         }
         self.store.set_task_state(task.task_id, "running", plan=normalized_plan)
+        self.store.append_checkpoint(
+            task.task_id,
+            "plan_ready",
+            {
+                "mode": "workflow",
+                "plan": normalized_plan,
+                "context_packet": context.as_payload(),
+            },
+        )
         runs: dict[str, RunRecord] = {}
         tools_by_name = {_tool_name(tool): tool for tool in tools if _tool_name(tool)}
         for step in steps:
             profile = self._profile_for(step.role, selected_profile)
-            allowed = sorted(AGENT_SPECS[step.role].allowed_tools & tools_by_name.keys())
+            allowed = sorted(
+                self.registry.worker(step.role).allowed_tools & tools_by_name.keys()
+            )
             runs[step.key] = self.store.create_run(
                 task.task_id,
                 step,
                 allowed_tools=allowed,
                 model_profile=profile.name,
             )
-        labels = "、".join(AGENT_SPECS[step.role].title for step in steps)
+        labels = "、".join(self.registry.worker(step.role).title for step in steps)
         await self._notify_progress(
             progress,
             f"{task.handle} 已拆成 {len(steps)} 步：{labels}。",
         )
 
-        completed: dict[str, StepOutcome] = {}
+        return await self._execute_workflow(
+            task,
+            steps=steps,
+            runs=runs,
+            context=context,
+            selected_profile=selected_profile,
+            tools_by_name=tools_by_name,
+            execute_tool=execute_tool,
+            parent_trace=parent_trace,
+            progress=progress,
+            hooks=hooks,
+        )
+
+    async def _resume_task(
+        self,
+        task: TaskRecord,
+        *,
+        context: ContextPacket,
+        selected_profile: ModelProfile,
+        tools: Sequence[ToolDefinition],
+        execute_tool: ToolExecutor,
+        parent_trace: DeepSeekTrace | None,
+        progress: ProgressCallback | None,
+        hooks: AgentExecutionHooks | None,
+    ) -> str:
+        stored_runs = self.store.runs(task.task_id)
+        if not stored_runs:
+            self.store.append_event(
+                task.task_id,
+                "task.replanning_after_restart",
+                {"reason": "interrupted_before_runs_created"},
+            )
+            return await self._run_task(
+                task,
+                context=context,
+                selected_profile=selected_profile,
+                tools=tools,
+                execute_tool=execute_tool,
+                parent_trace=parent_trace,
+                progress=progress,
+                hooks=hooks,
+            )
+        interrupted_ids = _interrupted_run_ids(self.store.checkpoints(task.task_id))
+        for run in stored_runs:
+            if run.run_id not in interrupted_ids or self.store.run_retry_safe(run.run_id):
+                continue
+            error = "进程中断前已发生不可安全重复的副作用，结果未知，已阻止自动续跑。"
+            result = {
+                "status": "failed",
+                "summary": "",
+                "warnings": [error],
+                "unresolved": [run.objective],
+                "metadata": {
+                    "failure_kind": "outcome_unknown",
+                    "retryable": False,
+                },
+            }
+            self.store.finish_run(run.run_id, "failed", result=result, error=error)
+            self.store.append_event(
+                task.task_id,
+                "run.resume_blocked",
+                {"run_id": run.run_id, "reason": "non_idempotent_side_effect"},
+                run_id=run.run_id,
+            )
+        stored_runs = self.store.runs(task.task_id)
+        steps = [_step_from_run(run) for run in stored_runs]
+        runs = {run.step_key: run for run in stored_runs}
+        completed = {
+            run.step_key: _outcome_from_run(task, run)
+            for run in stored_runs
+            if run.status in {"succeeded", "partial", "failed", "skipped", "cancelled"}
+        }
+        tools_by_name = {_tool_name(tool): tool for tool in tools if _tool_name(tool)}
+        mode = str(task.plan.get("mode") or "workflow")
+        if mode == "delegate":
+            run = stored_runs[0]
+            step = steps[0]
+            outcome = completed.get(step.key)
+            if outcome is None:
+                outcome = await self._run_step_reliably(
+                    task,
+                    step,
+                    run,
+                    context=context,
+                    upstream={},
+                    selected_profile=selected_profile,
+                    tools_by_name=tools_by_name,
+                    execute_tool=execute_tool,
+                    hooks=hooks,
+                )
+            deliveries = await self._deliver_requested_artifacts(
+                task,
+                {step.key: outcome},
+                execute_tool=execute_tool,
+                delivered_artifacts=_delivered_artifact_keys(self.store.checkpoints(task.task_id)),
+                progress=progress,
+            )
+            delivery_failed = any(not bool(item.get("ok")) for item in deliveries)
+            if outcome.state == "failed":
+                status = "failed"
+            elif outcome.state == "partial" or delivery_failed:
+                status = "partial"
+            else:
+                status = "completed"
+            result = {
+                "mode": "delegate",
+                "role": step.role,
+                "agent": run.handle,
+                "result": outcome.result,
+                "deliveries": deliveries,
+            }
+            self.store.set_task_state(task.task_id, status, result=result, error=outcome.error)
+            if status == "completed":
+                return f"{task.handle} 已从检查点恢复并完成。"
+            if status == "partial":
+                return f"{task.handle} 已从检查点恢复，但只完成了一部分。"
+            return f"{task.handle} 未能安全恢复：{outcome.error or '步骤失败'}"
+
+        return await self._execute_workflow(
+            task,
+            steps=steps,
+            runs=runs,
+            context=context,
+            selected_profile=selected_profile,
+            tools_by_name=tools_by_name,
+            execute_tool=execute_tool,
+            parent_trace=parent_trace,
+            progress=progress,
+            initial_completed=completed,
+            hooks=hooks,
+        )
+
+    async def _execute_workflow(
+        self,
+        task: TaskRecord,
+        *,
+        steps: Sequence[TaskStep],
+        runs: Mapping[str, RunRecord],
+        context: ContextPacket,
+        selected_profile: ModelProfile,
+        tools_by_name: Mapping[str, ToolDefinition],
+        execute_tool: ToolExecutor,
+        parent_trace: DeepSeekTrace | None,
+        progress: ProgressCallback | None,
+        initial_completed: Mapping[str, StepOutcome] | None = None,
+        hooks: AgentExecutionHooks | None = None,
+    ) -> str:
+        completed: dict[str, StepOutcome] = dict(initial_completed or {})
+        _apply_completed_repairs(completed)
         pending = {step.key: step for step in steps}
-        delivered_artifacts: set[tuple[str, str]] = set()
+        for key in completed:
+            pending.pop(key, None)
+        delivered_artifacts = _delivered_artifact_keys(
+            self.store.checkpoints(task.task_id)
+        )
+        adaptive_repairs_used = sum(
+            1
+            for item in self.store.checkpoints(task.task_id)
+            if str(item.get("phase") or "") == "adaptive_repair_planned"
+        )
 
         async def tracked_execute_tool(
             name: str,
@@ -1137,7 +1748,7 @@ class SubAgentCoordinator:
                 pending.pop(step.key, None)
                 await self._notify_progress(
                     progress,
-                    f"{task.handle} · {AGENT_SPECS[step.role].title} Agent："
+                    f"{task.handle} · {self.registry.worker(step.role).title} Agent："
                     "因上游步骤失败，已跳过。",
                 )
 
@@ -1148,14 +1759,14 @@ class SubAgentCoordinator:
             for step in ready:
                 await self._notify_progress(
                     progress,
-                    f"{task.handle} · {AGENT_SPECS[step.role].title} Agent："
+                    f"{task.handle} · {self.registry.worker(step.role).title} Agent："
                     f"{step.objective[:120]}",
                 )
             if not ready:
                 continue
             outcomes = await asyncio.gather(
                 *(
-                    self._run_step(
+                    self._run_step_reliably(
                         task,
                         step,
                         runs[step.key],
@@ -1167,16 +1778,58 @@ class SubAgentCoordinator:
                         selected_profile=selected_profile,
                         tools_by_name=tools_by_name,
                         execute_tool=tracked_execute_tool,
+                        hooks=hooks,
                     )
                     for step in ready
                 )
             )
             for outcome in outcomes:
                 completed[outcome.step.key] = outcome
+                repaired_step = _repair_target(outcome.step.key)
+                if repaired_step and outcome.usable:
+                    completed[repaired_step] = outcome
                 pending.pop(outcome.step.key, None)
                 _merge_trace(parent_trace, outcome.trace)
+            for failed in [item for item in outcomes if item.state == "failed"]:
+                if adaptive_repairs_used >= self.max_adaptive_repairs:
+                    break
+                attempted, repair = await self._attempt_adaptive_repair(
+                    task,
+                    failed,
+                    context=context,
+                    completed=completed,
+                    selected_profile=selected_profile,
+                    tools_by_name=tools_by_name,
+                    execute_tool=tracked_execute_tool,
+                    parent_trace=parent_trace,
+                    progress=progress,
+                    hooks=hooks,
+                    repair_number=adaptive_repairs_used + 1,
+                )
+                if attempted:
+                    adaptive_repairs_used += 1
+                if repair is not None:
+                    completed[repair.step.key] = repair
+                    if repair.usable:
+                        completed[failed.step.key] = repair
+            self.store.append_checkpoint(
+                task.task_id,
+                "step_batch_completed",
+                {
+                    "completed": {
+                        key: {
+                            "role": item.step.role,
+                            "status": item.state,
+                            "result": item.result,
+                            "error": item.error,
+                        }
+                        for key, item in completed.items()
+                    },
+                    "pending": sorted(pending),
+                },
+            )
             finished = "、".join(
-                f"{AGENT_SPECS[item.step.role].title}{_outcome_progress_label(item)}"
+                f"{self.registry.worker(item.step.role).title}{_outcome_progress_label(item)}"
                 for item in outcomes
             )
             await self._notify_progress(
@@ -1229,7 +1882,149 @@ class SubAgentCoordinator:
         }
         status = "partial" if degraded or delivery_failed else "completed"
         self.store.set_task_state(task.task_id, status, result=result)
+        self.store.append_checkpoint(task.task_id, "workflow_completed", result)
         return f"{task.handle}\n{final_text}" if final_text else f"{task.handle} 已完成。"
+
+    async def _attempt_adaptive_repair(
+        self,
+        task: TaskRecord,
+        failed: StepOutcome,
+        *,
+        context: ContextPacket,
+        completed: Mapping[str, StepOutcome],
+        selected_profile: ModelProfile,
+        tools_by_name: Mapping[str, ToolDefinition],
+        execute_tool: ToolExecutor,
+        parent_trace: DeepSeekTrace | None,
+        progress: ProgressCallback | None,
+        hooks: AgentExecutionHooks | None,
+        repair_number: int,
+    ) -> tuple[bool, StepOutcome | None]:
+        if not self.store.run_retry_safe(failed.run.run_id):
+            self.store.append_event(
+                task.task_id,
+                "repair.blocked",
+                {
+                    "failed_step": failed.step.key,
+                    "reason": "non_idempotent_side_effect",
+                },
+                run_id=failed.run.run_id,
+            )
+            return False, None
+        supervisor_trace = DeepSeekTrace(trace_id=task.trace_id)
+        try:
+            decision = await ask_deepseek_json(
+                _repair_planner_prompt(self.registry),
+                _repair_planner_input(task.objective, failed),
+                profile=self._profile_for("supervisor", selected_profile),
+                trace=supervisor_trace,
+            )
+        except Exception as exc:
+            self.store.append_event(
+                task.task_id,
+                "repair.planning_failed",
+                {
+                    "failed_step": failed.step.key,
+                    "error": (str(exc) or exc.__class__.__name__)[:1000],
+                },
+                run_id=failed.run.run_id,
+            )
+            return False, None
+        finally:
+            _merge_trace(parent_trace, supervisor_trace)
+
+        action = str(decision.get("action") or "accept_failure").strip().casefold()
+        role = str(decision.get("role") or failed.step.role).strip()
+        objective = str(decision.get("objective") or "").strip()
+        if action != "repair" or role not in WORKER_ROLES or not objective:
+            self.store.append_event(
+                task.task_id,
+                "repair.declined",
+                {
+                    "failed_step": failed.step.key,
+                    "reason": str(decision.get("reason") or "no safe repair")[:1000],
+                },
+                run_id=failed.run.run_id,
+            )
+            return False, None
+
+        repair_key = f"{failed.step.key}__repair_{repair_number}"[:80]
+        repair_step = TaskStep(
+            key=repair_key,
+            role=role,  # type: ignore[arg-type]
+            objective=objective[:4000],
+            deliverable=(
+                str(decision.get("deliverable") or failed.step.deliverable).strip()
+                or failed.step.deliverable
+            )[:1000],
+            dependencies=failed.step.dependencies,
+        )
+        spec = self.registry.worker(role)
+        profile = self._profile_for(role, selected_profile)
+        run = self.store.create_run(
+            task.task_id,
+            repair_step,
+            allowed_tools=sorted(spec.allowed_tools & tools_by_name.keys()),
+            model_profile=profile.name,
+        )
+        current_plan = dict(self.store.get(task.task_id).plan)  # type: ignore[union-attr]
+        adaptive_steps = list(current_plan.get("adaptive_steps") or [])
+        adaptive_steps.append(
+            {
+                **_step_payload(repair_step),
+                "depends_on": [failed.step.key],
+                "replaces": failed.step.key,
+                "reason": str(decision.get("reason") or "")[:1000],
+            }
+        )
+        current_plan["adaptive_steps"] = adaptive_steps
+        self.store.set_task_state(task.task_id, "running", plan=current_plan)
+        self.store.append_checkpoint(
+            task.task_id,
+            "adaptive_repair_planned",
+            {
+                "failed_step": failed.step.key,
+                "repair_step": _step_payload(repair_step),
+                "repair_run_id": run.run_id,
+                "reason": str(decision.get("reason") or "")[:1000],
+            },
+            run_id=run.run_id,
+        )
+        await self._notify_progress(
+            progress,
+            f"{task.handle} · 主控 Agent：{failed.step.key} 失败，已追加一次受限修复。",
+        )
+        upstream = {
+            dependency: completed[dependency].result
+            for dependency in repair_step.dependencies
+            if dependency in completed
+        }
+        upstream["failed_attempt"] = failed.result
+        repair = await self._run_step_reliably(
+            task,
+            repair_step,
+            run,
+            context=context,
+            upstream=upstream,
+            selected_profile=selected_profile,
+            tools_by_name=tools_by_name,
+            execute_tool=execute_tool,
+            hooks=hooks,
+        )
+        repair.result.setdefault("metadata", {})["replaces_step"] = failed.step.key
+        self.store.append_checkpoint(
+            task.task_id,
+            "adaptive_repair_completed",
+            {
+                "failed_step": failed.step.key,
+                "repair_step": repair.step.key,
+                "repair_run_id": repair.run.run_id,
+                "status": repair.state,
+            },
+            run_id=repair.run.run_id,
+        )
+        _merge_trace(parent_trace, repair.trace)
+        return True, repair
 
     async def _deliver_requested_artifacts(
         self,
@@ -1293,6 +2088,20 @@ class SubAgentCoordinator:
                     payload.setdefault("filename", filename)
                 raw_artifact["delivery"] = payload
                 deliveries.append(payload)
+                self.store.append_checkpoint(
+                    task.task_id,
+                    "artifact_delivery",
+                    {
+                        "run_id": outcome.run.run_id,
+                        "sandbox_id": sandbox_id,
+                        "path": path,
+                        "filename": filename,
+                        "ok": bool(payload.get("ok")),
+                        "already_delivered": bool(payload.get("already_delivered")),
+                        "error": str(payload.get("error") or "")[:1000],
+                    },
+                    run_id=outcome.run.run_id,
+                )
 
                 if bool(payload.get("ok")):
                     facts = outcome.result.setdefault("facts", [])
@@ -1313,24 +2122,56 @@ class SubAgentCoordinator:
         step: TaskStep,
         run: RunRecord,
         *,
-        context: str,
+        context: ContextPacket,
         upstream: Mapping[str, Mapping[str, Any]],
         selected_profile: ModelProfile,
         tools_by_name: Mapping[str, ToolDefinition],
         execute_tool: ToolExecutor,
+        hooks: AgentExecutionHooks | None = None,
     ) -> StepOutcome:
-        self.store.start_run(run.run_id)
         profile = self._profile_for(step.role, selected_profile)
-        spec = AGENT_SPECS[step.role]
+        spec = self.registry.worker(step.role)
+        agent_context = self.store.run_context(run.run_id)
+        if agent_context is None:
+            agent_context = self.store.save_run_context(
+                task.task_id,
+                run.run_id,
+                context.for_agent(spec, upstream=upstream),
+            )
+        self.store.start_run(run.run_id)
         allowed_tools = [
             tools_by_name[name]
             for name in sorted(spec.allowed_tools)
             if name in tools_by_name
         ]
         trace = DeepSeekTrace(trace_id=task.trace_id)
+
+        async def record_agent_event(event: AgentLoopEvent) -> None:
+            self.store.append_event(
+                task.task_id,
+                f"agent.{event.kind}",
+                {
+                    "agent_sequence": event.sequence,
+                    "tool_name": event.tool_name,
+                    "arguments": event.arguments,
+                    "result": event.result[:8000],
+                    "state": event.state,
+                    "note": event.note[:4000],
+                    "call_id": event.call_id,
+                    "fingerprint": event.fingerprint,
+                    "risk": event.risk,
+                    "idempotency": event.idempotency,
+                    "side_effects": list(event.side_effects),
+                    "execution_mode": event.execution_mode,
+                    "approval": event.approval,
+                    "duration_ms": event.duration_ms,
+                },
+                run_id=run.run_id,
+            )
+
         try:
             answer = await ask_deepseek_with_tools(
-                _worker_input(task.objective, step, context, upstream),
+                _worker_input(task.objective, step, agent_context),
                 [],
                 allowed_tools,
                 execute_tool,
@@ -1338,6 +2179,10 @@ class SubAgentCoordinator:
                 max_tool_rounds=self.max_tool_rounds,
                 tool_context=_worker_prompt(spec),
                 trace=trace,
+                event_sink=record_agent_event,
+                approval_checker=(hooks.approval_checker if hooks else None),
+                handoff_tool=(hooks.handoff_tool if hooks else None),
+                compensate_tool=(hooks.compensate_tool if hooks else None),
             )
             result = _parse_worker_result(answer)
             state = _worker_outcome_state(result)
@@ -1368,15 +2213,97 @@ class SubAgentCoordinator:
             raise
         except Exception as exc:
             error = str(exc) or exc.__class__.__name__
-            self.store.finish_run(run.run_id, "failed", error=error)
+            retryable = _is_retryable_worker_exception(exc)
+            result = {
+                "status": "failed",
+                "summary": "",
+                "facts": [],
+                "artifacts": [],
+                "citations": [],
+                "warnings": [error],
+                "unresolved": [step.objective],
+                "confidence": 0.0,
+                "metadata": {
+                    "failure_kind": "exception",
+                    "exception_type": exc.__class__.__name__,
+                    "retryable": retryable,
+                },
+            }
+            self.store.finish_run(
+                run.run_id,
+                "failed",
+                result=result,
+                error=error,
+            )
             return StepOutcome(
                 step=step,
                 run=run,
-                result={"status": "failed", "summary": "", "warnings": [error]},
+                result=result,
                 trace=trace,
                 state="failed",
                 error=error,
             )
+
+    async def _run_step_reliably(
+        self,
+        task: TaskRecord,
+        step: TaskStep,
+        run: RunRecord,
+        *,
+        context: ContextPacket,
+        upstream: Mapping[str, Mapping[str, Any]],
+        selected_profile: ModelProfile,
+        tools_by_name: Mapping[str, ToolDefinition],
+        execute_tool: ToolExecutor,
+        hooks: AgentExecutionHooks | None = None,
+    ) -> StepOutcome:
+        spec = self.registry.worker(step.role)
+        while True:
+            outcome = await self._run_step(
+                task,
+                step,
+                run,
+                context=context,
+                upstream=upstream,
+                selected_profile=selected_profile,
+                tools_by_name=tools_by_name,
+                execute_tool=execute_tool,
+                hooks=hooks,
+            )
+            if outcome.usable or not _retryable_outcome(outcome):
+                return outcome
+            if not self.store.run_retry_safe(run.run_id):
+                outcome.result.setdefault("warnings", []).append(
+                    "该 Agent 已产生不可安全重复的副作用，已停止自动重试。"
+                )
+                self.store.append_event(
+                    task.task_id,
+                    "run.retry_blocked",
+                    {"run_id": run.run_id, "reason": "non_idempotent_side_effect"},
+                    run_id=run.run_id,
+                )
+                return outcome
+            current = next(
+                (item for item in self.store.runs(task.task_id) if item.run_id == run.run_id),
+                run,
+            )
+            if not self.store.prepare_run_retry(
+                run.run_id,
+                max_attempts=spec.max_attempts,
+            ):
+                return outcome
+            self.store.append_checkpoint(
+                task.task_id,
+                "run_retry",
+                {
+                    "run_id": run.run_id,
+                    "role": step.role,
+                    "next_attempt": current.attempt + 1,
+                    "reason": outcome.error[:1000],
+                },
+                run_id=run.run_id,
+            )
+            await asyncio.sleep(min(2 ** max(current.attempt - 1, 0), 4))
 
     def _skip_step(
         self,
@@ -1458,9 +2385,13 @@ def parse_profile_overrides(raw: str) -> dict[str, str]:
     return result
 
 
-def _planner_prompt(max_steps: int) -> str:
+def _planner_prompt(
+    max_steps: int,
+    registry: AgentRegistry = DEFAULT_AGENT_REGISTRY,
+) -> str:
     roles = "\n".join(
-        f"- {role}: {AGENT_SPECS[role].description}" for role in WORKER_ROLES
+        f"- {role}: {registry.worker(role).description}"
+        for role in registry.worker_roles
     )
     return f"""你是 Kennethbot 的任务主控。把用户目标拆成最少且足够的可执行步骤。
 只允许以下固定角色：
@@ -1477,10 +2408,10 @@ def _planner_prompt(max_steps: int) -> str:
 {{"goal":"...","steps":[{{"id":"step_id","agent":"researcher","depends_on":[],"objective":"...","deliverable":"..."}}]}}"""
 
 
-def _planner_input(objective: str, context: str) -> str:
+def _planner_input(objective: str, context: ContextPacket) -> str:
     return (
         f"[用户目标]\n{objective}\n\n"
-        f"[必要会话上下文]\n{context[-12000:] if context else '无'}"
+        f"[宿主筛选的任务上下文]\n{context.render_for_planner()}"
     )
 
 
@@ -1579,70 +2510,137 @@ def _worker_prompt(spec: AgentSpec) -> str:
 def _worker_input(
     goal: str,
     step: TaskStep,
-    context: str,
-    upstream: Mapping[str, Mapping[str, Any]],
+    context: AgentContext,
 ) -> str:
     return (
         f"[总目标]\n{goal}\n\n"
         f"[你的步骤]\n{step.objective}\n\n"
         f"[交付标准]\n{step.deliverable}\n\n"
-        f"[上游结果]\n{_json_dump(upstream)}\n\n"
-        f"[必要会话上下文]\n{context[-10000:] if context else '无'}"
+        f"[你的独立上下文快照]\n{context.rendered_context}\n\n"
+        f"[上下文版本]\nagent-v{context.agent_definition_version} "
+        f"sha256:{context.context_hash}"
+    )
+
+
+def _repair_planner_prompt(registry: AgentRegistry) -> str:
+    roles = "\n".join(
+        f"- {role}: {registry.worker(role).description}"
+        for role in registry.worker_roles
+    )
+    return f"""你是 Kennethbot 的故障恢复主控。只有原步骤失败后才会调用你。
+判断是否值得追加一次有明确边界的修复步骤。不要重画整个计划，不要重复已完成工作，
+也不要为了看起来积极而盲目重试。可用角色：
+{roles}
+
+输出 JSON：
+{{"action":"repair 或 accept_failure","role":"researcher","objective":"可独立验收的修复目标","deliverable":"交付标准","reason":"原因"}}"""
+
+
+def _repair_planner_input(goal: str, failed: StepOutcome) -> str:
+    return (
+        f"[原始目标]\n{goal}\n\n"
+        f"[失败步骤]\n{_json_dump(_step_payload(failed.step))}\n\n"
+        f"[失败结果]\n{_json_dump(failed.result)}\n\n"
+        f"[错误]\n{failed.error}"
+    )
+
+
+def _repair_target(step_key: str) -> str | None:
+    match = re.fullmatch(r"(.+)__repair_[1-9][0-9]*", step_key)
+    return match.group(1) if match else None
+
+
+def _apply_completed_repairs(completed: dict[str, StepOutcome]) -> None:
+    for key, outcome in tuple(completed.items()):
+        target = _repair_target(key)
+        if target and outcome.usable:
+            completed[target] = outcome
+
+
+def _checkpoint_context_packet(
+    checkpoints: Sequence[Mapping[str, Any]],
+) -> ContextPacket | None:
+    for checkpoint in reversed(checkpoints):
+        state = checkpoint.get("state")
+        if not isinstance(state, Mapping):
+            continue
+        payload = state.get("context_packet")
+        if isinstance(payload, Mapping):
+            return ContextPacket.from_payload(payload)
+    return None
+
+
+def _delivered_artifact_keys(
+    checkpoints: Sequence[Mapping[str, Any]],
+) -> set[tuple[str, str]]:
+    delivered: set[tuple[str, str]] = set()
+    for checkpoint in checkpoints:
+        if str(checkpoint.get("phase") or "") != "artifact_delivery":
+            continue
+        state = checkpoint.get("state")
+        if not isinstance(state, Mapping) or not bool(state.get("ok")):
+            continue
+        sandbox_id = str(state.get("sandbox_id") or "").strip()
+        path = str(state.get("path") or "").strip()
+        if sandbox_id and path:
+            delivered.add((sandbox_id, path))
+    return delivered
+
+
+def _interrupted_run_ids(
+    checkpoints: Sequence[Mapping[str, Any]],
+) -> set[int]:
+    for checkpoint in reversed(checkpoints):
+        if str(checkpoint.get("phase") or "") != "process_interrupted":
+            continue
+        state = checkpoint.get("state")
+        if not isinstance(state, Mapping):
+            return set()
+        raw = state.get("interrupted_runs")
+        if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+            return set()
+        return {
+            int(item)
+            for item in raw
+            if str(item).strip().isdigit() and int(item) > 0
+        }
+    return set()
+
+
+def _step_from_run(run: RunRecord) -> TaskStep:
+    return TaskStep(
+        key=run.step_key,
+        role=run.role,  # type: ignore[arg-type]
+        objective=run.objective,
+        deliverable=run.deliverable,
+        dependencies=run.dependencies,
+    )
+
+
+def _outcome_from_run(task: TaskRecord, run: RunRecord) -> StepOutcome:
+    states: dict[str, WorkerOutcomeState] = {
+        "succeeded": "success",
+        "partial": "partial",
+        "failed": "failed",
+        "cancelled": "failed",
+        "skipped": "skipped",
+    }
+    return StepOutcome(
+        step=_step_from_run(run),
+        run=run,
+        result=dict(run.result),
+        trace=DeepSeekTrace(trace_id=task.trace_id),
+        state=states.get(run.status, "failed"),
+        error=run.last_error,
     )
 
 
 def _parse_worker_result(answer: str) -> dict[str, Any]:
-    content = answer.strip()
-    if content.startswith("```"):
-        content = content.split("\n", 1)[-1]
-        if content.rstrip().endswith("```"):
-            content = content.rstrip()[:-3].rstrip()
-    try:
-        payload = json.loads(content)
-    except json.JSONDecodeError:
-        return {
-            "status": "partial",
-            "summary": answer.strip(),
-            "facts": [],
-            "artifacts": [],
-            "citations": [],
-            "warnings": ["Agent 返回了非结构化结果，主控已保留原文。"],
-            "unresolved": [],
-            "confidence": 0.5,
-        }
-    if not isinstance(payload, dict):
-        raise RuntimeError("Sub-Agent result must be a JSON object")
-    return _normalize_worker_result(payload)
+    return AgentResult.parse(answer).as_payload()
 
 
 def _normalize_worker_result(payload: Mapping[str, Any]) -> dict[str, Any]:
-    result = dict(payload)
-    raw_status = str(payload.get("status") or "").strip().casefold()
-    if raw_status in {"failed", "failure", "error", "cancelled", "skipped"}:
-        status = "failed"
-    elif raw_status in {"partial", "degraded", "incomplete"}:
-        status = "partial"
-    elif raw_status in {"success", "succeeded", "completed", "ok"}:
-        status = "success"
-    else:
-        status = "partial" if _string_list(payload.get("unresolved")) else "success"
-
-    result["status"] = status
-    result["summary"] = str(payload.get("summary") or "").strip()
-    for key in ("facts", "citations", "warnings", "unresolved"):
-        result[key] = _string_list(payload.get(key))
-    artifacts = payload.get("artifacts")
-    result["artifacts"] = (
-        [dict(item) for item in artifacts if isinstance(item, Mapping)]
-        if isinstance(artifacts, list)
-        else []
-    )
-    try:
-        confidence = float(payload.get("confidence", 0.5))
-    except (TypeError, ValueError):
-        confidence = 0.5
-    result["confidence"] = min(max(confidence, 0.0), 1.0)
-    return result
+    return AgentResult.from_payload(payload).as_payload()
 
 
 def _string_list(value: Any) -> list[str]:
@@ -1658,6 +2656,43 @@ def _worker_outcome_state(result: Mapping[str, Any]) -> WorkerReportedState:
     if status in {"failed", "failure", "error", "cancelled", "skipped"}:
         return "failed"
     return "success"
+
+
+def _retryable_outcome(outcome: StepOutcome) -> bool:
+    metadata = outcome.result.get("metadata")
+    return bool(
+        outcome.state == "failed"
+        and isinstance(metadata, Mapping)
+        and metadata.get("retryable") is True
+    )
+
+
+def _is_retryable_worker_exception(exc: BaseException) -> bool:
+    if isinstance(exc, (DeepSeekConfigError, ValueError, PermissionError)):
+        return False
+    if isinstance(
+        exc,
+        (TimeoutError, asyncio.TimeoutError, ConnectionError, OSError),
+    ):
+        return True
+    normalized = str(exc).casefold()
+    return any(
+        marker in normalized
+        for marker in (
+            "timeout",
+            "timed out",
+            "temporar",
+            "connection",
+            "network",
+            "rate limit",
+            "429",
+            "502",
+            "503",
+            "504",
+            "模型",
+            "provider",
+        )
+    )
 
 
 def _worker_failure_message(result: Mapping[str, Any]) -> str:

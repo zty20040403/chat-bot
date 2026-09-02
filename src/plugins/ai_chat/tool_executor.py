@@ -41,6 +41,7 @@ from .agent_tools import (
 from .ai_tools import (
     CONTEXT_EXPAND_TOOL_NAME,
     CONTEXT_SEARCH_TOOL_NAME,
+    DELEGATE_AGENT_TOOL_NAME,
     FIND_STICKERS_TOOL_NAME,
     GROUP_MEMBERS_TOOL_NAME,
     INSPECT_SOURCE_TOOL_NAME,
@@ -51,6 +52,7 @@ from .ai_tools import (
     QUERY_ALERTS_TOOL_NAME,
     READ_IMAGE_TEXT_TOOL_NAME,
     REPLY_WITH_VOICE_TOOL_NAME,
+    RESUME_SUBAGENT_TOOL_NAME,
     RUN_SUBAGENTS_TOOL_NAME,
     SAY_TOOL_NAME,
     SEND_QQ_FACE_TOOL_NAME,
@@ -70,6 +72,7 @@ from .ai_tools import (
 from .config import (
     settings,
 )
+from .agent import ContextPacket
 from .context_policy import (
     chronological_projection_budget,
     choose_context_policy,
@@ -99,7 +102,7 @@ from .media_library import (
 from .model_catalog import (
     ModelProfile,
 )
-from .subagents import route_subagent_request
+from .subagents import AgentExecutionHooks, route_subagent_request
 from .observability import (
     telemetry,
 )
@@ -283,6 +286,7 @@ async def _ask_ai(
     final_stream_sink: Callable[[str], Awaitable[None]] | None = None,
     final_stream_state: FinalStreamState | None = None,
     task_mode: bool = False,
+    simple_chat_profile: str = "",
 ) -> Message | str:
     if isinstance(event, GroupMessageEvent) and not _is_group_enabled(event.group_id):
         return "这个群暂时没有开启 AI。"
@@ -342,6 +346,7 @@ async def _ask_ai(
     visual_reply_segment: MessageSegment | None = None
     sticker_handles_this_turn: set[str] = set()
     subagent_task_started = False
+    subagent_delegations = 0
     replay_prefix: list[dict[str, Any]] = []
     replay_covered_message_ids: tuple[int, ...] = ()
     replay_digest_prefix = ""
@@ -395,6 +400,31 @@ async def _ask_ai(
         and should_resolve_voice
     ):
         available_voice_message_id = await _resolve_voice_message_id(bot, event)
+
+    use_simple_chat_profile = bool(
+        simple_chat_profile
+        and not selected_model_override
+        and not task_mode
+        and not automatic_subagent_route.delegate
+        and not available_image_sources
+        and available_video is None
+        and available_voice_message_id is None
+        and not any(
+            (
+                force_search,
+                force_ocr,
+                force_voice_reply,
+                force_voice_transcription,
+                alert_query_required,
+                video_analysis_required,
+                private_vision_required,
+            )
+        )
+    )
+    if use_simple_chat_profile:
+        lightweight_profile = model_profiles.try_resolve(simple_chat_profile)
+        if lightweight_profile is not None:
+            selected_profile = lightweight_profile
 
     tools = available_tools(
         include_web_search=(
@@ -551,9 +581,40 @@ async def _ask_ai(
 
     async def _execute_tool_impl(name: str, arguments: dict[str, object]) -> str:
         nonlocal visual_reply_segment, voice_reply_segment, voice_reply_text
-        nonlocal subagent_task_started
+        nonlocal subagent_task_started, subagent_delegations
 
         logger.info(f"LLM Tool Call: {name}")
+
+        if name == DELEGATE_AGENT_TOOL_NAME:
+            if subagent_delegations >= 3:
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "error": "本轮单专家委派已达到 3 次；更多协作请使用 run_subagents。",
+                    },
+                    ensure_ascii=False,
+                )
+            role = str(arguments.get("role") or "").strip()
+            objective = str(arguments.get("objective") or "").strip()
+            if not objective:
+                return json.dumps(
+                    {"ok": False, "error": "委派目标不能为空。"},
+                    ensure_ascii=False,
+                )
+            if subagent_coordinator is None:
+                return json.dumps(
+                    {"ok": False, "error": "Sub-Agent 任务模式暂时没有开启。"},
+                    ensure_ascii=False,
+                )
+            subagent_delegations += 1
+            try:
+                result = await run_delegate_goal(role, objective)
+            except ValueError as exc:
+                return json.dumps(
+                    {"ok": False, "error": str(exc)},
+                    ensure_ascii=False,
+                )
+            return json.dumps({"ok": True, **result}, ensure_ascii=False)
 
         if name == RUN_SUBAGENTS_TOOL_NAME:
             if subagent_task_started:
@@ -581,6 +642,36 @@ async def _ask_ai(
                 {"ok": True, "result": result},
                 ensure_ascii=False,
             )
+
+        if name == RESUME_SUBAGENT_TOOL_NAME:
+            if subagent_task_started:
+                return json.dumps(
+                    {"ok": False, "error": "本轮已经启动或恢复过一个 Sub-Agent 任务。"},
+                    ensure_ascii=False,
+                )
+            try:
+                task_id = int(arguments.get("task_id") or 0)
+            except (TypeError, ValueError):
+                task_id = 0
+            if task_id <= 0:
+                return json.dumps(
+                    {"ok": False, "error": "task_id 必须是正整数。"},
+                    ensure_ascii=False,
+                )
+            if subagent_coordinator is None:
+                return json.dumps(
+                    {"ok": False, "error": "Sub-Agent 任务模式暂时没有开启。"},
+                    ensure_ascii=False,
+                )
+            subagent_task_started = True
+            try:
+                result = await run_resume_goal(task_id)
+            except (RuntimeError, ValueError) as exc:
+                return json.dumps(
+                    {"ok": False, "error": str(exc)},
+                    ensure_ascii=False,
+                )
+            return json.dumps({"ok": True, "result": result}, ensure_ascii=False)
 
         if name == USE_SKILL_TOOL_NAME:
             requested = str(arguments.get("name") or "").strip()
@@ -1693,6 +1784,22 @@ async def _ask_ai(
         async with telemetry.tool(name):
             return await _execute_tool_impl(name, arguments)
 
+    subagent_hooks = AgentExecutionHooks(
+        approval_checker=(
+            lambda _policy, name, arguments: approval_from_user_text(
+                user_text,
+                name,
+                arguments,
+            )
+        ),
+        handoff_tool=(
+            agent_executor.handoff_tool if agent_executor is not None else None
+        ),
+        compensate_tool=(
+            agent_executor.compensate_tool if agent_executor is not None else None
+        ),
+    )
+
     async def record_loop_event(event_record: AgentLoopEvent) -> None:
         if journal_turn_id is not None:
             await _record_turn_loop_event(journal_turn_id, event_record)
@@ -2206,14 +2313,7 @@ async def _ask_ai(
                 DatabaseError,
             ) as exc:
                 logger.warning(f"Final context projection journal failed: {exc}")
-        async def run_subagent_goal(goal: str) -> str:
-            if subagent_coordinator is None:
-                return "Sub-Agent 任务模式暂时没有开启。"
-
-            async def report_subagent_progress(text: str) -> None:
-                if agent_executor is not None:
-                    await execute_tool(SAY_TOOL_NAME, {"text": text[:200]})
-
+        def subagent_context_packet(objective: str) -> ContextPacket:
             trigger_message_id = (
                 message_ledger.canonical_id_for_native(
                     scope_from_event(event),
@@ -2222,34 +2322,96 @@ async def _ask_ai(
                 if message_ledger is not None
                 else None
             )
-            return await subagent_coordinator.run(
+            supporting = "\n\n".join(
+                part
+                for part in context_parts
+                if not part.startswith("[自动 Sub-Agent 编排]")
+            )
+            return ContextPacket(
                 scope_key=scope_from_event(event).key,
                 conversation_id=conversation_id,
                 requester_user_id=event.user_id,
                 trigger_message_id=trigger_message_id,
+                objective=objective,
+                conversation_context=group_prompt_context,
+                memory_context=memory_prompt_context,
+                supporting_context=supporting,
+            )
+
+        async def run_delegate_goal(role: str, objective: str) -> dict[str, Any]:
+            if subagent_coordinator is None:
+                raise ValueError("Sub-Agent 任务模式暂时没有开启。")
+            packet = subagent_context_packet(objective)
+            return await subagent_coordinator.delegate(
+                role=role,
+                scope_key=packet.scope_key,
+                conversation_id=conversation_id,
+                requester_user_id=event.user_id,
+                trigger_message_id=packet.trigger_message_id,
+                objective=objective,
+                context="",
+                context_packet=packet,
+                selected_profile=selected_profile,
+                tools=tools,
+                execute_tool=execute_tool,
+                parent_trace=turn_trace,
+                hooks=subagent_hooks,
+            )
+
+        async def run_subagent_goal(goal: str) -> str:
+            if subagent_coordinator is None:
+                return "Sub-Agent 任务模式暂时没有开启。"
+
+            async def report_subagent_progress(text: str) -> None:
+                if agent_executor is not None:
+                    await execute_tool(SAY_TOOL_NAME, {"text": text[:200]})
+
+            packet = subagent_context_packet(goal)
+            return await subagent_coordinator.run(
+                scope_key=packet.scope_key,
+                conversation_id=conversation_id,
+                requester_user_id=event.user_id,
+                trigger_message_id=packet.trigger_message_id,
                 objective=goal,
-                context=(
-                    group_prompt_context
-                    + "\n\n"
-                    + memory_prompt_context
-                    + "\n\n"
-                    + "\n\n".join(context_parts)
-                ),
+                context="",
+                context_packet=packet,
                 selected_profile=selected_profile,
                 tools=tools,
                 execute_tool=execute_tool,
                 parent_trace=turn_trace,
                 progress=report_subagent_progress,
+                hooks=subagent_hooks,
+            )
+
+        async def run_resume_goal(task_id: int) -> str:
+            if subagent_coordinator is None:
+                return "Sub-Agent 任务模式暂时没有开启。"
+
+            async def report_subagent_progress(text: str) -> None:
+                if agent_executor is not None:
+                    await execute_tool(SAY_TOOL_NAME, {"text": text[:200]})
+
+            return await subagent_coordinator.resume(
+                task_id,
+                scope_key=scope_from_event(event).key,
+                requester_user_id=event.user_id,
+                selected_profile=selected_profile,
+                tools=tools,
+                execute_tool=execute_tool,
+                parent_trace=turn_trace,
+                progress=report_subagent_progress,
+                hooks=subagent_hooks,
             )
 
         if subagent_coordinator is not None:
             context_parts.append(
                 "[自动 Sub-Agent 编排]\n"
-                "用户不需要输入 /task。当前请求如果包含多个互相依赖的步骤、需要两个"
-                "以上专业角色协作，或明显是长任务，调用 run_subagents，并把用户的"
-                "完整目标和交付要求放进 goal。普通闲聊、常识问答、一次搜索、单张识图"
-                "或单个工具能完成的请求不要调用。Sub-Agent 系统会自己用 say 报告"
-                "每个角色开始和完成的工作，主 Agent 不要重复刷进度。"
+                "用户不需要输入 /task。边界明确、只需要一个专业角色处理的子任务，"
+                "调用 delegate_agent，由主 Agent 保留最终回复权。包含多个互相依赖步骤、"
+                "需要两个以上专业角色协作或明显是长任务时调用 run_subagents。普通闲聊、"
+                "常识问答和单个现有工具能完成的请求不要委派。run_subagents 会自行用 say "
+                "报告关键阶段，主 Agent 不要重复刷进度。用户要求继续 interrupted 的 "
+                "task#编号时调用 resume_subagent。"
             )
 
         use_automatic_subagents = bool(

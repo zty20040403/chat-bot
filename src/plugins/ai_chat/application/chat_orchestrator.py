@@ -55,6 +55,7 @@ class ChatOrchestrator:
         usage_store: Any = None,
         logger: ApplicationLogger,
         prompt_version: str,
+        simple_chat_profile: str = "",
     ) -> None:
         self.ports = ports
         self.running_tasks = running_tasks
@@ -65,6 +66,7 @@ class ChatOrchestrator:
         self.usage_store = usage_store
         self.logger = logger
         self.prompt_version = prompt_version
+        self.simple_chat_profile = str(simple_chat_profile).strip()
 
     async def run(
         self,
@@ -101,10 +103,16 @@ class ChatOrchestrator:
         )
         journal_turn_id: int | None = None
         trace: AgentTrace | None = None
+        caller_selected_profile = "selected_profile_override" in kwargs
         explicit_profile = self.model_preferences.get_explicit(conversation_id)
         group_default_profile = self.ports.group_default_profile(conversation_id)
         selected_profile = self.model_catalog.resolve_preference(
             explicit_profile or group_default_profile
+        )
+        simple_chat_routing_allowed = (
+            not caller_selected_profile
+            and explicit_profile is None
+            and group_default_profile is None
         )
         if explicit_profile is None and group_default_profile is None:
             previous_turn = self.ports.reply_target_turn(event)
@@ -116,7 +124,12 @@ class ChatOrchestrator:
                 )
                 if inherited_profile is not None:
                     selected_profile = inherited_profile
+                    simple_chat_routing_allowed = False
         kwargs.setdefault("selected_profile_override", selected_profile)
+        kwargs.setdefault(
+            "simple_chat_profile",
+            self.simple_chat_profile if simple_chat_routing_allowed else "",
+        )
 
         if self.usage_store is not None:
             trace = AgentTrace(

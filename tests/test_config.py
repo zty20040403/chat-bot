@@ -40,6 +40,16 @@ class SettingsGroupFilterTests(unittest.TestCase):
         self.assertFalse(settings.vision_auto_describe)
         self.assertEqual(settings.media_max_vision_bytes, 20 * 1024 * 1024)
 
+    def test_simple_chat_profile_is_optional(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"AI_SIMPLE_CHAT_PROFILE": "qwen-local"},
+            clear=True,
+        ):
+            settings = Settings.from_env()
+
+        self.assertEqual(settings.model_simple_chat_profile, "qwen-local")
+
     def test_disabled_groups_override_allowlist(self) -> None:
         with patch.dict(
             os.environ,

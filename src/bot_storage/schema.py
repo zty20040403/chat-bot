@@ -1,4 +1,4 @@
 from __future__ import annotations
 
 
-HEAD_REVISION = "0015_subagent_run_partial"
+HEAD_REVISION = "0016_subagent_checkpoints"

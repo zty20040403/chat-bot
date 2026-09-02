@@ -120,6 +120,8 @@ _IDENTITY_COLUMNS = {
     "subagent_runs": "run_id",
     "subagent_events": "event_id",
     "subagent_artifacts": "artifact_id",
+    "subagent_checkpoints": "checkpoint_id",
+    "subagent_run_contexts": "context_id",
 }
 
 

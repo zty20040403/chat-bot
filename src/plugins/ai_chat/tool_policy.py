@@ -217,6 +217,20 @@ def _policy_registry() -> dict[str, ToolPolicy]:
         timeout_seconds=3600.0,
         max_identical_calls=1,
     )
+    policies["delegate_agent"] = ToolPolicy(
+        risk="medium",
+        idempotency="non-idempotent",
+        side_effects=("spawn:agent", "model:single", "write:task-ledger"),
+        timeout_seconds=1900.0,
+        max_identical_calls=1,
+    )
+    policies["resume_subagent"] = ToolPolicy(
+        risk="medium",
+        idempotency="keyed",
+        side_effects=("resume:agent", "model:multiple", "write:task-ledger"),
+        timeout_seconds=3600.0,
+        max_identical_calls=1,
+    )
     policies["sandbox_destroy"] = ToolPolicy(
         risk="critical",
         idempotency="idempotent",

@@ -572,6 +572,7 @@ def _build_chat_orchestrator() -> ChatOrchestrator:
         usage_store=usage_store,
         logger=logger,
         prompt_version=TURN_PROMPT_VERSION,
+        simple_chat_profile=settings.model_simple_chat_profile,
     )
 
 
