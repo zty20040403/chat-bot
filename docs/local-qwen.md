@@ -28,12 +28,25 @@
     "base_url": "http://wsl.inner.imdomestic.com:8000/v1",
     "model": "qwen3.8-27b",
     "api_key_required": false,
-    "thinking": "disabled",
+    "thinking": "enabled",
     "timeout_seconds": 30,
-    "fallback_profiles": ["deepseek"]
+    "fallback_profiles": ["deepseek", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"]
   }
 }
 ```
+
+`provider = qwen` 使用 NInfer Chat Completions 的 `enable_thinking` 开关：
+`enabled` 发送 `true`，`disabled` 发送 `false`，`auto` 不传开关、使用服务端默认值。
+这与 GPT 的 `reasoning_effort = xhigh` 档位不同。开启思考可能增加回复时间和
+Token 用量；群里只发送最终答案，不发送 `reasoning_content`。
+接口约定见 [NInfer serving 文档](https://github.com/Neroued/ninfer/blob/master/docs/serving.md)。
+
+上下文窗口与单次输出上限不同；思考 Token 也占单次输出额度。千问返回只有思考、
+没有正文（或空正文且 `finish_reason = length`）时，Bot 会记录失败原因，并最多
+补救两次：先仅为本次补答关闭思考，仍无正文再排除该模型、走配置中的备用链。
+每次补救最多等待 60 秒、最多输出 4096 Token，并保留更小的原请求输出限制。
+补答保留已有工具结果，但禁止新工具调用；不会把未完成思考当作答案发送，
+也不会改变正常请求的思考配置。已有正文、正常工具调用和内容安全拒绝不走此恢复。
 
 Bot 环境变量：
 

@@ -8,13 +8,20 @@ import logging
 import re
 import time
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, Literal
 
 from .ai_tools import ToolChoice, ToolDefinition
 from .config import settings
-from .llm_gateway import LLMConfigError, LLMGateway
+from .llm_gateway import (
+    LLMConfigError,
+    LLMEmptyResponseError,
+    LLMError,
+    LLMGateway,
+    classify_llm_failure,
+    thinking_extra_body,
+)
 from .model_catalog import ModelCatalog, ModelProfile
 from .observability import current_trace_id, telemetry
 from .runtime_clock import runtime_clock_prompt
@@ -266,16 +273,6 @@ def _build_messages(
     return messages
 
 
-def _extra_body(profile: ModelProfile) -> dict[str, object] | None:
-    if profile.protocol != "openai-chat":
-        return None
-    if profile.thinking in {"enabled", "on", "true", "1"}:
-        return {"thinking": {"type": "enabled"}}
-    if profile.thinking in {"disabled", "off", "false", "0"}:
-        return {"thinking": {"type": "disabled"}}
-    return None
-
-
 async def _create_completion(_trace: DeepSeekTrace | None = None, **kwargs: Any) -> Any:
     profile = _active_profile.get() or _resolve_profile()
     _catalog, gateway = _runtime()
@@ -310,7 +307,7 @@ def _completion_kwargs(
     request: dict[str, Any] = {
         "model": profile.model,
         "messages": messages,
-        "extra_body": _extra_body(profile),
+        "extra_body": thinking_extra_body(profile),
     }
     if profile.temperature is not None:
         request["temperature"] = profile.temperature
@@ -452,7 +449,8 @@ async def ask_deepseek_json(
     request = _completion_kwargs(messages, selected_profile)
     if selected_profile.capabilities.json_mode:
         request["response_format"] = {"type": "json_object"}
-    response = await _invoke_completion(
+    response, _ = await _completion_with_optional_stream(
+        None,
         selected_profile,
         trace=trace,
         **request,
@@ -922,6 +920,136 @@ async def ask_deepseek_with_tools(
 
 
 async def _completion_with_optional_stream(
+    sink: FinalTextSink | None,
+    profile: ModelProfile,
+    *,
+    trace: DeepSeekTrace | None = None,
+    **kwargs: Any,
+) -> tuple[Any, str]:
+    response, emitted = await _completion_once(sink, profile, trace=trace, **kwargs)
+    actual = _actual_profile(profile)
+    choice = response.choices[0]
+    message = choice.message
+    if (
+        actual.provider != "qwen"
+        or emitted
+        or (message.content or "").strip()
+        or getattr(message, "tool_calls", None)
+        or getattr(message, "refusal", None)
+        or getattr(choice, "finish_reason", None) == "content_filter"
+        or not (
+            _model_dump(message).get("reasoning_content")
+            or getattr(choice, "finish_reason", None) in {"length", "max_tokens"}
+        )
+    ):
+        return response, emitted
+
+    _record_empty_completion(trace, actual, response)
+    recovery = dict(kwargs)
+    recovery["messages"] = [
+        *kwargs["messages"],
+        {
+            "role": "system",
+            "content": (
+                "上次生成没有产出可发送的正文。现在只给出简洁的最终回答，"
+                "使用已有上下文和工具结果，不再调用工具或重复已经完成的动作。"
+                "信息不足或问题尚无定论时如实说明，不要编造结果或证明。"
+            ),
+        },
+    ]
+    if recovery.get("tools"):
+        recovery["tool_choice"] = "none"
+    recovery.pop("stream", None)
+    recovery.pop("stream_options", None)
+    token_field = (
+        "max_completion_tokens"
+        if "max_completion_tokens" in recovery
+        else "max_tokens"
+    )
+    recovery[token_field] = min(
+        int(recovery.get(token_field) or actual.max_output_tokens or 4096), 4096
+    )
+    excluded = {actual.name}
+
+    # Buffer repairs until a usable final answer exists; never replay tool execution.
+    for use_fallback in (False, True):
+        retry_profile = (
+            profile if use_fallback else replace(actual, thinking="disabled")
+        )
+        options = dict(recovery)
+        if use_fallback:
+            options["excluded_profiles"] = frozenset(excluded)
+        try:
+            repaired, _ = await asyncio.wait_for(
+                _completion_once(None, retry_profile, trace=trace, **options),
+                timeout=60.0,
+            )
+        except (LLMError, asyncio.TimeoutError) as exc:
+            if use_fallback or not classify_llm_failure(exc).retryable:
+                raise
+            continue
+        repaired_profile = _actual_profile(retry_profile)
+        repaired_choice = repaired.choices[0]
+        repaired_message = repaired_choice.message
+        if (
+            (repaired_message.content or "").strip()
+            and not getattr(repaired_message, "tool_calls", None)
+        ):
+            return repaired, ""
+        if (
+            getattr(repaired_message, "refusal", None)
+            or getattr(repaired_choice, "finish_reason", None) == "content_filter"
+        ):
+            if trace is not None:
+                trace.add_usage(repaired)
+            raise LLMEmptyResponseError("Model declined the final-answer repair")
+        _record_empty_completion(trace, repaired_profile, repaired)
+        excluded.add(repaired_profile.name)
+    raise LLMEmptyResponseError("Model returned no final answer after bounded recovery")
+
+
+def _record_empty_completion(
+    trace: DeepSeekTrace | None,
+    profile: ModelProfile,
+    response: Any,
+) -> None:
+    choice = response.choices[0]
+    finish_reason = getattr(choice, "finish_reason", None)
+    reason_code = (
+        "reasoning_budget_exhausted"
+        if finish_reason in {"length", "max_tokens"}
+        else "empty_response"
+    )
+    reason = (
+        "思考达到输出上限，未生成正文"
+        if reason_code == "reasoning_budget_exhausted"
+        else "未生成可发送正文"
+    )
+    logging.getLogger(__name__).warning(
+        "Model final answer missing: profile=%s finish_reason=%s; bounded recovery",
+        profile.name,
+        finish_reason,
+    )
+    if trace is None:
+        return
+    _configure_trace(trace, profile)
+    trace.add_usage(response)
+    if (
+        trace.model_routing
+        and trace.model_routing[-1].get("actual_profile") == profile.name
+    ):
+        route = trace.model_routing[-1]
+        route.update(
+            actual_profile="", actual_model="", reason_code=reason_code,
+            reason=reason, fallback=False,
+        )
+        for outcome in reversed(route.get("outcomes", [])):
+            if outcome.get("profile") == profile.name:
+                outcome.update(status="failed", reason_code=reason_code, reason=reason)
+                break
+
+
+async def _completion_once(
     sink: FinalTextSink | None,
     profile: ModelProfile,
     **kwargs: Any,

@@ -72,6 +72,50 @@ class RecordingProvider:
 
 
 class LLMGatewayTests(unittest.IsolatedAsyncioTestCase):
+    def test_qwen_thinking_uses_native_switch(self) -> None:
+        agent = importlib.import_module("src.plugins.ai_chat.deepseek")
+        for mode, expected in (
+            ("enabled", {"enable_thinking": True}),
+            ("disabled", {"enable_thinking": False}),
+            ("auto", None),
+        ):
+            with self.subTest(thinking=mode):
+                selected = profile("qwen-local", provider="qwen", thinking=mode)
+                kwargs = agent._completion_kwargs([], selected)
+                self.assertEqual(kwargs["extra_body"], expected)
+                request = _request_for_profile(
+                    selected, {**kwargs, "reasoning_effort": "xhigh"}
+                )
+                self.assertEqual(request.get("extra_body"), expected)
+                self.assertNotIn("reasoning_effort", request)
+
+    async def test_fallback_does_not_leak_qwen_thinking_switch(self) -> None:
+        primary = profile("qwen-local", provider="qwen", thinking="enabled")
+        backup = profile("deepseek", provider="deepseek", thinking="disabled")
+        catalog = ModelCatalog(
+            {primary.name: primary, backup.name: backup},
+            default_profile=primary.name,
+        )
+
+        class FailingQwenProvider(RecordingProvider):
+            async def create_completion(self, selected, **kwargs):
+                self.calls.append((selected, kwargs))
+                if selected.name == primary.name:
+                    raise LLMConnectionError("unavailable")
+                return "ok"
+
+        provider = FailingQwenProvider()
+        gateway = LLMGateway({"openai-chat": provider}, catalog=catalog)
+        result = await gateway.create_completion_with_profile(
+            primary, messages=[], extra_body={"enable_thinking": True}
+        )
+        self.assertEqual(result.profile.name, backup.name)
+        self.assertEqual(provider.calls[0][1]["extra_body"], {"enable_thinking": True})
+        self.assertEqual(
+            provider.calls[1][1]["extra_body"], {"thinking": {"type": "disabled"}}
+        )
+        await gateway.close()
+
     async def test_openai_profile_forwards_reasoning_effort(self) -> None:
         selected = profile("reasoning", provider="cliproxy")
         selected = selected.with_reasoning_effort("high")

@@ -52,6 +52,10 @@ class LLMUnavailableError(LLMError):
     pass
 
 
+class LLMEmptyResponseError(LLMError):
+    pass
+
+
 class LLMFailureKind(str, Enum):
     NETWORK = "network"
     RATE_LIMIT = "rate_limit"
@@ -416,6 +420,7 @@ class LLMGateway:
         profile: ModelProfile,
         *,
         route_sink: Callable[[dict[str, Any]], None] | None = None,
+        excluded_profiles: frozenset[str] = frozenset(),
         **kwargs: Any,
     ) -> CompletionResult:
         candidates = self._completion_candidates(profile, kwargs)
@@ -439,6 +444,14 @@ class LLMGateway:
             return routing
 
         for candidate in candidates:
+            if candidate.name in excluded_profiles:
+                outcomes.append({
+                    "profile": candidate.name,
+                    "status": "skipped",
+                    "reason_code": "empty_response",
+                    "reason": "本轮该模型未生成正文，改用备用模型",
+                })
+                continue
             if self.local_model is not None:
                 unavailable = self.local_model.unavailable_reason(candidate.name)
                 if unavailable is not None:
@@ -697,6 +710,20 @@ def classify_llm_failure(exc: BaseException) -> ClassifiedFailure:
     return ClassifiedFailure(LLMFailureKind.PROVIDER, retryable=False)
 
 
+def thinking_extra_body(profile: ModelProfile) -> dict[str, object] | None:
+    if profile.protocol != "openai-chat":
+        return None
+    if profile.thinking in {"enabled", "on", "true", "1"}:
+        enabled = True
+    elif profile.thinking in {"disabled", "off", "false", "0"}:
+        enabled = False
+    else:
+        return None
+    if profile.provider == "qwen":
+        return {"enable_thinking": enabled}
+    return {"thinking": {"type": "enabled" if enabled else "disabled"}}
+
+
 def _request_for_profile(
     profile: ModelProfile,
     kwargs: dict[str, Any],
@@ -708,12 +735,11 @@ def _request_for_profile(
     else:
         request["temperature"] = profile.temperature
     if profile.protocol == "openai-chat":
-        if profile.thinking == "enabled":
-            request["extra_body"] = {"thinking": {"type": "enabled"}}
-        elif profile.thinking == "disabled":
-            request["extra_body"] = {"thinking": {"type": "disabled"}}
-        else:
+        extra_body = thinking_extra_body(profile)
+        if extra_body is None:
             request.pop("extra_body", None)
+        else:
+            request["extra_body"] = extra_body
         if (
             profile.provider in {"openai", "cliproxy"}
             and profile.reasoning_effort
