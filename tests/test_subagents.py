@@ -990,7 +990,7 @@ class SubAgentCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch(
                 "src.plugins.ai_chat.subagents.ask_deepseek_json",
-                new=AsyncMock(return_value={"steps": []}),
+                new=AsyncMock(return_value={"steps": [{"id": "research", "agent": "researcher", "objective": "查资料", "deliverable": "资料", "depends_on": []}]}),
             ),
             patch(
                 "src.plugins.ai_chat.subagents.ask_deepseek_with_tools",

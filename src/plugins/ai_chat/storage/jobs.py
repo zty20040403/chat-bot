@@ -158,6 +158,8 @@ class DurableJobStore:
         *,
         limit: int = 10,
         now: int | None = None,
+        kinds: tuple[str, ...] | None = None,
+        per_scope_limit: int | None = None,
     ) -> list[DurableJob]:
         clean_owner = " ".join(str(owner).split())[:160]
         if not clean_owner:
@@ -165,6 +167,10 @@ class DurableJobStore:
         timestamp = int(time.time() if now is None else now)
         bounded = min(max(int(limit), 1), 100)
         claimed: list[DurableJob] = []
+        if kinds == ():
+            return claimed
+        kind_clause = "" if kinds is None else " AND kind IN (" + ",".join("?" for _ in kinds) + ")"
+        scope_clause = "" if per_scope_limit is None else " AND (SELECT COUNT(*) FROM durable_jobs active WHERE active.scope_key=durable_jobs.scope_key AND active.kind=durable_jobs.kind AND active.status='running') < ?"
         with self._transaction() as cursor:
             self._recover_expired(cursor, timestamp)
             lock_clause = "" if self._legacy_sqlite else "FOR UPDATE SKIP LOCKED"
@@ -173,13 +179,19 @@ class DurableJobStore:
                 SELECT * FROM durable_jobs
                 WHERE status = 'pending' AND next_attempt_at <= ?
                   AND attempts < max_attempts
+                  {kind_clause}
+                  {scope_clause}
                 ORDER BY priority ASC, next_attempt_at ASC, job_id ASC
                 LIMIT ?
                 {lock_clause}
                 """,
-                (timestamp, bounded),
+                (timestamp, *(kinds or ()), *((per_scope_limit,) if per_scope_limit is not None else ()), bounded),
             ).fetchall()
             for row in rows:
+                if per_scope_limit is not None:
+                    active = cursor.execute("SELECT COUNT(*) AS n FROM durable_jobs WHERE scope_key=? AND kind=? AND status='running'", (row["scope_key"], row["kind"])).fetchone()
+                    if int(active["n"]) >= per_scope_limit:
+                        continue
                 job_id = int(row["job_id"])
                 cursor.execute(
                     """

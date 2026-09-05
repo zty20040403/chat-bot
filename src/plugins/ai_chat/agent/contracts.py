@@ -4,6 +4,7 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping, Sequence
+from .sessions import upstream_index
 
 
 SubAgentRole = Literal[
@@ -190,17 +191,11 @@ class ContextPacket:
             sections.append(("相关记忆", self.memory_context[:1400] or "无"))
         if "supporting" in channels:
             sections.append(("补充上下文", self.supporting_context[:2800] or "无"))
-        if "upstream" in channels:
-            sections.append(
-                (
-                    "上游结构化结果",
-                    _json_dump(upstream)[:3600] if upstream else "无",
-                )
-            )
+        handoff = ("\n\n[上游结构化结果索引]\n" + upstream_index(upstream)) if upstream and "upstream" in channels else ""
         rendered = _render_sections(
             sections,
-            max_chars=max(int(spec.context_budget_chars), 1000),
-        )
+            max_chars=max(int(spec.context_budget_chars) - len(handoff), 1000),
+        ) + handoff
         digest = hashlib.sha256(rendered.encode("utf-8")).hexdigest()
         return AgentContext(
             scope_key=self.scope_key,
@@ -324,7 +319,10 @@ class AgentResult:
         elif raw_status in {"success", "succeeded", "completed", "ok"}:
             status = "success"
         else:
-            status = "partial" if unresolved else "success"
+            status = "partial"
+        summary = str(payload.get("summary") or "").strip()
+        if status == "success" and (not summary or unresolved):
+            status = "partial"
         try:
             confidence = float(payload.get("confidence", 0.5))
         except (TypeError, ValueError):
@@ -353,7 +351,7 @@ class AgentResult:
         )
         return cls(
             status=status,
-            summary=str(payload.get("summary") or "").strip(),
+            summary=summary,
             facts=_fact_tuple(payload.get("facts")),
             artifacts=normalized_artifacts,
             citations=_string_tuple(payload.get("citations")),

@@ -15,7 +15,7 @@ import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 from fastapi.routing import APIRoute
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from .admin_control import (
     AdminControlStore,
@@ -34,6 +34,19 @@ from .tool_policy import (
     set_tool_enabled,
     tool_enabled,
 )
+
+
+class SubAgentModelUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_version: int = Field(ge=0)
+    policy: dict[str, Any]
+
+
+class SubAgentRevisionUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_version: int = Field(ge=0)
+    instruction: str = Field(min_length=1, max_length=12000)
+    step_keys: list[str] = Field(min_length=1, max_length=14)
 
 
 @dataclass(frozen=True)
@@ -224,6 +237,9 @@ _DATABASE_RESOURCE_MAP: dict[str, tuple[str, ...]] = {
     "subagent_artifacts": ("subagents",),
     "subagent_checkpoints": ("subagents", "tasks", "overview"),
     "subagent_run_contexts": ("subagents", "tasks", "overview"),
+    "subagent_controls": ("subagents", "tasks", "overview"),
+    "subagent_sessions": ("subagents", "tasks"),
+    "subagent_deliveries": ("subagents", "tasks", "deliveries"),
     "bridge_sources": ("overview",),
     "bridge_deliveries": ("overview",),
     "bridge_cursors": ("overview",),
@@ -846,6 +862,9 @@ def register_admin(
             "roles": roles,
             "counts": services.subagent_store.stats(),
             "configured": services.subagent_coordinator is not None,
+            "scheduler": services.subagent_coordinator.scheduler.snapshot() if services.subagent_coordinator else {},
+            "model_options": [{"name": p.name, "model": p.model, "vision": p.capabilities.vision}
+                for p in services.model_catalog.profiles if p.configured and p.capabilities.tools],
         }
 
     @router.get("/api/subagents/{task_id}")
@@ -859,7 +878,11 @@ def register_admin(
         task = services.subagent_store.get(task_id)
         if task is None:
             raise HTTPException(status_code=404, detail="Sub-Agent task not found")
+        control = services.subagent_store.control(task_id)
         return {
+            "control": {key: control[key] for key in ("version", "revision", "policy")},
+            "background": bool(control["dispatch"]),
+            "artifact_deliveries": services.subagent_store.deliveries(task_id),
             "task": {
                 "task_id": task.task_id,
                 "handle": task.handle,
@@ -903,6 +926,41 @@ def register_admin(
             "run_contexts": services.subagent_store.run_contexts(task_id),
             "events": services.subagent_store.events(task_id),
         }
+
+    @router.put("/api/subagents/{task_id}/models")
+    def subagent_models(task_id: int, payload: SubAgentModelUpdate,
+        mutation_info: AdminMutationContext = Depends(mutation_context), authorization: Optional[str] = Header(default=None)):
+        authorize(authorization)
+        def operation(_version):
+            if services.subagent_coordinator is None:
+                raise HTTPException(503, "Sub-Agent unavailable")
+            try:
+                return services.subagent_coordinator.configure_models(task_id, payload.policy, payload.expected_version)
+            except ValueError as exc:
+                raise HTTPException(409, str(exc)) from exc
+        result = mutate(mutation_info, "subagents", action="subagent.models", target=f"task#{task_id}", operation=operation)
+        event_broker.publish("subagents", "audit")
+        return mutation_payload(result, task_id=task_id)
+
+    @router.post("/api/subagents/{task_id}/revise")
+    def subagent_revise(task_id: int, payload: SubAgentRevisionUpdate,
+        mutation_info: AdminMutationContext = Depends(mutation_context), authorization: Optional[str] = Header(default=None)):
+        authorize(authorization)
+        def operation(_version):
+            if services.subagent_coordinator is None:
+                raise HTTPException(503, "Sub-Agent unavailable")
+            task = services.subagent_store.get(task_id)
+            if task is None:
+                raise HTTPException(404, "Task not found")
+            try:
+                return services.subagent_coordinator.revise(task_id, scope_key=task.scope_key,
+                    requester_user_id=task.requester_user_id, instruction=payload.instruction,
+                    step_keys=payload.step_keys, expected_version=payload.expected_version)
+            except ValueError as exc:
+                raise HTTPException(409, str(exc)) from exc
+        result = mutate(mutation_info, "subagents", action="subagent.revise", target=f"task#{task_id}", operation=operation)
+        event_broker.publish("subagents", "jobs", "audit")
+        return mutation_payload(result, task_id=task_id)
 
     @router.post("/api/subagents/{task_id}/cancel")
     def cancel_subagent_task(

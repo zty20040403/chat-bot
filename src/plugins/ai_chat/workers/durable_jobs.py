@@ -38,11 +38,13 @@ class DurableJobWorker:
         poll_seconds: float = 2.0,
         concurrency: int = 2,
         worker_id: str | None = None,
+        per_scope_limit: int | None = None,
     ) -> None:
         self.store = store
         self.logger = logger
         self.poll_seconds = max(float(poll_seconds), 0.1)
         self.concurrency = min(max(int(concurrency), 1), 32)
+        self.per_scope_limit = per_scope_limit
         self.worker_id = worker_id or (
             f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
         )
@@ -79,6 +81,8 @@ class DurableJobWorker:
             self.store.claim_due,
             self.worker_id,
             limit=self.concurrency,
+            kinds=self.registered_kinds,
+            per_scope_limit=self.per_scope_limit,
         )
         if not jobs:
             return 0
@@ -86,12 +90,24 @@ class DurableJobWorker:
         return len(jobs)
 
     async def run_forever(self) -> None:
-        while True:
-            processed = await self.run_once()
-            if processed == 0:
-                await asyncio.sleep(self.poll_seconds)
-            else:
-                await asyncio.sleep(0)
+        pending: set[asyncio.Task] = set()
+        try:
+            while True:
+                if len(pending) < self.concurrency:
+                    jobs = await asyncio.to_thread(self.store.claim_due, self.worker_id,
+                        limit=self.concurrency - len(pending), kinds=self.registered_kinds, per_scope_limit=self.per_scope_limit)
+                    pending.update(asyncio.create_task(self._execute(job)) for job in jobs)
+                if pending:
+                    done, pending = await asyncio.wait(pending, timeout=self.poll_seconds,
+                        return_when=asyncio.FIRST_COMPLETED)
+                    for task in done:
+                        task.result()
+                else:
+                    await asyncio.sleep(self.poll_seconds)
+        finally:
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
 
     def cancel(self, job_id: int) -> bool:
         changed = self.store.cancel(job_id)

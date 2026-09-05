@@ -294,6 +294,8 @@ handlers.ingest_adapter = onebot_ingest_adapter
 
 @driver.on_startup
 async def start_background_tasks() -> None:
+    if subagent_coordinator is not None and subagent_coordinator.dispatcher is not None:
+        background_tasks.start("subagent-workflows", subagent_coordinator.dispatcher.run_forever)
     if app_context.local_model is not None:
         background_tasks.start("local-model-health", app_context.local_model.run_forever)
     if (

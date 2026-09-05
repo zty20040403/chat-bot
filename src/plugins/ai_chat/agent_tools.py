@@ -65,6 +65,7 @@ from .sandbox import DockerSandboxManager, SandboxError
 from .storage.jobs import DurableJobStore
 from .turn_journal import TurnJournal
 from .video_analysis import DeepVideoAnalysisError, DeepVideoAnalyzer
+from .agent.execution import active_agent_step
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 DELIVERABLE_SUFFIXES = {
@@ -204,7 +205,7 @@ class AgentToolExecutor:
     ) -> None:
         self.bot = bot
         self.event = event
-        self.owner = owner
+        self._owner = owner
         self.sandbox_manager = sandbox_manager
         self.max_file_bytes = max(0, int(max_file_bytes))
         self.ledger = ledger
@@ -223,6 +224,11 @@ class AgentToolExecutor:
             ledger,
             scope=scope,
         )
+
+    @property
+    def owner(self) -> str:
+        step = active_agent_step.get()
+        return f"{self._owner}:{step}" if step else self._owner
 
     @property
     def canonical_messages_enabled(self) -> bool:

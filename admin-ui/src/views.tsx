@@ -16,6 +16,7 @@ import {
   X,
 } from 'lucide-react'
 import { TokenUsageChart } from './TokenUsageChart'
+import { SubAgentControls } from './SubAgentControls'
 import { LocalModelPanel, ModelRouteSummary } from './LocalModelPanel'
 import {
   DataTable,
@@ -198,7 +199,8 @@ function SubAgentFlow({ detail, loading, error, now, roles }: { detail: any; loa
   const runsByStep = new Map(runs.map((run) => [String(run.step_key), run]))
   const contextsByRun = new Map(rows(detail?.run_contexts).map((item) => [Number(item.run_id), item.context]))
   const latestRunFinish = runs.reduce((latest, run) => Math.max(latest, Number(run.finished_at ?? 0)), 0)
-  const planSteps = [...rows(task?.plan?.steps), ...rows(task?.plan?.adaptive_steps)]
+  const planSteps = [...rows(task?.plan?.steps), ...rows(task?.plan?.adaptive_steps),
+    ...runs.filter(run => String(run.step_key).startsWith(`acceptance_r${detail?.control?.revision ?? 1}_`)).map(run => ({ id: run.step_key, agent: run.role, depends_on: run.dependencies }))]
   const workerStages = planLayers(planSteps).map((layer) => layer.map((step) => {
     const run = runsByStep.get(String(step.id))
     return run ? {
@@ -479,10 +481,11 @@ export function TasksView({ plane, onOpenDetail }: { plane: Plane; onOpenDetail:
           {agentRoles.map((role) => <div className="agent-role-summary" key={role.role} title={`${role.description} · ${rows(role.allowed_tools).length} 个工具`}><div><strong>{role.title}</strong><code>{role.role}</code></div><span><b>{rows(role.allowed_tools).length}</b><small>工具</small></span></div>)}
         </div>
         <div className="subagent-task-list">
-          {subagentTasks.slice(0, 5).map((task) => <article className={`subagent-task-row ${selectedTaskId === Number(task.task_id) ? 'selected' : ''}`} key={task.task_id}><div className="subagent-task-copy"><div className="subagent-task-heading"><code>{task.handle}</code><span>{compactScope(task.scope_key)}</span><time>{fmtTime(task.updated_at)}</time></div><p title={task.objective}>{task.objective}</p><PlanFlow steps={task.plan?.steps} /></div><div className="subagent-task-side"><StatusBadge value={task.status} /><div className="subagent-task-actions"><button className="icon-button" title="查看 Agent 执行拓扑" aria-label={`查看 ${task.handle} 执行拓扑`} onClick={() => setSelectedTaskId(Number(task.task_id))}><GitBranch size={15} /></button>{['received', 'planning', 'running', 'verifying', 'cancelling'].includes(task.status) && <button className="icon-button danger" title="取消 Sub-Agent 任务" aria-label={`取消 ${task.handle}`} onClick={() => void plane.mutate('subagents', `/subagents/${task.task_id}/cancel`, 'POST', {}, ['subagents', 'tasks'])}><Square size={15} /></button>}</div></div></article>)}
+          {subagentTasks.slice(0, 5).map((task) => <article className={`subagent-task-row ${selectedTaskId === Number(task.task_id) ? 'selected' : ''}`} key={task.task_id}><div className="subagent-task-copy"><div className="subagent-task-heading"><code>{task.handle}</code><span>{compactScope(task.scope_key)}</span><time>{fmtTime(task.updated_at)}</time></div><p title={task.objective}>{task.objective}</p><PlanFlow steps={task.plan?.steps} /></div><div className="subagent-task-side"><StatusBadge value={task.status} /><div className="subagent-task-actions"><button className="icon-button" title="查看 Agent 执行拓扑" aria-label={`查看 ${task.handle} 执行拓扑`} onClick={() => setSelectedTaskId(Number(task.task_id))}><GitBranch size={15} /></button>{['received', 'queued', 'planning', 'running', 'verifying', 'cancelling', 'interrupted'].includes(task.status) && <button className="icon-button danger" title="取消 Sub-Agent 任务" aria-label={`取消 ${task.handle}`} onClick={() => void plane.mutate('subagents', `/subagents/${task.task_id}/cancel`, 'POST', {}, ['subagents', 'tasks'])}><Square size={15} /></button>}</div></div></article>)}
         </div>
         {!subagentTasks.length && <EmptyState>还没有 Sub-Agent 任务</EmptyState>}
         <SubAgentFlow detail={subagentDetail} loading={subagentDetailLoading} error={subagentDetailError} now={clock} roles={agentRoles} />
+        {subagentDetail?.task && <SubAgentControls key={subagentDetail.task.task_id} detail={subagentDetail} plane={plane} models={rows(subagents.model_options)} roles={agentRoles} />}
       </Section>
       <Section title="运行中的 Agent" description="取消会触发当前任务的取消路径">
         <DataTable><thead><tr><th>任务</th><th>会话</th><th>摘要</th><th>耗时</th><th></th></tr></thead><tbody>{tasks.map((task) => <tr key={task.task_id}><td><code>{task.task_id}</code></td><td>{task.conversation_id}</td><td>{task.summary}</td><td>{fmtDuration(task.elapsed_seconds)}</td><td className="actions"><button className="icon-button danger" title="取消任务" onClick={() => void plane.mutate('tasks', `/tasks/${task.task_id}/cancel`, 'POST', {}, ['tasks'])}><Square size={15} /></button></td></tr>)}</tbody></DataTable>

@@ -65,8 +65,10 @@
           ./migrations)
         (lib.fileset.fileFilter (file: file.hasExt "py") ./tests)
         ./tests/fixtures/context_accuracy_cases.json
+        ./tests/fixtures/subagent_entry_cases.json
         (lib.fileset.fileFilter (file: file.hasExt "js") ./tools)
         ./tools/context_eval.py
+        ./tools/evaluate_subagent_entry.py
         ./tools/qwen_control.py
         (lib.fileset.fileFilter (
             file:

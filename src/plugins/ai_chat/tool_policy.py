@@ -52,6 +52,7 @@ class ToolApproval:
 
 
 _READ_TOOLS = {
+    "read_agent_result",
     "web_search",
     "query_alerts",
     "read_image_text",
@@ -231,6 +232,11 @@ def _policy_registry() -> dict[str, ToolPolicy]:
         timeout_seconds=3600.0,
         max_identical_calls=1,
     )
+    policies["revise_subagent"] = ToolPolicy(risk="medium", idempotency="keyed",
+        side_effects=("resume:agent", "write:task-ledger"), timeout_seconds=30, max_identical_calls=1)
+    policies["import_agent_artifact"] = ToolPolicy(risk="low", idempotency="idempotent",
+        side_effects=("write:sandbox",), timeout_seconds=90)
+    policies["read_agent_result"] = ToolPolicy(risk="low", idempotency="pure", timeout_seconds=10)
     policies["sandbox_destroy"] = ToolPolicy(
         risk="critical",
         idempotency="idempotent",

@@ -443,6 +443,49 @@ class DockerSandboxManager:
             raise SandboxError(result.stderr or "写入文件失败。")
         return len(content)
 
+    async def install_readonly_file(self, owner: str, sandbox_id: str, path: str, content: bytes) -> None:
+        name = await self._owned_container(owner, sandbox_id)
+        target = self._workspace_path(path)
+        if not target.startswith("/workspace/upstream/") or not self.image:
+            raise SandboxError("只读交接需要非 root 的高级沙盒和 upstream 路径。")
+        # Root owns both the file and its ancestors; uid 1000 cannot chmod or unlink the snapshot.
+        script = """import os,stat,sys,uuid
+content=sys.stdin.buffer.read()
+parts=sys.argv[1].split('/')[2:]
+fd=os.open('/workspace',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+for part in parts[:-1]:
+    try: os.mkdir(part,0o755,dir_fd=fd)
+    except FileExistsError: pass
+    child=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd)
+    os.close(fd); fd=child
+    os.fchown(fd,0,0); os.fchmod(fd,0o755)
+try:
+    old=os.open(parts[-1],os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=fd)
+except FileNotFoundError:
+    old=None
+if old is not None:
+    with os.fdopen(old,'rb') as f:
+        info=os.fstat(f.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid!=0 or info.st_mode&0o222:
+            raise ValueError('Untrusted existing artifact')
+        if f.read()!=content: raise ValueError('Artifact content conflict')
+else:
+    temporary='.import-'+uuid.uuid4().hex
+    try:
+        out=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=fd)
+        with os.fdopen(out,'wb') as f:
+            f.write(content); f.flush(); os.fsync(f.fileno()); os.fchmod(f.fileno(),0o444)
+        os.replace(temporary,parts[-1],src_dir_fd=fd,dst_dir_fd=fd)
+    finally:
+        try: os.unlink(temporary,dir_fd=fd)
+        except FileNotFoundError: pass
+os.close(fd)
+"""
+        result = await self._run("docker", "exec", "-i", "--user", "0", name,
+            "python", "-c", script, target, input_bytes=content, timeout=60)
+        if result.returncode:
+            raise SandboxError("无法导入只读产物")
+
     async def read_file(
         self,
         owner: str,
@@ -492,6 +535,12 @@ class DockerSandboxManager:
         if requested is not None and requested > 0:
             limits.append(int(requested))
         return min(limits) if limits else None
+
+    async def start_owned(self, owner: str, sandbox_id: str) -> None:
+        name = await self._owned_container(owner, sandbox_id, require_running=False)
+        result = await self._run("docker", "start", name, timeout=30)
+        if result.returncode:
+            raise SandboxError(self._docker_error(result.stderr))
 
     async def _owned_container(
         self,

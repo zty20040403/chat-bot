@@ -32,8 +32,6 @@ SANDBOX_TOOLS = frozenset(
         "sandbox_read_file",
         "sandbox_destroy",
         "import_file_to_sandbox",
-        "send_file_from_sandbox",
-        "send_image_from_sandbox",
         "job_cancel",
     }
 )
@@ -87,7 +85,7 @@ AGENT_SPECS: dict[SubAgentRole, AgentSpec] = {
         description="在隔离沙盒中编写、运行和验证代码。",
         instructions=(
             "所有代码和命令必须在任务沙盒中执行。完成前检查实际输出；需要交付时"
-            "发送文件，并报告执行结果和未解决问题。"
+            "返回真实文件句柄，由宿主验收后发送，并报告执行结果和未解决问题。"
         ),
         allowed_tools=COMMON_READ_TOOLS | BROWSER_TOOLS | SANDBOX_TOOLS | {"use_skill"},
         model_policy="coding",

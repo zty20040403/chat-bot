@@ -209,6 +209,7 @@ class Settings:
     durable_job_max_attempts: int
     durable_job_concurrency: int
     subagents_enabled: bool
+    subagent_entry_enabled: bool
     subagent_max_steps: int
     subagent_max_parallelism: int
     subagent_max_tool_rounds: int
@@ -657,6 +658,7 @@ class Settings:
                 32,
             ),
             subagents_enabled=_get_bool("AI_SUBAGENTS_ENABLED", True),
+            subagent_entry_enabled=_get_bool("AI_SUBAGENT_ENTRY_ENABLED", True),
             subagent_max_steps=min(
                 max(_get_int("AI_SUBAGENT_MAX_STEPS", 8), 1),
                 12,
@@ -666,8 +668,8 @@ class Settings:
                 6,
             ),
             subagent_max_tool_rounds=min(
-                max(_get_int("AI_SUBAGENT_MAX_TOOL_ROUNDS", 6), 1),
-                12,
+                max(_get_int("AI_SUBAGENT_MAX_TOOL_ROUNDS", 20), 1),
+                32,
             ),
             subagent_timeout_seconds=min(
                 max(_get_int("AI_SUBAGENT_TIMEOUT_SECONDS", 600), 30),

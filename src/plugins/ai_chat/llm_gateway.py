@@ -6,6 +6,8 @@ import logging
 import re
 import time
 from collections import deque
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import Enum
 from types import SimpleNamespace
@@ -20,6 +22,18 @@ from .observability import telemetry
 
 
 _logger = logging.getLogger(__name__)
+_profile_scope: ContextVar[frozenset[str] | None] = ContextVar("completion_profile_scope", default=None)
+
+
+@contextmanager
+def completion_profile_scope(names: frozenset[str]):
+    """Nested callers may narrow routing, never widen their parent's scope."""
+    parent = _profile_scope.get()
+    token = _profile_scope.set(names if parent is None else names & parent)
+    try:
+        yield
+    finally:
+        _profile_scope.reset(token)
 
 
 class LLMError(RuntimeError):
@@ -772,6 +786,9 @@ class LLMGateway:
         primary: ModelProfile,
         kwargs: dict[str, Any],
     ) -> list[ModelProfile]:
+        scope = _profile_scope.get()
+        if scope is not None and primary.name not in scope:
+            raise LLMConfigError(f"profile {primary.name!r} is outside this task's model policy")
         candidates = [primary]
         if not self._fallback_enabled or self._catalog is None:
             return candidates
@@ -789,6 +806,8 @@ class LLMGateway:
         automatic.sort(key=lambda item: item.provider != primary.provider)
         seen = {primary.name}
         for candidate in (*preferred, *automatic):
+            if scope is not None and candidate.name not in scope:
+                continue
             if candidate.name in seen or not candidate.configured:
                 continue
             if not _profile_supports_request(candidate, kwargs):

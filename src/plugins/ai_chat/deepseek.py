@@ -8,11 +8,15 @@ import logging
 import re
 import time
 from contextvars import ContextVar
+from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
+from functools import wraps
 from types import SimpleNamespace
-from typing import Any, Awaitable, Callable, Literal
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Optional
 
 from .ai_tools import ToolChoice, ToolDefinition
+if TYPE_CHECKING:
+    from .agent.execution import EntryDecision
 from .config import settings
 from .llm_gateway import (
     LLMConfigError,
@@ -21,6 +25,7 @@ from .llm_gateway import (
     LLMGateway,
     classify_llm_failure,
     thinking_extra_body,
+    completion_profile_scope,
 )
 from .model_catalog import ModelCatalog, ModelProfile
 from .observability import current_trace_id, telemetry
@@ -37,6 +42,8 @@ ChatMessage = dict[str, Any]
 ToolExecutor = Callable[[str, dict[str, Any]], Awaitable[str]]
 FeedbackProvider = Callable[[], Awaitable[list[str]]]
 FinalTextSink = Callable[[str], Awaitable[None]]
+EntryHandler = Callable[["EntryDecision"], Awaitable[Optional[str]]]
+TranscriptSink = Callable[[list[ChatMessage]], None]
 LoopEventKind = Literal[
     "model_note",
     "tool_started",
@@ -76,10 +83,15 @@ class DeepSeekTrace:
     total_tokens: int = 0
     model_routes: list[dict[str, str]] = field(default_factory=list)
     model_routing: list[dict[str, Any]] = field(default_factory=list)
+    execution_decisions: list[dict[str, Any]] = field(default_factory=list)
+    response_models: list[str] = field(default_factory=list)
     trace_id: str = field(default_factory=current_trace_id)
     created_at: int = field(default_factory=lambda: int(time.time()))
 
     def add_usage(self, response: Any) -> None:
+        response_model = str(getattr(response, "model", "") or "").strip()
+        if response_model and response_model not in self.response_models:
+            self.response_models.append(response_model)
         usage = _model_dump(getattr(response, "usage", None))
         input_tokens = _safe_usage_int(
             usage.get("prompt_tokens") or usage.get("input_tokens")
@@ -95,6 +107,8 @@ class DeepSeekTrace:
     def to_payload(self) -> dict[str, Any]:
         return {
             "v": 2,
+            "execution_decisions": self.execution_decisions,
+            "response_models": self.response_models,
             "provider": self.provider,
             "model": self.model,
             "profile": self.profile,
@@ -475,6 +489,16 @@ async def ask_deepseek_json(
     return payload
 
 
+def _with_entry_model_scope(method):
+    @wraps(method)
+    async def wrapped(*args, **kwargs):
+        names = kwargs.get("entry_allowed_profiles")
+        with completion_profile_scope(names) if names is not None else nullcontext():
+            return await method(*args, **kwargs)
+    return wrapped
+
+
+@_with_entry_model_scope
 async def ask_deepseek_with_tools(
     user_text: str,
     history: list[ChatMessage],
@@ -497,11 +521,18 @@ async def ask_deepseek_with_tools(
     approval_checker: ApprovalChecker | None = None,
     handoff_tool: ToolHandoff | None = None,
     compensate_tool: ToolCompensator | None = None,
+    entry_handler: EntryHandler | None = None,
+    entry_max_steps: int = 8,
+    entry_profile: ModelProfile | None = None,
+    entry_allowed_profiles: frozenset[str] | None = None,
+    transcript_sink: TranscriptSink | None = None,
 ) -> str:
     _last_completion_profile.set(None)
     selected_profile = _resolve_profile(profile, model)
-    if not tools or not selected_profile.capabilities.tools:
-        return await ask_deepseek(
+    if entry_handler is not None and not (entry_profile or selected_profile).capabilities.tools:
+        raise DeepSeekConfigError("The execution entry requires a tool-capable model")
+    if entry_handler is None and (not tools or not selected_profile.capabilities.tools):
+        answer = await ask_deepseek(
             user_text,
             history,
             group_context=group_context,
@@ -514,6 +545,9 @@ async def ask_deepseek_with_tools(
             final_text_sink=final_text_sink,
             final_stream_state=final_stream_state,
         )
+        if transcript_sink is not None:
+            transcript_sink([*history, {"role": "user", "content": user_text}, {"role": "assistant", "content": answer}])
+        return answer
 
     messages = _build_messages(
         user_text,
@@ -527,6 +561,31 @@ async def ask_deepseek_with_tools(
     if trace is not None:
         _configure_trace(trace, selected_profile)
         trace.messages.append({"role": "user", "content": user_text})
+    if entry_handler is not None:
+        from .agent.execution import ENTRY_PROMPT
+
+        main_tools = ", ".join(tool["function"]["name"] for tool in enabled_tool_definitions(tools))
+        messages.insert(1, {"role": "system", "content": ENTRY_PROMPT + f"\n最多 {entry_max_steps} 个步骤。\n本轮提供的工具：" + main_tools})
+        decision, decision_message = await _execution_entry(
+            messages, entry_profile or selected_profile, trace=trace, max_steps=entry_max_steps,
+            allowed_profiles=entry_allowed_profiles,
+        )
+        result = await entry_handler(decision)
+        if decision.mode in {"workflow", "revise"} or (decision.mode == "direct" and decision.answer):
+            answer = decision.answer if decision.mode == "direct" else str(result or "")
+            if trace is not None:
+                trace.messages.append({"role": "assistant", "content": answer})
+            return answer
+        messages.append(decision_message)
+        decision_result = {
+            "role": "tool", "tool_call_id": decision_message["tool_calls"][0]["id"],
+            "content": result or "direct: continue with the necessary tools, without claiming unperformed work",
+        }
+        messages.append(decision_result)
+        if trace is not None:
+            trace.messages.extend([decision_message, decision_result])
+        messages.append({"role": "system", "content": "执行入口已完成。不要再次调用 decide_execution；根据工具结果继续读取或回复，仍缺少执行工作时通过专业子任务完成。"})
+        selected_profile = entry_profile or selected_profile
     next_tool_choice: ToolChoice = tool_choice
     tool_round = 0
     loop_sequence = 0
@@ -576,6 +635,8 @@ async def ask_deepseek_with_tools(
                 continue
             if trace is not None:
                 trace.messages.append(_assistant_final_message(message))
+            if transcript_sink is not None:
+                transcript_sink([item for item in [*messages, _assistant_final_message(message)] if item.get("role") != "system"])
             if final_stream_state is not None:
                 final_stream_state.sent_prefix = emitted
                 final_stream_state.streamed_calls += int(bool(emitted))
@@ -880,6 +941,8 @@ async def ask_deepseek_with_tools(
             messages.append(tool_message)
             if trace is not None:
                 trace.messages.append(dict(tool_message))
+        if transcript_sink is not None:
+            transcript_sink([item for item in messages if item.get("role") != "system"])
         if budget_exhausted:
             if tool_context_chars >= settings.tool_max_context_chars:
                 stop_reason = "工具结果累计内容已达到系统预算。"
@@ -908,6 +971,8 @@ async def ask_deepseek_with_tools(
         trace.add_usage(response)
     content = response.choices[0].message.content
     if content:
+        if transcript_sink is not None:
+            transcript_sink([item for item in [*messages, _assistant_final_message(response.choices[0].message)] if item.get("role") != "system"])
         if trace is not None:
             trace.messages.append(
                 _assistant_final_message(response.choices[0].message)
@@ -917,6 +982,45 @@ async def ask_deepseek_with_tools(
             final_stream_state.streamed_calls += int(bool(emitted))
         return content.strip()
     raise RuntimeError("Model did not finish after reaching the tool limit.")
+
+
+async def _execution_entry(
+    messages: list[ChatMessage], profile: ModelProfile, *,
+    trace: DeepSeekTrace | None, max_steps: int,
+    allowed_profiles: frozenset[str] | None = None,
+) -> tuple[EntryDecision, ChatMessage]:
+    from .agent.execution import DECISION_TOOL, DECISION_TOOL_NAME, EntryDecision
+
+    request_messages = list(messages)
+    for attempt in range(2):
+        with completion_profile_scope(allowed_profiles) if allowed_profiles is not None else nullcontext():
+            response, _ = await _completion_with_optional_stream(
+                None, profile, trace=trace,
+                **_completion_kwargs(request_messages, profile),
+                tools=[DECISION_TOOL],
+                tool_choice={"type": "function", "function": {"name": DECISION_TOOL_NAME}},
+            )
+        if trace is not None:
+            _configure_trace(trace, _actual_profile(profile))
+            trace.add_usage(response)
+        message = response.choices[0].message
+        try:
+            calls = list(getattr(message, "tool_calls", None) or [])
+            if len(calls) != 1 or calls[0].function.name != DECISION_TOOL_NAME or not calls[0].id:
+                raise ValueError("return exactly one decide_execution call")
+            arguments, error = _parse_tool_arguments_checked(calls[0].function.arguments)
+            if error:
+                raise ValueError(error)
+            decision = EntryDecision.parse(arguments, max_steps=max_steps)
+        except (ValueError, AttributeError, TypeError) as exc:
+            if attempt:
+                raise RuntimeError(f"Execution decision invalid; no task was started: {exc}") from exc
+            request_messages.append({"role": "system", "content": f"入口合同无效：{exc}。修正后仅调用 decide_execution；不得改成假装执行的普通回答。"})
+            continue
+        if trace is not None:
+            trace.execution_decisions.append(decision.as_payload())
+        return decision, _assistant_tool_message(message)
+    raise RuntimeError("Execution decision unavailable")
 
 
 async def _completion_with_optional_stream(

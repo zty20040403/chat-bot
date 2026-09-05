@@ -68,6 +68,9 @@ from .ai_tools import (
     force_tool,
 )
 from .agent import ContextPacket
+from .agent.execution import EntryDecision, active_agent_step
+from .agent.control import assert_job_owned
+from .agent.workspaces import StepWorkspaces
 from .context_policy import (
     chronological_projection_budget,
     choose_context_policy,
@@ -126,7 +129,7 @@ from .stickers import (
 from .turn_journal import (
     tool_catalog_fingerprint,
 )
-from .tool_policy import approval_from_user_text
+from .tool_policy import approval_from_user_text, tool_enabled
 from .web_search import (
     SearchError,
     SearchResult,
@@ -280,11 +283,12 @@ class ToolExecutor(HandlerService):
         final_stream_state: FinalStreamState | None = None,
         task_mode: bool = False,
         simple_chat_profile: str = "",
+        resume_task_id: int | None = None,
     ) -> Message | str:
         if isinstance(event, GroupMessageEvent) and not self.services.group_enabled(event.group_id):
             return "这个群暂时没有开启 AI。"
 
-        if len(user_text) > self.context.settings.max_input_chars:
+        if resume_task_id is None and len(user_text) > self.context.settings.max_input_chars:
             return f"问题太长了，先压到 {self.context.settings.max_input_chars} 个字符以内。"
 
         if force_search and not self.context.settings.search_enabled:
@@ -338,7 +342,7 @@ class ToolExecutor(HandlerService):
         voice_reply_text = ""
         visual_reply_segment: MessageSegment | None = None
         sticker_handles_this_turn: set[str] = set()
-        subagent_task_started = False
+        subagent_task_started = resume_task_id is not None
         subagent_delegations = 0
         replay_prefix: list[dict[str, Any]] = []
         replay_covered_message_ids: tuple[int, ...] = ()
@@ -379,6 +383,14 @@ class ToolExecutor(HandlerService):
         automatic_subagent_route = route_subagent_request(
             user_text,
             has_media=bool(available_image_sources or available_video),
+        )
+        semantic_entry_enabled = bool(
+            self.context.subagent_coordinator is not None
+            and self.context.settings.subagent_entry_enabled
+            and isinstance(event, GroupMessageEvent)
+            and not task_mode
+            and not any((force_search, force_ocr, force_voice_reply,
+                         force_voice_transcription, alert_query_required, video_analysis_required))
         )
 
         should_resolve_voice = (
@@ -577,6 +589,11 @@ class ToolExecutor(HandlerService):
             nonlocal subagent_task_started, subagent_delegations
 
             self.context.logger.info(f"LLM Tool Call: {name}")
+
+            if semantic_entry_enabled and active_agent_step.get() is None and name in {
+                "sandbox_create", "sandbox_exec", "sandbox_write_file", "import_file_to_sandbox",
+            }:
+                return json.dumps({"ok": False, "error": "此操作需要绑定专业子任务。单一任务调用 delegate_agent；多项交付调用 run_subagents。不要在主控直接执行或声称已完成。"}, ensure_ascii=False)
 
             if name == DELEGATE_AGENT_TOOL_NAME:
                 if subagent_delegations >= 3:
@@ -1774,10 +1791,12 @@ class ToolExecutor(HandlerService):
             )
 
         async def execute_tool(name: str, arguments: dict[str, object]) -> str:
+            assert_job_owned()
             async with telemetry.tool(name):
                 return await _execute_tool_impl(name, arguments)
 
         subagent_hooks = AgentExecutionHooks(
+            workspaces=StepWorkspaces(self.context.state_dir, agent_executor) if agent_executor else None,
             approval_checker=(
                 lambda _policy, name, arguments: approval_from_user_text(
                     user_text,
@@ -2331,10 +2350,12 @@ class ToolExecutor(HandlerService):
                     supporting_context=supporting,
                 )
 
-            async def run_delegate_goal(role: str, objective: str) -> dict[str, Any]:
+            async def run_delegate_goal(role: str, objective: str, decision: EntryDecision | None = None) -> dict[str, Any]:
                 if self.context.subagent_coordinator is None:
                     raise ValueError("Sub-Agent 任务模式暂时没有开启。")
                 packet = subagent_context_packet(objective)
+                if decision is not None:
+                    packet = with_task_contract(packet, decision)
                 return await self.context.subagent_coordinator.delegate(
                     role=role,
                     scope_key=packet.scope_key,
@@ -2349,9 +2370,10 @@ class ToolExecutor(HandlerService):
                     execute_tool=execute_tool,
                     parent_trace=turn_trace,
                     hooks=subagent_hooks,
+                    entry_decision=decision,
                 )
 
-            async def run_subagent_goal(goal: str) -> str:
+            async def run_subagent_goal(goal: str, decision: EntryDecision | None = None) -> str:
                 if self.context.subagent_coordinator is None:
                     return "Sub-Agent 任务模式暂时没有开启。"
 
@@ -2360,6 +2382,12 @@ class ToolExecutor(HandlerService):
                         await execute_tool(SAY_TOOL_NAME, {"text": text[:200]})
 
                 packet = subagent_context_packet(goal)
+                if decision is not None:
+                    packet = with_task_contract(packet, decision)
+                if self.context.subagent_coordinator.dispatcher is not None and resume_task_id is None:
+                    task = self.context.subagent_coordinator.submit(packet=packet, decision=decision,
+                        dispatch={"event": event.model_dump(mode="json"), "bot_id": bot.self_id, "profile": selected_profile.name})
+                    return f"{task.handle} 已进入后台执行，会汇报关键进度并把结果发回这里。"
                 return await self.context.subagent_coordinator.run(
                     scope_key=packet.scope_key,
                     conversation_id=conversation_id,
@@ -2374,7 +2402,45 @@ class ToolExecutor(HandlerService):
                     parent_trace=turn_trace,
                     progress=report_subagent_progress,
                     hooks=subagent_hooks,
+                    entry_decision=decision,
                 )
+
+            def with_task_contract(packet: ContextPacket, decision: EntryDecision) -> ContextPacket:
+                from dataclasses import replace
+
+                return replace(packet, constraints=(
+                    *packet.constraints, *decision.contract.constraints,
+                    "交付物：" + "；".join(decision.contract.deliverables),
+                    "验收：" + "；".join(decision.contract.acceptance),
+                ))
+
+            async def handle_entry(decision: EntryDecision) -> str | None:
+                nonlocal subagent_task_started, subagent_delegations
+                self.context.logger.info("Sub-Agent entry: mode=%s reason=%s", decision.mode, decision.reason)
+                if decision.mode == "direct":
+                    return None
+                if decision.mode == "revise":
+                    if not tool_enabled("revise_subagent"):
+                        raise ValueError("管理员已关闭任务修订")
+                    coordinator = self.context.subagent_coordinator
+                    control = coordinator.store.control(decision.task_id)
+                    revised = coordinator.revise(decision.task_id, scope_key=scope_from_event(event).key,
+                        requester_user_id=event.user_id, instruction=user_text, step_keys=decision.step_ids,
+                        expected_version=control["version"])
+                    return f"task#{decision.task_id} 已追加第 {revised['revision']} 版修改，沿用原任务和各 Agent 的独立上下文。"
+                required_tool = RUN_SUBAGENTS_TOOL_NAME if decision.mode == "workflow" else DELEGATE_AGENT_TOOL_NAME
+                if not tool_enabled(required_tool):
+                    raise ValueError(f"{required_tool} 已由管理员禁用，不能通过自动入口绕过。")
+                if decision.mode == "workflow":
+                    subagent_task_started = True
+                    return await run_subagent_goal(user_text, decision)
+                subagent_delegations += 1
+                role = decision.steps[0]["agent"]
+                if agent_executor is not None:
+                    title = self.context.subagent_coordinator.registry.worker(role).title
+                    await execute_tool(SAY_TOOL_NAME, {"text": f"{title} Agent 正在处理：{decision.steps[0]['objective'][:120]}"})
+                result = await run_delegate_goal(role, user_text, decision)
+                return json.dumps(result, ensure_ascii=False)
 
             async def run_resume_goal(task_id: int) -> str:
                 if self.context.subagent_coordinator is None:
@@ -2397,6 +2463,14 @@ class ToolExecutor(HandlerService):
                 )
 
             if self.context.subagent_coordinator is not None:
+                own_tasks = [t for t in self.context.subagent_store.recent(limit=20, scope_key=scope_from_event(event).key)
+                    if t.requester_user_id == event.user_id and self.context.subagent_store.control(t.task_id)["dispatch"]][:5]
+                if own_tasks:
+                    context_parts.append("[当前用户可续作任务，只有明确续作本任务才选 revise]\n" + json.dumps([
+                        {"task_id": t.task_id, "objective": t.objective[:600], "status": t.status,
+                         "steps": [{"id": r.step_key, "role": r.role, "objective": r.objective[:200]}
+                            for r in self.context.subagent_store.runs(t.task_id) if not r.step_key.startswith("acceptance_r")]}
+                        for t in own_tasks], ensure_ascii=False))
                 context_parts.append(
                     "[自动 Sub-Agent 编排]\n"
                     "用户不需要输入 /task。边界明确、只需要一个专业角色处理的子任务，"
@@ -2407,29 +2481,9 @@ class ToolExecutor(HandlerService):
                     "task#编号时调用 resume_subagent。"
                 )
 
-            use_automatic_subagents = bool(
-                self.context.subagent_coordinator is not None
-                and isinstance(event, GroupMessageEvent)
-                and automatic_subagent_route.delegate
-                and not any(
-                    (
-                        force_search,
-                        force_ocr,
-                        force_voice_reply,
-                        force_voice_transcription,
-                        alert_query_required,
-                        video_analysis_required,
-                    )
-                )
-            )
-            if use_automatic_subagents:
-                self.context.logger.info(
-                    "Automatic Sub-Agent route: domains=%s reasons=%s",
-                    ",".join(automatic_subagent_route.domains),
-                    ",".join(automatic_subagent_route.reasons),
-                )
-
-            if task_mode or use_automatic_subagents:
+            if resume_task_id is not None:
+                answer = await run_resume_goal(resume_task_id)
+            elif task_mode:
                 answer = await run_subagent_goal(user_text)
             else:
                 answer = await ask_deepseek_with_tools(
@@ -2477,6 +2531,10 @@ class ToolExecutor(HandlerService):
                         if agent_executor is not None
                         else None
                     ),
+                    entry_handler=handle_entry if semantic_entry_enabled else None,
+                    entry_max_steps=(self.context.subagent_coordinator.max_steps if semantic_entry_enabled else 8),
+                    entry_profile=(self.context.subagent_coordinator.entry_profile(selected_profile) if semantic_entry_enabled else None),
+                    entry_allowed_profiles=(self.context.subagent_coordinator.allowed_model_profiles() if semantic_entry_enabled else None),
                 )
         except ChatFailure:
             raise
@@ -2499,7 +2557,7 @@ class ToolExecutor(HandlerService):
             self.context.logger.exception(f"Unexpected AI chat error: {exc}")
             raise ChatFailure("我这边处理消息时出错了。", code="internal") from exc
         finally:
-            if agent_executor is not None:
+            if agent_executor is not None and not (subagent_task_started or subagent_delegations):
                 cleanup = await agent_executor.cleanup_task_sandboxes()
                 destroyed = cleanup["destroyed"]
                 failed = cleanup["failed"]
