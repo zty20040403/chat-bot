@@ -31,7 +31,7 @@ class _NoMemories:
         return []
 
 
-class _FixtureSemanticRecall:
+class _StubSemanticRecall:
     def __init__(self, hits: list[SemanticHit]) -> None:
         self.hits = hits
         self.embedder = SimpleNamespace(model="BAAI/bge-m3")
@@ -41,7 +41,8 @@ class _FixtureSemanticRecall:
 
 
 class ContextAccuracyEvaluationTests(unittest.TestCase):
-    def test_context_release_gates(self) -> None:
+    def test_projection_and_recall_wiring_contracts(self) -> None:
+        # This tests host assembly, not answer accuracy or real embedding retrieval.
         seeds = json.loads(FIXTURE.read_text(encoding="utf-8"))
         expanded = [
             (seed, prompt)
@@ -151,7 +152,7 @@ class ContextAccuracyEvaluationTests(unittest.TestCase):
                     group_memory_scope="group:100",
                     user_memory_scope="group:100:user:9",
                     memory_store=_NoMemories(),
-                    semantic_recall=_FixtureSemanticRecall(hits),
+                    semantic_recall=_StubSemanticRecall(hits),
                     budget=ContextTokenBudget(500, 500, 200, 200, 800),
                     now=current.occurred_at,
                 )

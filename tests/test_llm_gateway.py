@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -19,6 +20,7 @@ from src.plugins.ai_chat.llm_gateway import (
     LLMGateway,
     LLMProviderError,
     LLMRateLimitError,
+    ModelCircuit,
     OpenAIChatProvider,
     _anthropic_request,
     _anthropic_response,
@@ -71,7 +73,202 @@ class RecordingProvider:
         self.closed = True
 
 
+def stream_chunk(content: str = "", finish: str | None = None):
+    return SimpleNamespace(
+        choices=[SimpleNamespace(
+            delta=SimpleNamespace(content=content, tool_calls=[]), finish_reason=finish,
+        )],
+        usage=None,
+    )
+
+
+class FakeStream:
+    def __init__(self, *items):
+        self.items = iter(items)
+        self.close_count = 0
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        item = next(self.items, None)
+        if item is None:
+            raise StopAsyncIteration
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+    async def close(self):
+        self.close_count += 1
+
+
 class LLMGatewayTests(unittest.IsolatedAsyncioTestCase):
+    async def test_half_open_probe_is_released_on_cancel_or_unexpected_error(self):
+        selected = profile("primary")
+        for error in (asyncio.CancelledError(), ValueError("bad request")):
+            with self.subTest(error=type(error).__name__):
+                provider = RecordingProvider()
+                provider.create_completion = AsyncMock(side_effect=error)
+                gateway = LLMGateway({"openai-chat": provider})
+                gateway.health._circuits[selected.name] = ModelCircuit(
+                    opened_until=time.monotonic() - 1,
+                )
+                with self.assertRaises(type(error)):
+                    await gateway.create_completion(selected, messages=[])
+                circuit = gateway.health._circuits[selected.name]
+                self.assertFalse(circuit.probe_in_flight)
+                self.assertTrue(gateway.health.acquire(selected.name))
+                self.assertEqual(circuit.total_successes, 0)
+                self.assertEqual(circuit.request_count, 1)
+
+    async def test_stream_success_is_recorded_after_consumption_once(self):
+        selected = profile("primary")
+        raw = FakeStream(stream_chunk("hello"), stream_chunk(finish="stop"))
+        provider = RecordingProvider()
+        provider.create_completion = AsyncMock(return_value=raw)
+        gateway = LLMGateway({"openai-chat": provider})
+        gateway.health._circuits[selected.name] = ModelCircuit(opened_until=time.monotonic() - 1)
+        routes = []
+        with patch("src.plugins.ai_chat.llm_gateway.telemetry.observe_model") as observe:
+            result = await gateway.create_completion_with_profile(
+                selected, messages=[], stream=True, route_sink=routes.append,
+            )
+            circuit = gateway.health._circuits[selected.name]
+            self.assertEqual(circuit.total_successes, 0)
+            self.assertEqual(circuit.request_count, 0)
+            self.assertTrue(circuit.probe_in_flight)
+            self.assertFalse(routes)
+            observe.assert_not_called()
+            await asyncio.sleep(0.01)
+            chunks = [chunk async for chunk in result.response]
+            await result.response.close()
+            self.assertEqual(len(chunks), 2)
+            self.assertEqual(circuit.total_successes, 1)
+            self.assertEqual(circuit.request_count, 1)
+            self.assertGreaterEqual(circuit.request_seconds, 0.01)
+            self.assertFalse(circuit.probe_in_flight)
+            self.assertEqual(raw.close_count, 1)
+            self.assertEqual(len(routes), 1)
+            self.assertEqual(result.routing["outcomes"][-1]["status"], "succeeded")
+            observe.assert_called_once()
+            self.assertEqual(observe.call_args.kwargs["status"], "succeeded")
+
+    async def test_stream_failure_before_first_chunk_uses_backup(self):
+        primary, backup = profile("primary"), profile("backup")
+        catalog = ModelCatalog({p.name: p for p in (primary, backup)}, default_profile=primary.name)
+        broken = FakeStream(stream_chunk(), httpx.ReadError("disconnected"))
+        good = FakeStream(stream_chunk("answer", "stop"))
+        provider = RecordingProvider()
+        provider.create_completion = AsyncMock(side_effect=[broken, good])
+        gateway = LLMGateway({"openai-chat": provider}, catalog=catalog, failure_threshold=1)
+        result = await gateway.create_completion_with_profile(primary, messages=[], stream=True)
+        self.assertEqual(result.profile.name, backup.name)
+        self.assertEqual(broken.close_count, 1)
+        self.assertEqual([c.choices[0].delta.content async for c in result.response], ["answer"])
+        self.assertEqual(gateway.health_snapshot()[primary.name]["total_failures"], 1)
+        self.assertEqual(gateway.health_snapshot()[backup.name]["fallback_uses"], 1)
+
+    async def test_mid_stream_failure_is_not_retried_or_counted_successful(self):
+        primary, backup = profile("primary"), profile("backup")
+        catalog = ModelCatalog({p.name: p for p in (primary, backup)}, default_profile=primary.name)
+        raw = FakeStream(stream_chunk("already emitted"), httpx.ReadError("disconnected"))
+        provider = RecordingProvider()
+        provider.create_completion = AsyncMock(return_value=raw)
+        gateway = LLMGateway({"openai-chat": provider}, catalog=catalog)
+        routes = []
+        result = await gateway.create_completion_with_profile(
+            primary, messages=[], stream=True, route_sink=routes.append,
+        )
+        await anext(result.response)
+        with self.assertRaises(LLMConnectionError):
+            await anext(result.response)
+        await result.response.close()
+        circuit = gateway.health._circuits[primary.name]
+        self.assertEqual((circuit.total_successes, circuit.total_failures, circuit.request_count), (0, 1, 1))
+        provider.create_completion.assert_awaited_once()
+        self.assertEqual(raw.close_count, 1)
+        self.assertEqual(routes[0]["outcomes"][-1]["reason_code"], "network")
+
+    async def test_stream_eof_without_finish_reason_is_a_failure(self):
+        selected = profile("primary")
+        provider = RecordingProvider()
+        provider.create_completion = AsyncMock(return_value=FakeStream(stream_chunk("incomplete")))
+        gateway = LLMGateway({"openai-chat": provider})
+        stream = await gateway.create_completion(selected, messages=[], stream=True)
+        with self.assertRaises(LLMConnectionError):
+            _ = [chunk async for chunk in stream]
+        self.assertEqual(gateway.health._circuits[selected.name].total_successes, 0)
+        self.assertEqual(gateway.health._circuits[selected.name].total_failures, 1)
+
+    async def test_stream_cancellation_and_early_close_release_probe(self):
+        selected = profile("primary")
+        for cancel in (False, True):
+            with self.subTest(cancel=cancel):
+                raw = FakeStream(stream_chunk("partial"), asyncio.CancelledError())
+                provider = RecordingProvider()
+                provider.create_completion = AsyncMock(return_value=raw)
+                gateway = LLMGateway({"openai-chat": provider})
+                gateway.health._circuits[selected.name] = ModelCircuit(opened_until=time.monotonic() - 1)
+                stream = await gateway.create_completion(selected, messages=[], stream=True)
+                if cancel:
+                    await anext(stream)
+                    with self.assertRaises(asyncio.CancelledError):
+                        await anext(stream)
+                await stream.close()
+                circuit = gateway.health._circuits[selected.name]
+                self.assertFalse(circuit.probe_in_flight)
+                self.assertEqual((circuit.total_successes, circuit.total_failures), (0, 0))
+                self.assertEqual(circuit.request_count, 1)
+                self.assertEqual(raw.close_count, 1)
+
+    async def test_cancellation_while_waiting_for_first_content_closes_stream(self):
+        selected = profile("primary")
+        waiting = asyncio.Event()
+
+        class BlockingStream(FakeStream):
+            async def __anext__(self):
+                waiting.set()
+                await asyncio.Event().wait()
+
+        raw = BlockingStream()
+        provider = RecordingProvider()
+        provider.create_completion = AsyncMock(return_value=raw)
+        gateway = LLMGateway({"openai-chat": provider})
+        gateway.health._circuits[selected.name] = ModelCircuit(opened_until=time.monotonic() - 1)
+        task = asyncio.create_task(gateway.create_completion(selected, messages=[], stream=True))
+        await asyncio.wait_for(waiting.wait(), timeout=1)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertTrue(gateway.health.acquire(selected.name))
+        self.assertEqual(raw.close_count, 1)
+
+    async def test_chat_stream_uses_backup_and_records_final_route(self):
+        agent = importlib.import_module("src.plugins.ai_chat.deepseek")
+        primary, backup = profile("primary"), profile("backup")
+        catalog = ModelCatalog({p.name: p for p in (primary, backup)}, default_profile=primary.name)
+        provider = RecordingProvider()
+        provider.create_completion = AsyncMock(side_effect=[
+            FakeStream(stream_chunk(), httpx.ReadError("disconnected")),
+            FakeStream(stream_chunk(), stream_chunk("answer\n\n", "stop")),
+        ])
+        gateway = LLMGateway({"openai-chat": provider}, catalog=catalog)
+        sink, trace = AsyncMock(), agent.DeepSeekTrace()
+        with (
+            patch.object(agent, "_model_catalog", catalog),
+            patch.object(agent, "_llm_gateway", gateway),
+        ):
+            response, emitted = await agent._create_streaming_completion(
+                sink, primary, trace=trace, messages=[],
+            )
+            self.assertEqual(agent._actual_profile(primary).name, backup.name)
+        self.assertEqual(response.choices[0].message.content, "answer\n\n")
+        self.assertEqual(emitted, "answer\n\n")
+        sink.assert_awaited_once_with("answer\n\n")
+        self.assertEqual(len(trace.model_routing), 1)
+        self.assertEqual(trace.model_routing[0]["actual_profile"], backup.name)
+        self.assertEqual(trace.model_routing[0]["outcomes"][-1]["status"], "succeeded")
+
     def test_qwen_thinking_uses_native_switch(self) -> None:
         agent = importlib.import_module("src.plugins.ai_chat.deepseek")
         for mode, expected in (

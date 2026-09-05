@@ -65,6 +65,7 @@
           ./migrations)
         (lib.fileset.fileFilter (file: file.hasExt "py") ./tests)
         (lib.fileset.fileFilter (file: file.hasExt "js") ./tools)
+        ./tools/context_eval.py
         ./tools/qwen_control.py
         (lib.fileset.fileFilter (
             file:

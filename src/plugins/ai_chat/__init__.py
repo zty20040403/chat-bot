@@ -1,254 +1,32 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import json
-import re
-import sqlite3
-import time
-from dataclasses import dataclass
-from datetime import datetime
-from types import FunctionType
-from typing import Any, Awaitable, Callable
-from zoneinfo import ZoneInfo
 
-import httpx
 from src.bot_storage import DatabaseError
 
-from nonebot import (
-    get_app,
-    get_bots,
-    get_driver,
-    logger,
-)
-from nonebot.adapters.onebot.v11 import (
-    Bot,
-    GroupMessageEvent,
-    Message,
-    MessageEvent,
-    MessageSegment,
-    PrivateMessageEvent,
-)
-from nonebot.adapters.onebot.v11.exception import ActionFailed
-from nonebot.exception import FinishedException, IgnoredException, NetworkError
+from nonebot import get_app, get_driver, logger
+from nonebot.adapters.onebot.v11 import GroupMessageEvent, MessageEvent
+from nonebot.exception import IgnoredException
 from nonebot.message import event_preprocessor
-from nonebot.params import CommandArg
 
-from .agent_tools import AGENT_TOOL_PROMPT, AgentToolExecutor
 from .alert_notifier import AlertNotificationService
 from .adapters import OneBotIngestAdapter
 from .bootstrap import register_http_surfaces
-from .bridges import (
-    BridgeError,
-    BridgeOutcomeUnknown,
-    BridgePermanentError,
-    BridgeRetryableError,
-)
-from .ai_tools import (
-    CONTEXT_EXPAND_TOOL_NAME,
-    CONTEXT_SEARCH_TOOL_NAME,
-    DELEGATE_AGENT_TOOL_NAME,
-    FIND_STICKERS_TOOL_NAME,
-    GROUP_MEMBERS_TOOL_NAME,
-    INSPECT_SOURCE_TOOL_NAME,
-    MEMORY_ADD_TOOL_NAME,
-    MEMORY_LIST_TOOL_NAME,
-    MEMORY_REMOVE_TOOL_NAME,
-    PIN_MESSAGE_TOOL_NAME,
-    QUERY_ALERTS_TOOL_NAME,
-    READ_IMAGE_TEXT_TOOL_NAME,
-    REPLY_WITH_VOICE_TOOL_NAME,
-    RESUME_SUBAGENT_TOOL_NAME,
-    RUN_SUBAGENTS_TOOL_NAME,
-    SAY_TOOL_NAME,
-    SEND_QQ_FACE_TOOL_NAME,
-    SEND_STICKER_TOOL_NAME,
-    TRANSCRIBE_VOICE_TOOL_NAME,
-    REMINDER_CANCEL_TOOL_NAME,
-    REMINDER_LIST_TOOL_NAME,
-    REMINDER_SET_TOOL_NAME,
-    UNPIN_MESSAGE_TOOL_NAME,
-    USE_SKILL_TOOL_NAME,
-    VIEW_IMAGE_TOOL_NAME,
-    VIEW_VIDEO_TOOL_NAME,
-    WEB_SEARCH_TOOL_NAME,
-    available_tools,
-    force_tool,
-)
-from .agent import ContextPacket
 from .config import settings
-from .context_policy import (
-    ContextPolicy,
-    chronological_projection_budget,
-    choose_context_policy,
-    proactive_context_policy,
-)
-from .context_store import CaptureCandidate, estimate_tokens
-from .context_pipeline import (
-    assess_evidence,
-    ReferenceResolver,
-    TurnContextPlan,
-    build_hybrid_recall,
-    fit_token_budget,
-    route_recall,
-    rule_recall_route,
-)
-from .context_pipeline.ranking import combine_budgeted_sections
-from .conversation_scope import ConversationScope
-from .deepseek import (
-    AgentLoopEvent,
-    DeepSeekTrace,
-    DeepSeekConfigError,
-    FinalStreamState,
-    ask_deepseek,
-    ask_deepseek_json,
-    ask_deepseek_with_tools,
-    configure_llm_runtime,
-)
-from .delivery import Delivery
-from .historian import (
-    DreamOperation,
-    HistorianResult,
-    parse_dream_payload,
-    parse_historian_payload,
-    render_capture,
-)
-from .ledger import MessageLedger
-from .long_term_memory import LongTermMemoryError, MemoryEntry
-from .media_library import choose_sticker_candidate, requests_sticker_variation
-from .model_catalog import (
-    ModelCatalogError,
-    ModelProfile,
-    SUPPORTED_REASONING_EFFORTS,
-)
-from .subagents import AgentExecutionHooks, route_subagent_request
-from .message_ir import MessageBody, TextNode, render_fallback_text
-from .observability import observed_ai_turn, telemetry
-from .onebot_codec import (
-    compose_onebot_reply,
-    decode_onebot_message,
-    record_onebot_event,
-    record_onebot_outgoing,
-    render_onebot_body,
-    scope_from_event,
-)
-from .onebot_model_output import (
-    OneBotModelOutputResolver,
-    decode_group_members,
-)
-from .output_planner import (
-    ACK_FACE_ID,
-    FAILURE_FACE_ID,
-    PROCESSING_FACE_ID,
-    PlannedChunk,
-    face_prompt_table,
-    plan_reply,
-)
-from .proactive import (
-    ProactiveCheckGate,
-    ProactiveDecision,
-    is_candidate_message,
-    parse_proactive_decision,
-    should_use_proactive_voice,
-)
-from .runtime_clock import runtime_clock_prompt
+from .context_pipeline import ReferenceResolver
+from .deepseek import DeepSeekConfigError, configure_llm_runtime
+from .observability import observed_ai_turn
+from .onebot_codec import decode_onebot_message
+from .proactive import ProactiveCheckGate
 from .paths import CACHE_DIR, PROJECT_ROOT, STATE_DIR
-from .ocr import (
-    OCRError,
-    image_sources,
-    recognize_images,
-    replied_image_sources,
-    reply_message_id,
-)
-from .reminders import Reminder
 from .runtime import build_app_context
-from .sandbox import SandboxError
-from .application import ChatOrchestrator, ChatPorts, ChatTurnResult
-from .semantic_recall import (
-    SemanticDocument,
-)
-from .stickers import (
-    ai_reply_message,
-    choose_ai_reply_kaomoji,
-    clear_learned_stickers,
-    learn_stickers_from_message,
-    learned_sticker_count,
-    list_stickers,
-    qq_face_message,
-    random_local_sticker_message,
-    random_sticker_message,
-)
-from .turn_journal import (
-    tool_catalog_fingerprint,
-    tool_effect_labels,
-)
-from .tool_policy import approval_from_user_text
-from .web_search import (
-    SearchError,
-    SearchResult,
-    render_direct_search_results,
-    render_search_sources,
-    search_freshness,
-    search_web,
-)
-from .voice import (
-    VoiceError,
-    contains_voice,
-    replied_voice_message_id,
-    synthesize_silk_voice,
-    transcribe_voice,
-)
+from .handler_services import HandlerServices
+from .application import ChatTurnResult
+from .stickers import ai_reply_message
+from .voice import VoiceError
 from .video_analysis import DeepVideoAnalysisError, DeepVideoAnalyzer
-from .video import (
-    VideoReference,
-    contains_video,
-    indexed_video_sources,
-    message_video_sources,
-    replied_video_message_id,
-)
-from .matchers import (
-    ai,
-    ai_reset,
-    canonical_ingest_tracker,
-    clear_data,
-    group_activity_tracker,
-    group_context_recorder,
-    image_auto_description,
-    image_ocr,
-    control_command,
-    effort_command,
-    memory_command,
-    mention_ai,
-    model_command,
-    pin_command,
-    pins_command,
-    proactive_chat,
-    qq_face,
-    sticker,
-    sticker_status,
-    shell_command,
-    task_status,
-    task_stop,
-    unpin_command,
-    usage_command,
-    voice_answer,
-    voice_transcription,
-    web_search,
-)
-from . import command_handlers as _command_handlers
-from . import message_ingest as _message_ingest
-from . import trigger_service as _trigger_service
-from . import chat_orchestrator as _chat_orchestrator
-from . import tool_executor as _tool_executor
-from . import reply_service as _reply_service
-from . import onebot_delivery as _onebot_delivery
-
-SEND_RETRY_DELAY_SECONDS = 2.0
-SEND_RETRY_MAX_CHARS = 800
-TURN_PROMPT_VERSION = "qqbot-turn-v13"
-BOT_VERSION = "0.10.2"
-EMPTY_MENTION_FOLLOW_UP = "你觉得呢"
-SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+from . import matchers
+from .handler_constants import BOT_VERSION
 proactive_check_gate = ProactiveCheckGate()
 
 app_context = build_app_context(
@@ -267,8 +45,7 @@ app_context = build_app_context(
 )
 configure_llm_runtime(app_context.model_catalog, app_context.llm_gateway)
 
-# Compatibility aliases keep the existing handlers and external tests stable
-# while construction and ownership live in one explicit application context.
+# Legacy exports preserve imports. Services use the injected AppContext, not these aliases.
 memory = app_context.memory
 group_context = app_context.group_context
 long_term_memory = app_context.long_term_memory
@@ -346,17 +123,11 @@ driver = get_driver()
 
 
 def _is_group_enabled(group_id: int) -> bool:
-    override = model_preferences.get_group_enabled_override(group_id)
-    if override is not None:
-        return override
-    return settings.is_group_enabled(group_id)
+    return handlers.group_enabled(group_id)
 
 
 def _is_group_vision_auto_describe_enabled(group_id: int) -> bool:
-    override = model_preferences.get_group_vision_auto_describe_override(group_id)
-    if override is not None:
-        return override
-    return settings.vision_auto_describe
+    return handlers.auto_describe_enabled(group_id)
 
 
 @event_preprocessor
@@ -377,41 +148,130 @@ register_http_surfaces(
 
 
 TrackedAIResult = ChatTurnResult
-_GROUP_CONVERSATION_ID_PATTERN = re.compile(r"^group:(\d+):user:(\d+)$")
 
 
-_IMPLEMENTATION_MODULES = (
-    _command_handlers, _message_ingest, _trigger_service,
-    _chat_orchestrator, _tool_executor, _reply_service, _onebot_delivery,
-)
+handlers = HandlerServices(app_context, video_analyzer=video_analyzer)
+handlers.reference_resolver = reference_resolver
+handlers.proactive_gate = proactive_check_gate
 
+_format_elapsed = handlers.commands._format_elapsed
+_task_status_text = handlers.commands._task_status_text
+_usage_text = handlers.commands._usage_text
+_memory_scopes = handlers.commands._memory_scopes
+_memory_provenance = handlers.commands._memory_provenance
+_memory_scope_keys = handlers.commands._memory_scope_keys
+_current_long_term_memory = handlers.commands._current_long_term_memory
+_memory_entry_payload = handlers.commands._memory_entry_payload
+_canonical_message_id = handlers.commands._canonical_message_id
+_reminder_id = handlers.commands._reminder_id
+_parse_reminder_due_at = handlers.commands._parse_reminder_due_at
+_reminder_payload = handlers.commands._reminder_payload
+_pin_target_message_id = handlers.commands._pin_target_message_id
+_looks_like_secret = handlers.commands._looks_like_secret
+_can_edit_group_memory = handlers.commands._can_edit_group_memory
+_memory_label = handlers.commands._memory_label
+_find_visible_memory = handlers.commands._find_visible_memory
+_direct_web_search = handlers.commands._direct_web_search
+_resolve_ocr_sources = handlers.commands._resolve_ocr_sources
+_resolve_voice_message_id = handlers.commands._resolve_voice_message_id
+_finish_image_ocr = handlers.commands._finish_image_ocr
+_finish_voice_transcription = handlers.commands._finish_voice_transcription
+handle_ai = handlers.commands.handle_ai
+handle_web_search = handlers.commands.handle_web_search
+handle_image_ocr = handlers.commands.handle_image_ocr
+handle_voice_answer = handlers.commands.handle_voice_answer
+handle_voice_transcription = handlers.commands.handle_voice_transcription
+handle_model_command = handlers.commands.handle_model_command
+handle_effort_command = handlers.commands.handle_effort_command
+_shell_owner = handlers.commands._shell_owner
+_format_shell_result = handlers.commands._format_shell_result
+handle_shell_command = handlers.commands.handle_shell_command
+handle_memory_command = handlers.commands.handle_memory_command
+_ack_control_command = handlers.commands._ack_control_command
+handle_control_command = handlers.commands.handle_control_command
+handle_pin_command = handlers.commands.handle_pin_command
+handle_unpin_command = handlers.commands.handle_unpin_command
+handle_pins_command = handlers.commands.handle_pins_command
+handle_task_status = handlers.commands.handle_task_status
+handle_usage_command = handlers.commands.handle_usage_command
+handle_task_stop = handlers.commands.handle_task_stop
+handle_mention_ai = handlers.commands.handle_mention_ai
+handle_sticker = handlers.commands.handle_sticker
+handle_qq_face = handlers.commands.handle_qq_face
+handle_sticker_status = handlers.commands.handle_sticker_status
+handle_ai_reset = handlers.commands.handle_ai_reset
+handle_clear_data = handlers.commands.handle_clear_data
+handle_canonical_ingest = handlers.ingest.handle_canonical_ingest
+handle_group_activity = handlers.ingest.handle_group_activity
+handle_image_auto_description = handlers.ingest.handle_image_auto_description
+handle_group_context_recorder = handlers.ingest.handle_group_context_recorder
+_generate_proactive_reply = handlers.triggers._generate_proactive_reply
+_semantic_documents = handlers.triggers._semantic_documents
+_semantic_index_once = handlers.triggers._semantic_index_once
+_semantic_index_loop = handlers.triggers._semantic_index_loop
+_record_background_usage = handlers.triggers._record_background_usage
+_generate_historian = handlers.triggers._generate_historian
+_dream_evidence = handlers.triggers._dream_evidence
+_generate_dream = handlers.triggers._generate_dream
+_historian_loop = handlers.triggers._historian_loop
+_dream_loop = handlers.triggers._dream_loop
+handle_proactive_chat = handlers.triggers.handle_proactive_chat
+_conversation_scope = handlers.chat._conversation_scope
+_image_cache_key = handlers.chat._image_cache_key
+_indexed_image_sources = handlers.chat._indexed_image_sources
+_refresh_vision_source_url = handlers.chat._refresh_vision_source_url
+_voice_cache_key = handlers.chat._voice_cache_key
+_video_cache_key = handlers.chat._video_cache_key
+_has_available_ocr_image = handlers.chat._has_available_ocr_image
+_has_available_voice = handlers.chat._has_available_voice
+_sender_name = handlers.chat._sender_name
+_sender_label = handlers.chat._sender_label
+_render_message_text = handlers.chat._render_message_text
+_current_group_context = handlers.chat._current_group_context
+_current_user_identity = handlers.chat._current_user_identity
+_current_turn_context = handlers.chat._current_turn_context
+_reply_target_turn = handlers.chat._reply_target_turn
+_drain_task_feedback = handlers.chat._drain_task_feedback
+_record_turn_loop_event = handlers.chat._record_turn_loop_event
+_conversation_id = handlers.chat._conversation_id
+_group_default_model_preference = handlers.chat._group_default_model_preference
+_group_member_reasoning_preference = handlers.chat._group_member_reasoning_preference
+_preferred_model_profile = handlers.chat._preferred_model_profile
+_background_model_profile = handlers.chat._background_model_profile
+_running_tasks_for_event = handlers.chat._running_tasks_for_event
+_group_turn_context_plan = handlers.chat._group_turn_context_plan
+_record_turn_trigger = handlers.chat._record_turn_trigger
+_build_chat_orchestrator = handlers.chat._build_chat_orchestrator
+_run_tracked_ai = handlers.chat._run_tracked_ai
+_private_vision_required = handlers.tools._private_vision_required
+_video_analysis_required = handlers.tools._video_analysis_required
+_alert_query_required = handlers.tools._alert_query_required
+_alert_tools_allowed = handlers.tools._alert_tools_allowed
+_resolve_video_reference = handlers.tools._resolve_video_reference
+_ask_ai = handlers.tools._ask_ai
+_is_napcat_send_timeout = handlers.replies._is_napcat_send_timeout
+_make_retry_text = handlers.replies._make_retry_text
+_reply_target_segments = handlers.replies._reply_target_segments
+_reply_message = handlers.replies._reply_message
+_planned_chunk_message = handlers.replies._planned_chunk_message
+_render_planned_chunk_message = handlers.replies._render_planned_chunk_message
+_reaction_target_message_id = handlers.replies._reaction_target_message_id
+_set_message_reaction = handlers.replies._set_message_reaction
+_make_retry_message = handlers.replies._make_retry_message
+_finish_safely = handlers.replies._finish_safely
+_finish_sticker = handlers.replies._finish_sticker
+_finish_qq_face = handlers.replies._finish_qq_face
+_finish_tracked_ai = handlers.replies._finish_tracked_ai
+_journal_reply_text = handlers.replies._journal_reply_text
+_sent_message_id = handlers.replies._sent_message_id
+_deliver_reminder = handlers.delivery._deliver_reminder
+_reminder_loop = handlers.delivery._reminder_loop
+_deliver_onebot_outbox = handlers.delivery._deliver_onebot_outbox
+_delivery_loop = handlers.delivery._delivery_loop
+_matrix_sync_loop = handlers.delivery._matrix_sync_loop
 
-def _bind_implementation_module(module: Any) -> None:
-    """Bind extracted functions to this live composition namespace."""
-    for name, implementation in vars(module).items():
-        if not (
-            (name.startswith("_") or name.startswith("handle_"))
-            and callable(implementation)
-            and getattr(implementation, "__module__", "") == module.__name__
-            and hasattr(implementation, "__code__")
-        ):
-            continue
-        rebound = FunctionType(
-            implementation.__code__, globals(), name,
-            implementation.__defaults__, implementation.__closure__,
-        )
-        rebound.__kwdefaults__ = implementation.__kwdefaults__
-        rebound.__annotations__ = implementation.__annotations__
-        rebound.__doc__ = implementation.__doc__
-        globals()[name] = rebound
-
-
-for _implementation_module in _IMPLEMENTATION_MODULES:
-    _bind_implementation_module(_implementation_module)
-
-# Observability is an entrypoint concern, so the extracted use case stays
-# independent from the metrics decorator.
-_run_tracked_ai = observed_ai_turn(_run_tracked_ai)
+handlers.chat._run_tracked_ai = observed_ai_turn(handlers.chat._run_tracked_ai)
+_run_tracked_ai = handlers.chat._run_tracked_ai
 
 if vision_worker is not None:
     vision_worker.set_source_resolver(_refresh_vision_source_url)
@@ -429,6 +289,8 @@ onebot_ingest_adapter = OneBotIngestAdapter(
     recent_images=recent_images, recent_voices=recent_voices,
     recent_videos=recent_videos,
 )
+
+handlers.ingest_adapter = onebot_ingest_adapter
 
 @driver.on_startup
 async def start_background_tasks() -> None:
@@ -536,32 +398,32 @@ async def shutdown_app_context() -> None:
 
 
 for _matcher, _handler in (
-    (ai, handle_ai),
-    (web_search, handle_web_search),
-    (image_ocr, handle_image_ocr),
-    (voice_answer, handle_voice_answer),
-    (voice_transcription, handle_voice_transcription),
-    (model_command, handle_model_command),
-    (memory_command, handle_memory_command),
-    (control_command, handle_control_command),
-    (effort_command, handle_effort_command),
-    (shell_command, handle_shell_command),
-    (pin_command, handle_pin_command),
-    (unpin_command, handle_unpin_command),
-    (pins_command, handle_pins_command),
-    (task_status, handle_task_status),
-    (usage_command, handle_usage_command),
-    (task_stop, handle_task_stop),
-    (mention_ai, handle_mention_ai),
-    (canonical_ingest_tracker, handle_canonical_ingest),
-    (group_activity_tracker, handle_group_activity),
-    (image_auto_description, handle_image_auto_description),
-    (proactive_chat, handle_proactive_chat),
-    (sticker, handle_sticker),
-    (qq_face, handle_qq_face),
-    (sticker_status, handle_sticker_status),
-    (group_context_recorder, handle_group_context_recorder),
-    (ai_reset, handle_ai_reset),
-    (clear_data, handle_clear_data),
+    (matchers.ai, handle_ai),
+    (matchers.web_search, handle_web_search),
+    (matchers.image_ocr, handle_image_ocr),
+    (matchers.voice_answer, handle_voice_answer),
+    (matchers.voice_transcription, handle_voice_transcription),
+    (matchers.model_command, handle_model_command),
+    (matchers.memory_command, handle_memory_command),
+    (matchers.control_command, handle_control_command),
+    (matchers.effort_command, handle_effort_command),
+    (matchers.shell_command, handle_shell_command),
+    (matchers.pin_command, handle_pin_command),
+    (matchers.unpin_command, handle_unpin_command),
+    (matchers.pins_command, handle_pins_command),
+    (matchers.task_status, handle_task_status),
+    (matchers.usage_command, handle_usage_command),
+    (matchers.task_stop, handle_task_stop),
+    (matchers.mention_ai, handle_mention_ai),
+    (matchers.canonical_ingest_tracker, handle_canonical_ingest),
+    (matchers.group_activity_tracker, handle_group_activity),
+    (matchers.image_auto_description, handle_image_auto_description),
+    (matchers.proactive_chat, handle_proactive_chat),
+    (matchers.sticker, handle_sticker),
+    (matchers.qq_face, handle_qq_face),
+    (matchers.sticker_status, handle_sticker_status),
+    (matchers.group_context_recorder, handle_group_context_recorder),
+    (matchers.ai_reset, handle_ai_reset),
+    (matchers.clear_data, handle_clear_data),
 ):
     _matcher.handle()(_handler)

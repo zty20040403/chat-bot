@@ -19,6 +19,16 @@ class ChatTurnResult:
     reply: Any
     turn_id: int | None
     status: str = "succeeded"
+    error_code: str = ""
+
+
+class ChatFailure(Exception):
+    """A failed turn with a safe message that may still be delivered to the user."""
+
+    def __init__(self, reply: str, *, code: str) -> None:
+        super().__init__(reply)
+        self.reply = reply
+        self.code = code
 
 
 @dataclass(frozen=True)
@@ -195,6 +205,15 @@ class ChatOrchestrator:
                 scope_key=scope.key,
             )
             return ChatTurnResult(reply=reply, turn_id=journal_turn_id, status=status)
+        except ChatFailure as exc:
+            self._finish_turn(
+                journal_turn_id, "crashed", trace, exc.reply,
+                scope_key=scope.key, error_code=exc.code,
+            )
+            return ChatTurnResult(
+                reply=exc.reply, turn_id=journal_turn_id,
+                status="crashed", error_code=exc.code,
+            )
         except asyncio.CancelledError:
             self.logger.info(
                 f"AI task {task.task_id} cancelled for {conversation_id}."
@@ -225,14 +244,18 @@ class ChatOrchestrator:
         final_text: str = "",
         *,
         scope_key: str = "",
+        error_code: str = "",
     ) -> None:
         if self.turn_journal is not None and turn_id is not None:
             try:
+                trace_payload = trace.to_payload() if trace is not None else {}
+                if error_code:
+                    trace_payload["failure"] = {"code": error_code}
                 self.turn_journal.finish_turn(
                     turn_id,
                     status=status,
                     final_text=final_text,
-                    trace_payload=trace.to_payload() if trace is not None else None,
+                    trace_payload=trace_payload or None,
                     input_tokens=trace.input_tokens if trace is not None else 0,
                     output_tokens=trace.output_tokens if trace is not None else 0,
                     total_tokens=trace.total_tokens if trace is not None else 0,

@@ -22,7 +22,7 @@ class ModelSelectionTests(unittest.TestCase):
         self,
     ) -> None:
         module = importlib.import_module(
-            "src.plugins.ai_chat.model_preferences"
+            'src.plugins.ai_chat.model_preferences'
         )
         path = Path("reasoning.json")
         state = SimpleNamespace(load=lambda: None, save=lambda payload: None)
@@ -73,17 +73,17 @@ class ModelSelectionTests(unittest.TestCase):
             preferences = ModelPreferenceStore(Path(tmp) / "models.json")
             preferences.set("group:1:user:10", "fast")
             with (
-                patch.object(ai_chat, "model_profiles", catalog),
-                patch.object(ai_chat, "model_preferences", preferences),
+                patch.object(ai_chat.app_context, 'model_catalog', catalog),
+                patch.object(ai_chat.app_context, 'model_preferences', preferences),
                 patch.object(
-                    ai_chat,
-                    "settings",
+                    ai_chat.app_context,
+                    'settings',
                     SimpleNamespace(group_model_profiles={1: "strong"}),
                 ),
             ):
-                selected = ai_chat._preferred_model_profile("group:1:user:10")
-                neighbor = ai_chat._preferred_model_profile("group:1:user:11")
-                other_group = ai_chat._preferred_model_profile("group:2:user:11")
+                selected = ai_chat.handlers.chat._preferred_model_profile("group:1:user:10")
+                neighbor = ai_chat.handlers.chat._preferred_model_profile("group:1:user:11")
+                other_group = ai_chat.handlers.chat._preferred_model_profile("group:2:user:11")
 
         self.assertEqual(selected.name, "fast")
         self.assertEqual(selected.protocol, "openai-chat")
@@ -116,17 +116,17 @@ class ModelSelectionTests(unittest.TestCase):
             preferences = ModelPreferenceStore(Path(tmp) / "models.json")
             preferences.set_group_default(1, "strong")
             with (
-                patch.object(ai_chat, "model_profiles", catalog),
-                patch.object(ai_chat, "model_preferences", preferences),
+                patch.object(ai_chat.app_context, 'model_catalog', catalog),
+                patch.object(ai_chat.app_context, 'model_preferences', preferences),
                 patch.object(
-                    ai_chat,
-                    "settings",
+                    ai_chat.app_context,
+                    'settings',
                     SimpleNamespace(group_model_profiles={1: "fast"}),
                 ),
             ):
-                selected = ai_chat._preferred_model_profile("group:1:user:10")
+                selected = ai_chat.handlers.chat._preferred_model_profile("group:1:user:10")
                 preferences.clear_group_default(1)
-                inherited = ai_chat._preferred_model_profile("group:1:user:10")
+                inherited = ai_chat.handlers.chat._preferred_model_profile("group:1:user:10")
 
         self.assertEqual(selected.name, "strong")
         self.assertEqual(inherited.name, "fast")
@@ -150,10 +150,10 @@ class ModelSelectionTests(unittest.TestCase):
             path.write_text('{"private:10":"deleted"}', encoding="utf-8")
             preferences = ModelPreferenceStore(path)
             with (
-                patch.object(ai_chat, "model_profiles", catalog),
-                patch.object(ai_chat, "model_preferences", preferences),
+                patch.object(ai_chat.app_context, 'model_catalog', catalog),
+                patch.object(ai_chat.app_context, 'model_preferences', preferences),
             ):
-                selected = ai_chat._preferred_model_profile("private:10")
+                selected = ai_chat.handlers.chat._preferred_model_profile("private:10")
 
         self.assertEqual(selected.name, "main")
         self.assertNotIn("private-key", repr(selected))
@@ -180,11 +180,11 @@ class ModelSelectionTests(unittest.TestCase):
             reasoning = ModelPreferenceStore(root / "reasoning.json")
             reasoning.set("private:10", "gpt-5.6-luna")
             with (
-                patch.object(ai_chat, "model_profiles", catalog),
-                patch.object(ai_chat, "model_preferences", models),
-                patch.object(ai_chat, "reasoning_preferences", reasoning),
+                patch.object(ai_chat.app_context, 'model_catalog', catalog),
+                patch.object(ai_chat.app_context, 'model_preferences', models),
+                patch.object(ai_chat.app_context, 'reasoning_preferences', reasoning),
             ):
-                selected = ai_chat._preferred_model_profile("private:10")
+                selected = ai_chat.handlers.chat._preferred_model_profile("private:10")
 
         self.assertEqual(selected.name, "main")
         self.assertEqual(selected.reasoning_effort, "")
@@ -211,22 +211,22 @@ class ModelSelectionTests(unittest.TestCase):
             reasoning = ModelPreferenceStore(root / "reasoning.json")
             reasoning.set_group_member_default(1, "high")
             with (
-                patch.object(ai_chat, "model_profiles", catalog),
-                patch.object(ai_chat, "model_preferences", models),
-                patch.object(ai_chat, "reasoning_preferences", reasoning),
+                patch.object(ai_chat.app_context, 'model_catalog', catalog),
+                patch.object(ai_chat.app_context, 'model_preferences', models),
+                patch.object(ai_chat.app_context, 'reasoning_preferences', reasoning),
                 patch.object(
-                    ai_chat,
-                    "settings",
+                    ai_chat.app_context,
+                    'settings',
                     SimpleNamespace(
                         group_model_profiles={},
                         admin_user_ids={10},
                     ),
                 ),
             ):
-                admin = ai_chat._preferred_model_profile("group:1:user:10")
-                member = ai_chat._preferred_model_profile("group:1:user:11")
+                admin = ai_chat.handlers.chat._preferred_model_profile("group:1:user:10")
+                member = ai_chat.handlers.chat._preferred_model_profile("group:1:user:11")
                 reasoning.set("group:1:user:11", "xhigh")
-                overridden = ai_chat._preferred_model_profile(
+                overridden = ai_chat.handlers.chat._preferred_model_profile(
                     "group:1:user:11"
                 )
 

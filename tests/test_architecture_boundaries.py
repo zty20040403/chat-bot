@@ -3,6 +3,8 @@ from __future__ import annotations
 import ast
 import importlib
 import unittest
+from types import SimpleNamespace
+from unittest.mock import Mock
 from pathlib import Path
 
 
@@ -19,7 +21,6 @@ class ArchitectureBoundaryTests(unittest.TestCase):
             "_is_group_enabled",
             "_is_group_vision_auto_describe_enabled",
             "ignore_disabled_group_event",
-            "_bind_implementation_module",
             "start_background_tasks",
             "shutdown_app_context",
         }
@@ -29,6 +30,8 @@ class ArchitectureBoundaryTests(unittest.TestCase):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         }
         self.assertEqual(definitions, allowed_functions)
+        self.assertNotIn("FunctionType", source)
+        self.assertNotIn("globals()", source)
 
     def test_split_responsibilities_have_single_owners(self) -> None:
         expected = {
@@ -54,7 +57,8 @@ class ArchitectureBoundaryTests(unittest.TestCase):
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             definitions = {
                 node.name
-                for node in tree.body
+                for owner in tree.body if isinstance(owner, ast.ClassDef)
+                for node in owner.body
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
             }
             self.assertTrue(required <= definitions, f"{filename}: {required - definitions}")
@@ -72,11 +76,31 @@ class ArchitectureBoundaryTests(unittest.TestCase):
                 for node in ast.walk(tree)
                 if isinstance(node, ast.ImportFrom)
             }
-            self.assertNotIn(
-                ".matchers",
-                imported_modules,
-                f"{filename} must not depend on Matcher declarations",
-            )
+            self.assertNotIn(".", imported_modules, f"{filename} must not import the entrypoint")
+            self.assertFalse(any(
+                isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id in {"globals", "FunctionType", "on_message", "on_command"}
+                for node in ast.walk(tree)
+            ))
+
+    def test_handlers_keep_native_globals_and_isolated_runtime(self) -> None:
+        from src.plugins.ai_chat.handler_services import HandlerServices
+        from src.plugins.ai_chat import command_handlers
+
+        def services(profile):
+            return HandlerServices(SimpleNamespace(
+                topic_graph_store=None,
+                model_preferences=SimpleNamespace(get_group_default=Mock(return_value=profile)),
+                settings=SimpleNamespace(group_model_profiles={}),
+            ))
+
+        first, second = services("first"), services("second")
+        self.assertEqual(first.chat._group_default_model_preference("group:1:user:7"), "first")
+        self.assertEqual(second.chat._group_default_model_preference("group:1:user:7"), "second")
+        self.assertEqual(first.chat._group_default_model_preference("group:1:user:7"), "first")
+        self.assertIs(first.commands._format_elapsed.__func__.__globals__, vars(command_handlers))
+        self.assertIs(first.tools.services.chat, first.chat)
+        self.assertIsNot(first.chat, second.chat)
 
     def test_application_does_not_depend_on_chat_platform_sdk(self) -> None:
         self._assert_no_imports(

@@ -1729,113 +1729,41 @@ class SubAgentCoordinator:
                     delivered_artifacts.add(key)
             return raw_result
 
-        while pending:
-            if self.store.cancellation_requested(task.task_id):
-                raise asyncio.CancelledError
-            settled = [
-                step
-                for step in pending.values()
-                if all(dependency in completed for dependency in step.dependencies)
-            ]
-            blocked = [
-                step
-                for step in settled
-                if any(not completed[dependency].usable for dependency in step.dependencies)
-            ]
-            for step in blocked:
-                outcome = self._skip_step(task, step, runs[step.key], completed)
-                completed[step.key] = outcome
-                pending.pop(step.key, None)
-                await self._notify_progress(
-                    progress,
-                    f"{task.handle} · {self.registry.worker(step.role).title} Agent："
-                    "因上游步骤失败，已跳过。",
-                )
-
-            ready = [step for step in settled if step not in blocked]
-            if not ready and not blocked:
-                raise RuntimeError("任务依赖图无法继续执行")
-            ready = ready[: self.max_parallelism]
-            for step in ready:
-                await self._notify_progress(
-                    progress,
-                    f"{task.handle} · {self.registry.worker(step.role).title} Agent："
-                    f"{step.objective[:120]}",
-                )
-            if not ready:
-                continue
-            outcomes = await asyncio.gather(
-                *(
-                    self._run_step_reliably(
-                        task,
-                        step,
-                        runs[step.key],
-                        context=context,
-                        upstream={
-                            dependency: completed[dependency].result
-                            for dependency in step.dependencies
-                        },
-                        selected_profile=selected_profile,
-                        tools_by_name=tools_by_name,
-                        execute_tool=tracked_execute_tool,
-                        hooks=hooks,
-                    )
-                    for step in ready
-                )
+        async def run_ready_step(step: TaskStep) -> tuple[StepOutcome, StepOutcome | None]:
+            nonlocal adaptive_repairs_used
+            outcome = await self._run_step_reliably(
+                task, step, runs[step.key], context=context,
+                upstream={key: completed[key].result for key in step.dependencies},
+                selected_profile=selected_profile, tools_by_name=tools_by_name,
+                execute_tool=tracked_execute_tool, hooks=hooks,
             )
-            for outcome in outcomes:
-                completed[outcome.step.key] = outcome
-                repaired_step = _repair_target(outcome.step.key)
-                if repaired_step and outcome.usable:
-                    completed[repaired_step] = outcome
-                pending.pop(outcome.step.key, None)
-                _merge_trace(parent_trace, outcome.trace)
-            for failed in [item for item in outcomes if item.state == "failed"]:
-                if adaptive_repairs_used >= self.max_adaptive_repairs:
-                    break
+            repair = None
+            if outcome.state == "failed" and adaptive_repairs_used < self.max_adaptive_repairs:
+                # Reserve before awaiting: concurrent failures share one repair budget.
+                adaptive_repairs_used += 1
                 attempted, repair = await self._attempt_adaptive_repair(
-                    task,
-                    failed,
-                    context=context,
-                    completed=completed,
-                    selected_profile=selected_profile,
-                    tools_by_name=tools_by_name,
-                    execute_tool=tracked_execute_tool,
-                    parent_trace=parent_trace,
-                    progress=progress,
-                    hooks=hooks,
-                    repair_number=adaptive_repairs_used + 1,
+                    task, outcome, context=context,
+                    completed={**completed, step.key: outcome},
+                    selected_profile=selected_profile, tools_by_name=tools_by_name,
+                    execute_tool=tracked_execute_tool, parent_trace=parent_trace,
+                    progress=progress, hooks=hooks, repair_number=adaptive_repairs_used,
                 )
-                if attempted:
-                    adaptive_repairs_used += 1
-                if repair is not None:
-                    completed[repair.step.key] = repair
-                    if repair.usable:
-                        completed[failed.step.key] = repair
-            self.store.append_checkpoint(
-                task.task_id,
-                "step_batch_completed",
-                {
-                    "completed": {
-                        key: {
-                            "role": item.step.role,
-                            "status": item.state,
-                            "result": item.result,
-                            "error": item.error,
-                        }
-                        for key, item in completed.items()
-                    },
-                    "pending": sorted(pending),
-                },
+                if not attempted:
+                    adaptive_repairs_used -= 1
+            return outcome, repair
+
+        in_flight: dict[asyncio.Task, TaskStep] = {}
+        try:
+            await self._schedule_workflow(
+                task, pending=pending, completed=completed, runs=runs,
+                in_flight=in_flight, run_step=run_ready_step,
+                parent_trace=parent_trace, progress=progress,
             )
-            finished = "、".join(
-                f"{self.registry.worker(item.step.role).title}{_outcome_progress_label(item)}"
-                for item in outcomes
-            )
-            await self._notify_progress(
-                progress,
-                f"{task.handle} 进度：{finished}。",
-            )
+        finally:
+            for worker in in_flight:
+                worker.cancel()
+            if in_flight:
+                await asyncio.gather(*in_flight, return_exceptions=True)
 
         delivery_results = await self._deliver_requested_artifacts(
             task,
@@ -1884,6 +1812,91 @@ class SubAgentCoordinator:
         self.store.set_task_state(task.task_id, status, result=result)
         self.store.append_checkpoint(task.task_id, "workflow_completed", result)
         return f"{task.handle}\n{final_text}" if final_text else f"{task.handle} 已完成。"
+
+    async def _schedule_workflow(
+        self, task: TaskRecord, *, pending: dict[str, TaskStep],
+        completed: dict[str, StepOutcome], runs: Mapping[str, RunRecord],
+        in_flight: dict[asyncio.Task, TaskStep],
+        run_step: Callable[[TaskStep], Awaitable[tuple[StepOutcome, StepOutcome | None]]],
+        parent_trace: DeepSeekTrace | None, progress: ProgressCallback | None,
+    ) -> None:
+        while pending or in_flight:
+            if self.store.cancellation_requested(task.task_id):
+                raise asyncio.CancelledError
+            settled = [
+                step
+                for step in pending.values()
+                if all(dependency in completed for dependency in step.dependencies)
+            ]
+            blocked = [
+                step
+                for step in settled
+                if any(not completed[dependency].usable for dependency in step.dependencies)
+            ]
+            for step in blocked:
+                outcome = self._skip_step(task, step, runs[step.key], completed)
+                completed[step.key] = outcome
+                pending.pop(step.key, None)
+                await self._notify_progress(
+                    progress,
+                    f"{task.handle} · {self.registry.worker(step.role).title} Agent："
+                    "因上游步骤失败，已跳过。",
+                )
+
+            ready = [step for step in settled if step not in blocked]
+            if not ready and not blocked and not in_flight:
+                raise RuntimeError("任务依赖图无法继续执行")
+            ready = ready[: max(self.max_parallelism - len(in_flight), 0)]
+            for step in ready:
+                pending.pop(step.key)
+                in_flight[asyncio.create_task(run_step(step))] = step
+                await self._notify_progress(
+                    progress,
+                    f"{task.handle} · {self.registry.worker(step.role).title} Agent："
+                    f"{step.objective[:120]}",
+                )
+            if not in_flight:
+                continue
+            done, _ = await asyncio.wait(in_flight, return_when=asyncio.FIRST_COMPLETED)
+            outcomes = []
+            for worker in sorted(done, key=lambda item: in_flight[item].key):
+                outcome, repair = worker.result()
+                in_flight.pop(worker)
+                outcomes.append(outcome)
+                completed[outcome.step.key] = outcome
+                repaired_step = _repair_target(outcome.step.key)
+                if repaired_step and outcome.usable:
+                    completed[repaired_step] = outcome
+                _merge_trace(parent_trace, outcome.trace)
+                if repair is not None:
+                    completed[repair.step.key] = repair
+                    if repair.usable:
+                        completed[outcome.step.key] = repair
+            self.store.append_checkpoint(
+                task.task_id,
+                "step_completed",
+                {
+                    "completed": {
+                        key: {
+                            "role": item.step.role,
+                            "status": item.state,
+                            "result": item.result,
+                            "error": item.error,
+                        }
+                        for key, item in completed.items()
+                    },
+                    "pending": sorted(pending),
+                    "running": sorted(step.key for step in in_flight.values()),
+                },
+            )
+            finished = "、".join(
+                f"{self.registry.worker(item.step.role).title}{_outcome_progress_label(item)}"
+                for item in outcomes
+            )
+            await self._notify_progress(
+                progress,
+                f"{task.handle} 进度：{finished}。",
+            )
 
     async def _attempt_adaptive_repair(
         self,

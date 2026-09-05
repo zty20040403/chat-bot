@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import asyncio
 import os
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
@@ -369,6 +370,91 @@ class SubAgentPlanTests(unittest.TestCase):
 
 
 class SubAgentCoordinatorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ready_child_runs_before_slow_sibling_finishes(self) -> None:
+        store = SubAgentStore(":memory:")
+        self.addCleanup(store.close)
+        profile = ModelProfile(name="test", provider="test", protocol="openai-chat", model="test", base_url="http://127.0.0.1", api_key_required=False)
+        coordinator = SubAgentCoordinator(store, ModelCatalog({"test": profile}, default_profile="test"), logger=Mock(), max_parallelism=2)
+        slow_started, child_started = asyncio.Event(), asyncio.Event()
+        order, active, peak = [], 0, 0
+        plan = {"steps": [
+            {"id": "fast", "agent": "researcher", "objective": "FAST", "depends_on": []},
+            {"id": "slow", "agent": "researcher", "objective": "SLOW", "depends_on": []},
+            {"id": "child", "agent": "analyst", "objective": "CHILD", "depends_on": ["fast"]},
+        ]}
+
+        async def work(text, *_args, **_kwargs):
+            nonlocal active, peak
+            name = text.split("[你的步骤]\n", 1)[1].split("\n\n", 1)[0]
+            active += 1
+            peak = max(peak, active)
+            order.append(name + " start")
+            try:
+                if name == "FAST":
+                    await slow_started.wait()
+                elif name == "SLOW":
+                    slow_started.set()
+                    await child_started.wait()
+                else:
+                    child_started.set()
+                return '{"status":"success","summary":"done"}'
+            finally:
+                active -= 1
+                order.append(name + " end")
+
+        with (
+            patch("src.plugins.ai_chat.subagents.ask_deepseek_json", new=AsyncMock(return_value=plan)),
+            patch("src.plugins.ai_chat.subagents.ask_deepseek_with_tools", new=work),
+            patch("src.plugins.ai_chat.subagents.ask_deepseek", new=AsyncMock(return_value="done")),
+        ):
+            await asyncio.wait_for(coordinator.run(
+                scope_key="qq:group:1", conversation_id="group:1:user:2",
+                requester_user_id=2, trigger_message_id=3, objective="compare",
+                context="", selected_profile=profile, tools=[], execute_tool=AsyncMock(),
+            ), timeout=2)
+        self.assertLess(order.index("CHILD start"), order.index("SLOW end"))
+        self.assertEqual(peak, 2)
+        self.assertEqual(active, 0)
+        task = store.recent(limit=1)[0]
+        self.assertEqual(task.status, "completed")
+        self.assertTrue(any(c["phase"] == "step_completed" for c in store.checkpoints(task.task_id)))
+
+    async def test_parent_cancellation_awaits_all_in_flight_workers(self) -> None:
+        store = SubAgentStore(":memory:")
+        self.addCleanup(store.close)
+        profile = ModelProfile(name="test", provider="test", protocol="openai-chat", model="test", base_url="http://127.0.0.1", api_key_required=False)
+        coordinator = SubAgentCoordinator(store, ModelCatalog({"test": profile}, default_profile="test"), logger=Mock(), max_parallelism=2)
+        started, active, stopped = asyncio.Event(), 0, 0
+        plan = {"steps": [
+            {"id": name, "agent": "researcher", "objective": name, "depends_on": []}
+            for name in ("a", "b")
+        ]}
+        async def work(*_args, **_kwargs):
+            nonlocal active, stopped
+            active += 1
+            if active == 2:
+                started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                active -= 1
+                stopped += 1
+        with (
+            patch("src.plugins.ai_chat.subagents.ask_deepseek_json", new=AsyncMock(return_value=plan)),
+            patch("src.plugins.ai_chat.subagents.ask_deepseek_with_tools", new=work),
+        ):
+            task = asyncio.create_task(coordinator.run(
+                scope_key="qq:group:1", conversation_id="group:1:user:2",
+                requester_user_id=2, trigger_message_id=3, objective="compare",
+                context="", selected_profile=profile, tools=[], execute_tool=AsyncMock(),
+            ))
+            try:
+                await asyncio.wait_for(started.wait(), timeout=2)
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        self.assertEqual((active, stopped), (0, 2))
+
     async def test_failed_step_gets_one_bounded_adaptive_repair(self) -> None:
         store = SubAgentStore(":memory:")
         profile = ModelProfile(

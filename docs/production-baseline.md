@@ -40,8 +40,11 @@
   `/clear` 前已经不可见的消息也不能借向量索引重新进入提示词。
 - 焦点、群现场、群记忆、个人记忆和语义历史使用独立 Token 分区，避免任何单一
   来源挤占完整上下文。
-- `tests/fixtures/context_accuracy_cases.json` 保存匿名化的真实追问回归案例；当前基线
-  要求焦点命中率 100%，并同时验证跨群内容不泄漏。
+- `tests/fixtures/context_accuracy_cases.json` 保存追问回归场景与提示词变体。
+  原文覆盖率和预设检索结果的单元测试只证明组装逻辑，不能证明焦点命中率。
+- `tools/context_eval.py` 单独评分模型实际回答、关联原文、Recall@5 和跨群/用户错误。
+  未运行真实模型基准前，不宣称达到 90% 或 100% 的回答准确率。运行方法与限制见
+  [上下文评测](context-evaluation.md)。
 
 ## 尚未完成
 

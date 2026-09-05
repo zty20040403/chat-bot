@@ -5,13 +5,14 @@ import json
 import logging
 import re
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
 from types import SimpleNamespace
 from typing import Any, Callable, Protocol
 
 import httpx
-from openai import APIConnectionError, APIStatusError, AsyncOpenAI, RateLimitError
+from openai import APIConnectionError, APIError, APIStatusError, AsyncOpenAI, RateLimitError
 
 from .model_catalog import ModelCatalog, ModelProfile
 from .local_model import LocalModelRuntime
@@ -158,6 +159,11 @@ class ModelHealthRegistry:
         circuit.request_count += 1
         circuit.request_seconds += max(seconds, 0.0)
 
+    def release(self, profile_name: str) -> None:
+        circuit = self._circuits.get(profile_name)
+        if circuit is not None:
+            circuit.probe_in_flight = False
+
     def readiness_recovered(self, profile_name: str) -> None:
         circuit = self._circuits.get(profile_name)
         if circuit is not None and circuit.last_error_kind in {"network", "model_unavailable"}:
@@ -229,6 +235,113 @@ class ModelHealthRegistry:
                 "average_latency_ms": round(circuit.request_seconds * 1000 / circuit.request_count, 1) if circuit.request_count else None,
             }
         return result
+
+
+def _completion_error(profile: ModelProfile, exc: Exception) -> Exception:
+    if isinstance(exc, RateLimitError):
+        return LLMRateLimitError(f"{profile.provider} rate limit reached")
+    if isinstance(exc, (APIConnectionError, httpx.TransportError)):
+        return LLMConnectionError(f"could not read response from {profile.provider}")
+    if isinstance(exc, APIStatusError):
+        return LLMProviderError(profile.provider, exc.status_code, _openai_error_detail(exc))
+    if isinstance(exc, APIError):
+        return LLMProviderError(profile.provider, 502, "invalid streaming response")
+    return exc
+
+
+async def _close_completion_stream(stream: Any) -> None:
+    close = getattr(stream, "close", None) or getattr(stream, "aclose", None)
+    if callable(close):
+        try:
+            await close()
+        except Exception:
+            _logger.warning("Could not close model stream transport", exc_info=True)
+
+
+class _CompletionStream:
+    """Keep the request alive until consumption finishes or the caller closes it."""
+
+    def __init__(
+        self,
+        stream: Any,
+        profile: ModelProfile,
+        finish: Callable[[BaseException | None], None],
+    ) -> None:
+        self._stream = stream
+        self._iterator = stream.__aiter__()
+        self._profile = profile
+        self._finish = finish
+        self._finished = False
+        self._closed = False
+        self._saw_finish = False
+        self._first: deque[Any] = deque()
+
+    async def prime(self) -> None:
+        # Fail before handing any chunks to the caller so the gateway can fall back.
+        try:
+            while True:
+                chunk = await self._next()
+                self._first.append(chunk)
+                for choice in (getattr(chunk, "choices", None) or []):
+                    delta = getattr(choice, "delta", None)
+                    if getattr(choice, "finish_reason", None) is not None or any(
+                        getattr(delta, name, None)
+                        for name in ("content", "reasoning_content", "tool_calls", "refusal")
+                    ):
+                        return
+        except StopAsyncIteration:
+            raise LLMConnectionError("Model stream returned no chunks") from None
+
+    async def _next(self) -> Any:
+        try:
+            chunk = await self._iterator.__anext__()
+            self._saw_finish = self._saw_finish or any(
+                getattr(choice, "finish_reason", None) is not None
+                for choice in (getattr(chunk, "choices", None) or [])
+            )
+            return chunk
+        except Exception as exc:
+            normalized = _completion_error(self._profile, exc)
+            if normalized is exc:
+                raise
+            raise normalized from exc
+
+    def __aiter__(self) -> _CompletionStream:
+        return self
+
+    def _complete(self, exc: BaseException | None) -> None:
+        if not self._finished:
+            self._finished = True
+            self._finish(exc)
+
+    async def __anext__(self) -> Any:
+        if self._finished:
+            raise StopAsyncIteration
+        if self._first:
+            return self._first.popleft()
+        try:
+            return await self._next()
+        except StopAsyncIteration:
+            if not self._saw_finish:
+                exc = LLMConnectionError("Model stream ended without a finish reason")
+                self._complete(exc)
+                await self.close()
+                raise exc from None
+            self._complete(None)
+            await self.close()
+            raise
+        except BaseException as exc:
+            self._complete(exc)
+            await self.close()
+            raise
+
+    async def close(self) -> None:
+        try:
+            self._complete(asyncio.CancelledError())
+        finally:
+            if not self._closed:
+                self._closed = True
+                await _close_completion_stream(self._stream)
 
 
 class CompletionProvider(Protocol):
@@ -441,7 +554,9 @@ class LLMGateway:
         last_error: BaseException | None = None
         outcomes: list[dict[str, Any]] = []
 
-        def finish_route(actual: ModelProfile | None) -> dict[str, Any]:
+        def finish_route(
+            actual: ModelProfile | None, *, publish: bool = True,
+        ) -> dict[str, Any]:
             first = outcomes[0] if outcomes else {}
             routing = {
                 "requested_profile": profile.name, "requested_model": profile.model,
@@ -452,7 +567,7 @@ class LLMGateway:
                 "fallback": actual is not None and actual.name != profile.name,
                 "outcomes": list(outcomes), "created_at": int(time.time()),
             }
-            if route_sink is not None:
+            if publish and route_sink is not None:
                 route_sink(routing)
             return routing
 
@@ -491,11 +606,61 @@ class LLMGateway:
                 )
                 continue
             attempted += 1
-            request = _request_for_profile(candidate, kwargs)
             request_started = time.monotonic()
+            managed_stream = False
+            raw_stream = None
+            routing: dict[str, Any] = {}
+
+            def finish_stream(exc: BaseException | None) -> None:
+                duration = time.monotonic() - request_started
+                try:
+                    if exc is None:
+                        status, reason = "succeeded", "模型响应接收完成"
+                        code = "direct"
+                        self.health.record_success(
+                            candidate.name, used_as_fallback=candidate.name != profile.name,
+                        )
+                    elif isinstance(exc, (LLMError, asyncio.TimeoutError, httpx.TimeoutException)):
+                        failure = classify_llm_failure(exc)
+                        self.health.record_failure(candidate.name, failure, exc)
+                        status = code = failure.kind.value
+                        reason = "模型响应流失败：" + code
+                    else:
+                        status = "cancelled" if isinstance(exc, asyncio.CancelledError) else "unexpected_error"
+                        code, reason = status, "模型响应流被中断"
+                    outcomes[-1].update(
+                        status="succeeded" if exc is None else "failed",
+                        reason_code=code, reason=reason,
+                    )
+                    telemetry.observe_model(
+                        requested_profile=profile.name, actual_profile=candidate.name,
+                        provider=candidate.provider_identity, status=status, duration=duration,
+                    )
+                    routing.update(finish_route(candidate if exc is None else None))
+                finally:
+                    self.health.release(candidate.name)
+                    self.health.record_latency(candidate.name, duration)
+
             try:
-                with telemetry.stage("model.request"):
+                request = _request_for_profile(candidate, kwargs)
+                with telemetry.stage("model.connect" if request.get("stream") else "model.request"):
                     response = await self._create_single(candidate, **request)
+                    if request.get("stream"):
+                        raw_stream = response
+                        response = _CompletionStream(raw_stream, candidate, finish_stream)
+                        await response.prime()
+                if request.get("stream"):
+                    outcomes.append({
+                        "profile": candidate.name, "status": "streaming",
+                        "reason_code": "direct", "reason": "正在接收模型响应",
+                    })
+                    routing.update(finish_route(candidate, publish=False))
+                    managed_stream = True
+                    return CompletionResult(
+                        response=response, profile=candidate,
+                        fallback_count=max(attempted - 1, 1) if candidate.name != profile.name else 0,
+                        routing=routing,
+                    )
             except (LLMError, asyncio.TimeoutError, httpx.TimeoutException) as exc:
                 failure = classify_llm_failure(exc)
                 outcomes.append({"profile": candidate.name, "status": "failed", "reason_code": failure.kind.value, "reason": "模型请求失败：" + failure.kind.value})
@@ -530,7 +695,11 @@ class LLMGateway:
                 )
                 raise
             finally:
-                self.health.record_latency(candidate.name, time.monotonic() - request_started)
+                if not managed_stream:
+                    self.health.release(candidate.name)
+                    self.health.record_latency(candidate.name, time.monotonic() - request_started)
+                    if raw_stream is not None:
+                        await _close_completion_stream(raw_stream)
             outcomes.append({"profile": candidate.name, "status": "succeeded", "reason_code": "direct", "reason": "直接使用首选模型"})
             telemetry.observe_model(
                 requested_profile=profile.name,
