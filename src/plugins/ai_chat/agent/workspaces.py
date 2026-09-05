@@ -53,7 +53,7 @@ class StepWorkspaces:
             if not match:
                 raise ValueError("Artifact must reference a real sandbox file")
             sandbox_id, path = match.groups()
-            content = await self.manager.read_file(self.executor.owner, sandbox_id, path, max_bytes=None)
+            content = await self.manager.read_file(self.executor.owner, sandbox_id, path.removeprefix("/workspace/"), max_bytes=None)
             if not content:
                 raise ValueError("Artifact is empty")
             digest = await asyncio.to_thread(self._persist, task_id, content)
@@ -75,9 +75,9 @@ class StepWorkspaces:
         filename = PurePosixPath(item["name"]).name
         if filename in {"", ".", ".."}:
             raise ValueError("Invalid artifact filename")
-        target = f"/workspace/upstream/{item['snapshot']}/{filename}"
+        target = f"upstream/{item['snapshot']}/{filename}"
         await self.manager.install_readonly_file(self.executor.owner, sandbox_id, target, content)
-        return json.dumps({"ok": True, "path": target, "sha256": item["snapshot"], "read_only": True})
+        return json.dumps({"ok": True, "path": f"/workspace/{target}", "sha256": item["snapshot"], "read_only": True})
 
     async def validate(self, task_id: int, artifact: dict) -> dict:
         content = await asyncio.to_thread(self._path(task_id, artifact.get("snapshot", "")).read_bytes)
@@ -87,7 +87,7 @@ class StepWorkspaces:
         sandbox = await self.manager.create(self.executor.owner, "python")
         sid = sandbox["sandbox_id"]
         suffix = Path(artifact["name"]).suffix.lower()
-        path = "/workspace/acceptance" + suffix
+        path = "acceptance" + suffix
         try:
             await self.manager.write_file(self.executor.owner, sid, path, content, allow_large=True)
             commands = {
@@ -121,7 +121,7 @@ class StepWorkspaces:
         sandbox = await self.manager.create(self.executor.owner, "python")
         sid = sandbox["sandbox_id"]
         try:
-            path = "/workspace/" + PurePosixPath(artifact["name"]).name
+            path = PurePosixPath(artifact["name"]).name
             await self.manager.write_file(self.executor.owner, sid, path, content, allow_large=True)
             assert_job_owned()
             return await self.executor._send_file_from_sandbox({"sandbox_id": sid, "path": path, "filename": artifact["name"]})

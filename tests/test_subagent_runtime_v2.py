@@ -240,11 +240,32 @@ class RuntimeV2Tests(unittest.IsolatedAsyncioTestCase):
         executor.sandbox_manager.install_readonly_file = AsyncMock()
         workspaces = StepWorkspaces(Path(self.tmp.name), executor)
         artifact = (await workspaces.capture(1, [{"handle": "s123abc:/workspace/code.zip"}]))[0]
+        self.assertEqual(executor.sandbox_manager.read_file.await_args.args[2], "code.zip")
         await workspaces.import_artifact(1, {"code": {"artifacts": [artifact]}}, {"step_id": "code", "artifact_index": 0, "sandbox_id": "s456abc"})
+        self.assertEqual(executor.sandbox_manager.install_readonly_file.await_args.args[2], f"upstream/{artifact['snapshot']}/code.zip")
         with self.assertRaises(ValueError):
             await workspaces.import_artifact(1, {"code": {"artifacts": [artifact]}}, {"step_id": "other", "artifact_index": 0, "sandbox_id": "s456abc"})
         with self.assertRaises(FileNotFoundError):
             await workspaces.import_artifact(2, {"code": {"artifacts": [artifact]}}, {"step_id": "code", "artifact_index": 0, "sandbox_id": "s456abc"})
+
+    async def test_validation_and_delivery_use_manager_relative_paths(self):
+        from src.plugins.ai_chat.sandbox import DockerSandboxManager
+        executor = Mock(owner="owner")
+        manager = executor.sandbox_manager
+        manager.create = AsyncMock(return_value={"sandbox_id": "s123abc"})
+        manager.destroy = AsyncMock()
+        checked = []
+        async def write(_owner, _sid, path, _content, **_kwargs):
+            DockerSandboxManager()._workspace_path(path)
+            checked.append(path)
+        manager.write_file = AsyncMock(side_effect=write)
+        executor._send_file_from_sandbox = AsyncMock(return_value='{"ok":true}')
+        workspaces = StepWorkspaces(Path(self.tmp.name), executor)
+        artifact = {"name": "result.txt", "snapshot": workspaces._persist(1, b"test")}
+        self.assertTrue((await workspaces.validate(1, artifact))["ok"])
+        await workspaces.deliver(1, artifact)
+        self.assertEqual(checked, ["acceptance.txt", "result.txt"])
+        self.assertEqual(executor._send_file_from_sandbox.await_args.args[0]["path"], "result.txt")
 
     async def test_scheduler_cancellation_releases_slot_and_avoids_group_head_of_line(self):
         scheduler = SpecialistScheduler(total=2, per_group=1, per_model=2)
