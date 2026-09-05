@@ -562,30 +562,69 @@ async def ask_deepseek_with_tools(
         _configure_trace(trace, selected_profile)
         trace.messages.append({"role": "user", "content": user_text})
     if entry_handler is not None:
-        from .agent.execution import ENTRY_PROMPT
+        from .agent.execution import ENTRY_PROMPT, ExecutionEntryError
 
         main_tools = ", ".join(tool["function"]["name"] for tool in enabled_tool_definitions(tools))
         messages.insert(1, {"role": "system", "content": ENTRY_PROMPT + f"\n最多 {entry_max_steps} 个步骤。\n本轮提供的工具：" + main_tools})
-        decision, decision_message = await _execution_entry(
-            messages, entry_profile or selected_profile, trace=trace, max_steps=entry_max_steps,
-            allowed_profiles=entry_allowed_profiles,
-        )
-        result = await entry_handler(decision)
-        if decision.mode in {"workflow", "revise"} or (decision.mode == "direct" and decision.answer):
-            answer = decision.answer if decision.mode == "direct" else str(result or "")
+        try:
+            decision, decision_message = await _execution_entry(
+                messages,
+                entry_profile or selected_profile,
+                trace=trace,
+                max_steps=entry_max_steps,
+                allowed_profiles=entry_allowed_profiles,
+            )
+        except ExecutionEntryError as exc:
+            _logger.warning(
+                "Execution entry unavailable; continuing with the normal agent loop: %s",
+                exc,
+            )
             if trace is not None:
-                trace.messages.append({"role": "assistant", "content": answer})
-            return answer
-        messages.append(decision_message)
-        decision_result = {
-            "role": "tool", "tool_call_id": decision_message["tool_calls"][0]["id"],
-            "content": result or "direct: continue with the necessary tools, without claiming unperformed work",
-        }
-        messages.append(decision_result)
-        if trace is not None:
-            trace.messages.extend([decision_message, decision_result])
-        messages.append({"role": "system", "content": "执行入口已完成。不要再次调用 decide_execution；根据工具结果继续读取或回复，仍缺少执行工作时通过专业子任务完成。"})
-        selected_profile = entry_profile or selected_profile
+                trace.execution_decisions.append(
+                    {
+                        "mode": "fallback",
+                        "reason": str(exc),
+                        "task_started": False,
+                    }
+                )
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        "宿主执行入口未能生成有效合同。本轮继续使用普通工具循环回答。"
+                        "不得声称已经创建文件、运行程序或完成项目；确实需要执行时，"
+                        "必须调用现有的专业子任务工具。"
+                    ),
+                }
+            )
+        else:
+            result = await entry_handler(decision)
+            if decision.mode in {"workflow", "revise"} or (
+                decision.mode == "direct" and decision.answer
+            ):
+                answer = (
+                    decision.answer if decision.mode == "direct" else str(result or "")
+                )
+                if trace is not None:
+                    trace.messages.append({"role": "assistant", "content": answer})
+                return answer
+            messages.append(decision_message)
+            decision_result = {
+                "role": "tool",
+                "tool_call_id": decision_message["tool_calls"][0]["id"],
+                "content": result
+                or "direct: continue with the necessary tools, without claiming unperformed work",
+            }
+            messages.append(decision_result)
+            if trace is not None:
+                trace.messages.extend([decision_message, decision_result])
+            messages.append(
+                {
+                    "role": "system",
+                    "content": "执行入口已完成。不要再次调用 decide_execution；根据工具结果继续读取或回复，仍缺少执行工作时通过专业子任务完成。",
+                }
+            )
+            selected_profile = entry_profile or selected_profile
     next_tool_choice: ToolChoice = tool_choice
     tool_round = 0
     loop_sequence = 0
@@ -989,7 +1028,13 @@ async def _execution_entry(
     trace: DeepSeekTrace | None, max_steps: int,
     allowed_profiles: frozenset[str] | None = None,
 ) -> tuple[EntryDecision, ChatMessage]:
-    from .agent.execution import DECISION_TOOL, DECISION_TOOL_NAME, EntryDecision
+    from .agent.execution import (
+        DECISION_TOOL,
+        DECISION_TOOL_NAME,
+        EntryDecision,
+        ExecutionEntryError,
+        normalize_direct_entry_payload,
+    )
 
     request_messages = list(messages)
     for attempt in range(2):
@@ -1011,16 +1056,24 @@ async def _execution_entry(
             arguments, error = _parse_tool_arguments_checked(calls[0].function.arguments)
             if error:
                 raise ValueError(error)
-            decision = EntryDecision.parse(arguments, max_steps=max_steps)
+            try:
+                decision = EntryDecision.parse(arguments, max_steps=max_steps)
+            except ValueError:
+                normalized = normalize_direct_entry_payload(arguments)
+                if normalized is None:
+                    raise
+                decision = EntryDecision.parse(normalized, max_steps=max_steps)
         except (ValueError, AttributeError, TypeError) as exc:
             if attempt:
-                raise RuntimeError(f"Execution decision invalid; no task was started: {exc}") from exc
+                raise ExecutionEntryError(
+                    f"Execution decision invalid; no task was started: {exc}"
+                ) from exc
             request_messages.append({"role": "system", "content": f"入口合同无效：{exc}。修正后仅调用 decide_execution；不得改成假装执行的普通回答。"})
             continue
         if trace is not None:
             trace.execution_decisions.append(decision.as_payload())
         return decision, _assistant_tool_message(message)
-    raise RuntimeError("Execution decision unavailable")
+    raise ExecutionEntryError("Execution decision unavailable")
 
 
 async def _completion_with_optional_stream(

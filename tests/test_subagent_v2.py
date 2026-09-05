@@ -16,7 +16,10 @@ os.environ.setdefault("AI_SUBAGENTS_ENABLED", "false")
 nonebot.init()
 
 from src.plugins.ai_chat.agent import AgentResult, ContextPacket, DEFAULT_AGENT_REGISTRY
-from src.plugins.ai_chat.agent.execution import EntryDecision
+from src.plugins.ai_chat.agent.execution import (
+    EntryDecision,
+    normalize_direct_entry_payload,
+)
 from src.plugins.ai_chat.agent.model_routing import agent_profile_names, choose_agent_profile
 from src.plugins.ai_chat.agent.sessions import read_upstream_result
 from src.plugins.ai_chat.deepseek import DeepSeekTrace, ask_deepseek_with_tools
@@ -78,6 +81,25 @@ class EntryContractTests(unittest.TestCase):
         for raw in invalid:
             with self.subTest(raw=raw), self.assertRaises(ValueError):
                 EntryDecision.parse(raw)
+
+    def test_direct_branch_normalization_only_discards_inapplicable_contract(self):
+        noisy = decision("direct")
+        noisy.update({
+            "objective": "旧任务残留",
+            "deliverables": ["压缩包"],
+            "constraints": ["发送到群里"],
+            "acceptance": ["文件可下载"],
+            "delivery_required": True,
+        })
+        normalized = normalize_direct_entry_payload(noisy)
+        self.assertIsNotNone(normalized)
+        parsed = EntryDecision.parse(normalized or {})
+        self.assertEqual(parsed.mode, "direct")
+        self.assertEqual(parsed.answer, "你好")
+        self.assertEqual(parsed.contract.deliverables, ())
+
+        project = dict(noisy, task_type="project")
+        self.assertIsNone(normalize_direct_entry_payload(project))
 
     def test_missing_result_status_is_not_success(self):
         self.assertEqual(AgentResult.from_payload({}).status, "partial")
@@ -141,6 +163,31 @@ class EntryLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("本群当前话题", str(model.call_args.kwargs["messages"]))
         self.assertEqual(trace.execution_decisions[0]["mode"], "direct")
 
+    async def test_noisy_direct_contract_does_not_crash_the_turn(self):
+        noisy = decision("direct", answer="活着呢")
+        noisy.update({
+            "objective": "旧任务残留",
+            "deliverables": ["压缩包"],
+            "acceptance": ["文件可下载"],
+            "delivery_required": True,
+        })
+        handler = AsyncMock(return_value=None)
+        with patch(
+            "src.plugins.ai_chat.deepseek._completion_with_optional_stream",
+            new=AsyncMock(return_value=completion(noisy)),
+        ) as model:
+            result = await ask_deepseek_with_tools(
+                "活着吗",
+                [],
+                [TOOL],
+                AsyncMock(),
+                profile=profile(),
+                entry_handler=handler,
+            )
+        self.assertEqual(result, "活着呢")
+        self.assertEqual(model.await_count, 1)
+        self.assertEqual(handler.call_args.args[0].contract.deliverables, ())
+
     async def test_workflow_uses_host_result_without_redundant_main_call(self):
         handler = AsyncMock(return_value="task#1 成品")
         execute = AsyncMock()
@@ -152,12 +199,25 @@ class EntryLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(handler.call_args.args[0].mode, "workflow")
         execute.assert_not_awaited()
 
-    async def test_invalid_entry_gets_one_repair_without_side_effects(self):
+    async def test_invalid_entry_falls_back_to_normal_loop_without_side_effects(self):
         handler, execute = AsyncMock(), AsyncMock()
-        with patch("src.plugins.ai_chat.deepseek._completion_with_optional_stream", new=AsyncMock(return_value=completion({}))) as model:
-            with self.assertRaisesRegex(RuntimeError, "no task was started"):
-                await ask_deepseek_with_tools("做商城", [], [TOOL], execute, profile=profile(), entry_handler=handler)
-        self.assertEqual(model.await_count, 2)
+        model = AsyncMock(
+            side_effect=[completion({}), completion({}), completion(content="入口失败，未执行项目")]
+        )
+        with patch(
+            "src.plugins.ai_chat.deepseek._completion_with_optional_stream",
+            new=model,
+        ):
+            result = await ask_deepseek_with_tools(
+                "做商城",
+                [],
+                [TOOL],
+                execute,
+                profile=profile(),
+                entry_handler=handler,
+            )
+        self.assertEqual(result, "入口失败，未执行项目")
+        self.assertEqual(model.await_count, 3)
         handler.assert_not_awaited(); execute.assert_not_awaited()
 
     async def test_delegate_returns_control_to_parent(self):
