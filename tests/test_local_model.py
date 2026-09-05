@@ -17,7 +17,9 @@ nonebot.init()
 
 from src.plugins.ai_chat.admin import AdminServices, register_admin
 from src.plugins.ai_chat.deepseek import DeepSeekTrace, _invoke_completion
-from src.plugins.ai_chat.llm_gateway import LLMConnectionError, LLMGateway
+from src.plugins.ai_chat.llm_gateway import (
+    LLMConnectionError, LLMGateway, LLMRateLimitError, LLMUnavailableError,
+)
 from src.plugins.ai_chat.local_model import LocalModelRuntime
 from src.plugins.ai_chat.model_catalog import ModelCatalog, ModelProfile
 
@@ -131,6 +133,69 @@ class LocalModelTests(unittest.IsolatedAsyncioTestCase):
         await self.local.probe_once()
         await self.gateway.create_completion_with_profile(QWEN, messages=[])
         self.assertEqual([p for p, _ in self.control_requests].count(QWEN.name), 2)
+
+    async def test_disabled_qwen_circuit_retries_without_clearing_cloud_circuit(self):
+        qwen = replace(QWEN, circuit_breaker_enabled=False)
+        self.local.profile = qwen
+        self.models = [{"id": qwen.model}]
+        self.service_state = "running"
+        await self.local.probe_once()
+        catalog = ModelCatalog(
+            {qwen.name: qwen, DEEPSEEK.name: DEEPSEEK},
+            default_profile=qwen.name,
+        )
+        gateway = LLMGateway(
+            {"openai-chat": self.provider}, catalog=catalog,
+            local_model=self.local, failure_threshold=1,
+        )
+        failing = True
+
+        async def completion(profile, **kwargs):
+            self.control_requests.append((profile.name, kwargs))
+            if failing:
+                raise LLMRateLimitError("busy")
+            return "ok"
+
+        self.provider.create_completion = completion
+        for _ in range(2):
+            with self.assertRaises(LLMRateLimitError):
+                await gateway.create_completion_with_profile(qwen, messages=[])
+        self.assertEqual(
+            [name for name, _ in self.control_requests],
+            [qwen.name, DEEPSEEK.name, qwen.name],
+        )
+        health = gateway.health_snapshot()
+        self.assertFalse(health[qwen.name]["circuit_breaker_enabled"])
+        self.assertEqual(health[qwen.name]["retry_after_seconds"], 0)
+        self.assertEqual(health[qwen.name]["total_failures"], 2)
+        self.assertEqual(health[qwen.name]["status"], "degraded")
+        self.assertEqual(health[DEEPSEEK.name]["status"], "open")
+        for _, kwargs in self.control_requests:
+            self.assertNotIn("circuit_breaker_enabled", kwargs)
+
+        failing = False
+        result = await gateway.create_completion_with_profile(qwen, messages=[])
+        self.assertEqual(result.profile.name, qwen.name)
+        self.assertFalse(result.routing["fallback"])
+        self.assertEqual(gateway.health_snapshot()[qwen.name]["status"], "healthy")
+        self.assertEqual(gateway.health_snapshot()[DEEPSEEK.name]["status"], "open")
+
+        app = FastAPI()
+        register_admin(app, AdminServices(
+            version="test", started_at=1, local_model=self.local, llm_gateway=gateway,
+        ), token="")
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            status = (await client.get("/bot-admin/api/v1/local-model")).json()
+        self.assertFalse(status["circuit_breaker_enabled"])
+
+        self.models = []
+        await self.local.probe_once()
+        calls_before = len(self.control_requests)
+        with self.assertRaises(LLMUnavailableError):
+            await gateway.create_completion_with_profile(qwen, messages=[])
+        self.assertEqual(len(self.control_requests), calls_before)
 
     async def test_trace_records_health_fallback_and_no_private_request_options(self):
         module = __import__("src.plugins.ai_chat.deepseek", fromlist=["_"])

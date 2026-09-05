@@ -519,6 +519,7 @@ def register_admin(
             "simple_chat_selected": selected,
             "serving_simple_chat": bool(selected and snapshot["ready"] and health.get("status") != "open"),
             "circuit_state": health.get("status", "unknown"),
+            "circuit_breaker_enabled": runtime.profile.circuit_breaker_enabled,
             "request_count": health.get("request_count", 0),
             "average_latency_ms": health.get("average_latency_ms"),
             "metrics_since": services.started_at,
@@ -2256,6 +2257,7 @@ def _model_overview(
                 "supports_reasoning_effort": profile.provider
                 in {"openai", "cliproxy"},
                 "fallback_profiles": list(profile.fallback_profiles),
+                "circuit_breaker_enabled": profile.circuit_breaker_enabled,
                 "health": health.get(
                     profile.name,
                     {

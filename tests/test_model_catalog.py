@@ -16,6 +16,30 @@ from src.plugins.ai_chat.model_catalog import (
 
 
 class ModelCatalogTests(unittest.TestCase):
+    def test_circuit_breaker_is_opt_out_per_profile(self) -> None:
+        catalog = ModelCatalog.from_json(
+            json.dumps({
+                "qwen-local": {
+                    "model": "qwen-test", "api_key_required": False,
+                    "circuit_breaker_enabled": False,
+                },
+                "deepseek": {"model": "deepseek-test", "api_key_required": False},
+            }),
+            default_profile="qwen-local",
+            environ={},
+        )
+        self.assertFalse(catalog.default.circuit_breaker_enabled)
+        self.assertTrue(catalog.resolve("deepseek").circuit_breaker_enabled)
+        self.assertFalse(catalog.default.with_model("qwen-other").circuit_breaker_enabled)
+        with self.assertRaises(ModelCatalogError):
+            ModelCatalog.from_json(
+                json.dumps({"qwen-local": {
+                    "model": "qwen-test", "circuit_breaker_enabled": "maybe",
+                }}),
+                default_profile="qwen-local",
+                environ={},
+            )
+
     def test_profiles_resolve_independent_secrets_protocols_and_aliases(self) -> None:
         raw = json.dumps(
             {

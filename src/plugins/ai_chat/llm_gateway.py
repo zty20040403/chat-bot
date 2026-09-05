@@ -86,6 +86,7 @@ class ClassifiedFailure:
 
 @dataclass
 class ModelCircuit:
+    circuit_breaker_enabled: bool = True
     consecutive_failures: int = 0
     total_failures: int = 0
     total_successes: int = 0
@@ -113,9 +114,20 @@ class ModelHealthRegistry:
         self.long_cooldown_seconds = max(float(long_cooldown_seconds), 1.0)
         self._circuits: dict[str, ModelCircuit] = {}
 
-    def acquire(self, profile_name: str, *, now: float | None = None) -> bool:
+    def acquire(
+        self,
+        profile_name: str,
+        *,
+        now: float | None = None,
+        circuit_breaker_enabled: bool = True,
+    ) -> bool:
         current = time.monotonic() if now is None else now
         circuit = self._circuits.setdefault(profile_name, ModelCircuit())
+        circuit.circuit_breaker_enabled = circuit_breaker_enabled
+        if not circuit_breaker_enabled:
+            circuit.opened_until = 0.0
+            circuit.probe_in_flight = False
+            return True
         if circuit.opened_until <= 0:
             return True
         if circuit.opened_until > current:
@@ -172,7 +184,7 @@ class ModelHealthRegistry:
             failure.open_immediately
             or circuit.consecutive_failures >= self.failure_threshold
         )
-        if should_open:
+        if should_open and circuit.circuit_breaker_enabled:
             duration = (
                 self.long_cooldown_seconds
                 if failure.long_cooldown
@@ -203,6 +215,7 @@ class ModelHealthRegistry:
                 status = "healthy"
             result[name] = {
                 "status": status,
+                "circuit_breaker_enabled": circuit.circuit_breaker_enabled,
                 "consecutive_failures": circuit.consecutive_failures,
                 "total_failures": circuit.total_failures,
                 "total_successes": circuit.total_successes,
@@ -464,7 +477,10 @@ class LLMGateway:
                     if generation != self._ready_generation:
                         self.health.readiness_recovered(candidate.name)
                         self._ready_generation = generation
-            if not self.health.acquire(candidate.name):
+            if not self.health.acquire(
+                candidate.name,
+                circuit_breaker_enabled=candidate.circuit_breaker_enabled,
+            ):
                 outcomes.append({"profile": candidate.name, "status": "skipped", "reason_code": "circuit_open", "reason": "模型熔断冷却中"})
                 telemetry.observe_model(
                     requested_profile=profile.name,
@@ -575,6 +591,9 @@ class LLMGateway:
             else list(self.health._circuits)
         )
         snapshot = self.health.snapshot(names)
+        if self._catalog is not None:
+            for profile in self._catalog.profiles:
+                snapshot[profile.name]["circuit_breaker_enabled"] = profile.circuit_breaker_enabled
         if self.local_model is not None:
             snapshot.setdefault(self.local_model.profile.name, {})["readiness"] = self.local_model.snapshot()
         return snapshot

@@ -102,6 +102,7 @@ class ModelProfile:
     aliases: tuple[str, ...] = ()
     fallback_profiles: tuple[str, ...] = ()
     capabilities: ModelCapabilities = field(default_factory=ModelCapabilities)
+    circuit_breaker_enabled: bool = True
 
     @property
     def configured(self) -> bool:
@@ -504,6 +505,7 @@ def _parse_profile(
         ),
         aliases=aliases,
         fallback_profiles=fallback_profiles,
+        circuit_breaker_enabled=_mapping_bool(raw, "circuit_breaker_enabled", True),
         capabilities=ModelCapabilities.from_mapping(
             protocol,
             raw.get("capabilities"),
