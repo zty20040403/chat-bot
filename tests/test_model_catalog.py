@@ -16,6 +16,20 @@ from src.plugins.ai_chat.model_catalog import (
 
 
 class ModelCatalogTests(unittest.TestCase):
+    def test_forced_tool_choice_capability_is_configurable(self) -> None:
+        catalog = ModelCatalog.from_json(
+            json.dumps({
+                "qwen-local": {
+                    "model": "qwen-test",
+                    "api_key_required": False,
+                    "capabilities": {"forced_tool_choice": False},
+                }
+            }),
+            default_profile="qwen-local",
+            environ={},
+        )
+        self.assertFalse(catalog.default.capabilities.forced_tool_choice)
+
     def test_circuit_breaker_is_opt_out_per_profile(self) -> None:
         catalog = ModelCatalog.from_json(
             json.dumps({

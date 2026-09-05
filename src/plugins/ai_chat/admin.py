@@ -2326,6 +2326,7 @@ def _model_overview(
                 ),
                 "capabilities": {
                     "tools": profile.capabilities.tools,
+                    "forced_tool_choice": profile.capabilities.forced_tool_choice,
                     "streaming": profile.capabilities.streaming,
                     "json_mode": profile.capabilities.json_mode,
                     "vision": profile.capabilities.vision,

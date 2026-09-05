@@ -624,13 +624,18 @@ class LLMGateway:
             managed_stream = False
             raw_stream = None
             routing: dict[str, Any] = {}
+            tool_choice_compatibility_applied = False
 
             def finish_stream(exc: BaseException | None) -> None:
                 duration = time.monotonic() - request_started
                 try:
                     if exc is None:
-                        status, reason = "succeeded", "模型响应接收完成"
-                        code = "direct"
+                        status = "succeeded"
+                        if tool_choice_compatibility_applied:
+                            code = "tool_choice_compatibility"
+                            reason = "模型不支持指定工具，已自动改用工具自动选择"
+                        else:
+                            code, reason = "direct", "模型响应接收完成"
                         self.health.record_success(
                             candidate.name, used_as_fallback=candidate.name != profile.name,
                         )
@@ -658,16 +663,39 @@ class LLMGateway:
             try:
                 request = _request_for_profile(candidate, kwargs)
                 with telemetry.stage("model.connect" if request.get("stream") else "model.request"):
-                    response = await self._create_single(candidate, **request)
+                    try:
+                        response = await self._create_single(candidate, **request)
+                    except LLMProviderError as exc:
+                        if not _should_retry_tool_choice_as_auto(request, exc):
+                            raise
+                        request["tool_choice"] = "auto"
+                        tool_choice_compatibility_applied = True
+                        _logger.warning(
+                            "Model profile %s rejected forced tool_choice; retrying once with auto",
+                            candidate.name,
+                        )
+                        response = await self._create_single(candidate, **request)
                     if request.get("stream"):
                         raw_stream = response
                         response = _CompletionStream(raw_stream, candidate, finish_stream)
                         await response.prime()
                 if request.get("stream"):
-                    outcomes.append({
-                        "profile": candidate.name, "status": "streaming",
-                        "reason_code": "direct", "reason": "正在接收模型响应",
-                    })
+                    outcomes.append(
+                        {
+                            "profile": candidate.name,
+                            "status": "streaming",
+                            "reason_code": (
+                                "tool_choice_compatibility"
+                                if tool_choice_compatibility_applied
+                                else "direct"
+                            ),
+                            "reason": (
+                                "模型不支持指定工具，已自动改用工具自动选择"
+                                if tool_choice_compatibility_applied
+                                else "正在接收模型响应"
+                            ),
+                        }
+                    )
                     routing.update(finish_route(candidate, publish=False))
                     managed_stream = True
                     return CompletionResult(
@@ -677,7 +705,11 @@ class LLMGateway:
                     )
             except (LLMError, asyncio.TimeoutError, httpx.TimeoutException) as exc:
                 failure = classify_llm_failure(exc)
-                outcomes.append({"profile": candidate.name, "status": "failed", "reason_code": failure.kind.value, "reason": "模型请求失败：" + failure.kind.value})
+                safe_error = _safe_error_text(exc)
+                reason = "模型请求失败：" + failure.kind.value
+                if safe_error:
+                    reason += "；" + safe_error
+                outcomes.append({"profile": candidate.name, "status": "failed", "reason_code": failure.kind.value, "reason": reason})
                 telemetry.observe_model(
                     requested_profile=profile.name,
                     actual_profile=candidate.name,
@@ -688,10 +720,11 @@ class LLMGateway:
                 self.health.record_failure(candidate.name, failure, exc)
                 last_error = exc
                 _logger.warning(
-                    "Model profile %s failed (%s); fallback=%s",
+                    "Model profile %s failed (%s); fallback=%s; detail=%s",
                     candidate.name,
                     failure.kind.value,
                     failure.retryable and self._fallback_enabled,
+                    safe_error or "unavailable",
                 )
                 if not failure.retryable or not self._fallback_enabled:
                     finish_route(None)
@@ -714,7 +747,22 @@ class LLMGateway:
                     self.health.record_latency(candidate.name, time.monotonic() - request_started)
                     if raw_stream is not None:
                         await _close_completion_stream(raw_stream)
-            outcomes.append({"profile": candidate.name, "status": "succeeded", "reason_code": "direct", "reason": "直接使用首选模型"})
+            outcomes.append(
+                {
+                    "profile": candidate.name,
+                    "status": "succeeded",
+                    "reason_code": (
+                        "tool_choice_compatibility"
+                        if tool_choice_compatibility_applied
+                        else "direct"
+                    ),
+                    "reason": (
+                        "模型不支持指定工具，已自动改用工具自动选择"
+                        if tool_choice_compatibility_applied
+                        else "直接使用首选模型"
+                    ),
+                }
+            )
             telemetry.observe_model(
                 requested_profile=profile.name,
                 actual_profile=candidate.name,
@@ -954,10 +1002,54 @@ def _request_for_profile(
             request["reasoning_effort"] = profile.reasoning_effort
         else:
             request.pop("reasoning_effort", None)
+        if (
+            request.get("tools")
+            and not profile.capabilities.forced_tool_choice
+            and _is_forced_tool_choice(request.get("tool_choice"))
+        ):
+            request["tool_choice"] = "auto"
     else:
         request.pop("extra_body", None)
         request.pop("reasoning_effort", None)
     return request
+
+
+def _is_forced_tool_choice(value: object) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value.strip().lower() not in {"", "auto", "none"}
+    if isinstance(value, dict):
+        return str(value.get("type") or "").strip().lower() not in {
+            "",
+            "auto",
+            "none",
+        }
+    return True
+
+
+def _should_retry_tool_choice_as_auto(
+    request: dict[str, Any],
+    exc: LLMProviderError,
+) -> bool:
+    if not request.get("tools") or not _is_forced_tool_choice(
+        request.get("tool_choice")
+    ):
+        return False
+    if exc.status_code not in {400, 422}:
+        return False
+    detail = exc.detail.lower()
+    return any(
+        marker in detail
+        for marker in (
+            "tool_choice_not_supported",
+            "named tool choice",
+            "specific tool choice",
+            "forced tool choice",
+            "tool_choice for function",
+            "tool choice for function",
+        )
+    )
 
 
 def _profile_supports_request(

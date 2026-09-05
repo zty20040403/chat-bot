@@ -30,6 +30,7 @@ class ModelCatalogError(ValueError):
 @dataclass(frozen=True)
 class ModelCapabilities:
     tools: bool = True
+    forced_tool_choice: bool = True
     streaming: bool = True
     json_mode: bool = True
     model_listing: bool = True
@@ -60,6 +61,7 @@ class ModelCapabilities:
             raise ModelCatalogError("profile capabilities must be a JSON object")
         supported = {
             "tools",
+            "forced_tool_choice",
             "streaming",
             "json_mode",
             "model_listing",
@@ -72,6 +74,11 @@ class ModelCapabilities:
             )
         return cls(
             tools=_mapping_bool(raw, "tools", defaults.tools),
+            forced_tool_choice=_mapping_bool(
+                raw,
+                "forced_tool_choice",
+                defaults.forced_tool_choice,
+            ),
             streaming=_mapping_bool(raw, "streaming", defaults.streaming),
             json_mode=_mapping_bool(raw, "json_mode", defaults.json_mode),
             model_listing=_mapping_bool(

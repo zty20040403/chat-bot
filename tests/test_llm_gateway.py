@@ -103,6 +103,55 @@ class FakeStream:
 
 
 class LLMGatewayTests(unittest.IsolatedAsyncioTestCase):
+    async def test_forced_tool_choice_rejection_retries_same_profile_with_auto(self):
+        selected = profile("primary")
+        provider = RecordingProvider()
+        provider.create_completion = AsyncMock(
+            side_effect=[
+                LLMProviderError(
+                    "test",
+                    400,
+                    "tool_choice_not_supported: tool_choice for function 'reply' requires that exact function",
+                ),
+                "ok",
+            ]
+        )
+        gateway = LLMGateway({"openai-chat": provider})
+        forced = {"type": "function", "function": {"name": "reply"}}
+
+        result = await gateway.create_completion_with_profile(
+            selected,
+            messages=[],
+            tools=[{"type": "function"}],
+            tool_choice=forced,
+        )
+
+        self.assertEqual(result.response, "ok")
+        self.assertEqual(provider.create_completion.await_count, 2)
+        calls = provider.create_completion.await_args_list
+        self.assertEqual(calls[0].kwargs["tool_choice"], forced)
+        self.assertEqual(calls[1].kwargs["tool_choice"], "auto")
+        self.assertEqual(result.routing["reason_code"], "tool_choice_compatibility")
+        self.assertEqual(gateway.health_snapshot()[selected.name]["total_failures"], 0)
+
+    async def test_unrelated_bad_request_does_not_retry_as_auto(self):
+        selected = profile("primary")
+        provider = RecordingProvider()
+        provider.create_completion = AsyncMock(
+            side_effect=LLMProviderError("test", 400, "invalid messages payload")
+        )
+        gateway = LLMGateway({"openai-chat": provider})
+
+        with self.assertRaises(LLMProviderError):
+            await gateway.create_completion(
+                selected,
+                messages=[],
+                tools=[{"type": "function"}],
+                tool_choice={"type": "function", "function": {"name": "reply"}},
+            )
+
+        provider.create_completion.assert_awaited_once()
+
     async def test_half_open_probe_is_released_on_cancel_or_unexpected_error(self):
         selected = profile("primary")
         for error in (asyncio.CancelledError(), ValueError("bad request")):
@@ -285,6 +334,29 @@ class LLMGatewayTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(request.get("extra_body"), expected)
                 self.assertNotIn("reasoning_effort", request)
+
+    def test_profile_without_forced_tool_choice_uses_auto(self) -> None:
+        forced = {
+            "type": "function",
+            "function": {"name": "decide_execution"},
+        }
+        qwen = profile(
+            "qwen-local",
+            provider="qwen",
+            capabilities=ModelCapabilities(forced_tool_choice=False),
+        )
+        qwen_request = _request_for_profile(
+            qwen,
+            {"messages": [], "tools": [{}], "tool_choice": forced},
+        )
+        self.assertEqual(qwen_request["tool_choice"], "auto")
+
+        gpt = profile("gpt", provider="cliproxy")
+        gpt_request = _request_for_profile(
+            gpt,
+            {"messages": [], "tools": [{}], "tool_choice": forced},
+        )
+        self.assertEqual(gpt_request["tool_choice"], forced)
 
     async def test_fallback_does_not_leak_qwen_thinking_switch(self) -> None:
         primary = profile("qwen-local", provider="qwen", thinking="enabled")
