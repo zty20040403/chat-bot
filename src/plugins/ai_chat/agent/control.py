@@ -69,7 +69,7 @@ class TaskControlStoreMixin:
                 return False
             if event["event_type"] == "agent.tool_started":
                 pending[call_id] = value
-            elif value.get("state") == "succeeded" and call_id in acknowledged:
+            elif value.get("state") in {"succeeded", "committed"} and call_id in acknowledged:
                 pending.pop(call_id, None)
             else:
                 return False

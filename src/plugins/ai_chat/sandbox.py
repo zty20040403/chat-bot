@@ -486,6 +486,50 @@ os.close(fd)
         if result.returncode:
             raise SandboxError("无法导入只读产物")
 
+    async def export_artifact(self, owner: str, sandbox_id: str, path: str) -> tuple[bytes, bool]:
+        """Export a file or a ZIP snapshot of a directory without following links."""
+        name = await self._owned_container(owner, sandbox_id)
+        target = self._workspace_path(path)
+        kind = await self._run("docker", "exec", name, "sh", "-lc",
+            f"if [ -L {shlex.quote(target)} ]; then exit 1; "
+            f"elif [ -f {shlex.quote(target)} ]; then printf file; "
+            f"elif [ -d {shlex.quote(target)} ]; then printf directory; else exit 1; fi", timeout=20)
+        if kind.returncode:
+            raise SandboxError(f"产物不存在、不可读取或为符号链接：{path}")
+        if kind.stdout.strip() == "file":
+            return await self.read_file(owner, sandbox_id, path, max_bytes=None), False
+        if kind.stdout.strip() != "directory":
+            raise SandboxError(f"不支持的产物类型：{path}")
+        script = """
+import os, shutil, stat, sys, tempfile, zipfile
+from pathlib import Path
+root = Path(sys.argv[1])
+if root.is_symlink() or not root.is_dir():
+    raise ValueError('Artifact directory changed')
+with tempfile.TemporaryFile() as output:
+    with zipfile.ZipFile(output, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+        for current, dirs, files in os.walk(root, followlinks=False):
+            dirs.sort()
+            files.sort()
+            directory = Path(current)
+            archive.mkdir(directory.relative_to(root.parent).as_posix() + '/')
+            for filename in dirs + files:
+                entry = directory / filename
+                mode = entry.lstat().st_mode
+                if not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+                    raise ValueError('Cannot archive link or special file: ' + str(entry))
+            for filename in files:
+                entry = directory / filename
+                archive.write(entry, entry.relative_to(root.parent).as_posix())
+    output.seek(0)
+    shutil.copyfileobj(output, sys.stdout.buffer)
+"""
+        content, error, code = await self._run_bytes(
+            "docker", "exec", name, "python", "-c", script, target, timeout=120)
+        if code:
+            raise SandboxError(f"目录产物打包失败：{path}；{error.decode(errors='replace')[-500:]}")
+        return content, True
+
     async def read_file(
         self,
         owner: str,

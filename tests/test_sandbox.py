@@ -113,6 +113,18 @@ class DockerSandboxCancellationTests(unittest.IsolatedAsyncioTestCase):
             len(content),
         )
 
+    async def test_export_directory_returns_zip_bytes(self) -> None:
+        manager = DockerSandboxManager()
+        manager._owned_container = AsyncMock(return_value="qqbot-sabc123")  # type: ignore[method-assign]
+        manager._run = AsyncMock(return_value=SandboxResult("directory", "", 0))  # type: ignore[method-assign]
+        manager._run_bytes = AsyncMock(return_value=(b"PK-archive", b"", 0))  # type: ignore[method-assign]
+
+        content, directory = await manager.export_artifact("owner", "sabc123", "project")
+
+        self.assertTrue(directory)
+        self.assertEqual(content, b"PK-archive")
+        self.assertEqual(manager._run_bytes.await_args.args[-1], "/workspace/project")
+
     async def test_exec_returns_observed_manifest(self) -> None:
         manager = DockerSandboxManager()
         manager._owned_container = AsyncMock(return_value="qqbot-sabc123")  # type: ignore[method-assign]

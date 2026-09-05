@@ -15,12 +15,21 @@ from src.plugins.ai_chat.agent.control import JobFence, LeaseLost, active_job_fe
 from src.plugins.ai_chat.agent.execution import EntryDecision, active_agent_step
 from src.plugins.ai_chat.agent.model_routing import choose_agent_profile, model_scope_for_role, validate_model_policy
 from src.plugins.ai_chat.agent.scheduling import SpecialistScheduler
-from src.plugins.ai_chat.agent.workspaces import StepWorkspaces
+from src.plugins.ai_chat.agent.workspaces import ArtifactCaptureError, StepWorkspaces
 from src.plugins.ai_chat.agent_tools import AgentToolExecutor
 from src.plugins.ai_chat.llm_gateway import LLMGateway
 from src.plugins.ai_chat.model_catalog import ModelCatalog
 from src.plugins.ai_chat.storage.jobs import DurableJobStore
-from src.plugins.ai_chat.subagents import SubAgentCoordinator, SubAgentStore, TaskStep, StepOutcome
+from src.plugins.ai_chat.subagents import (
+    AgentExecutionHooks,
+    SubAgentCoordinator,
+    SubAgentStore,
+    TaskStep,
+    StepOutcome,
+    _delivery_outcomes,
+    _only_deferred_delivery_unresolved,
+    _settled_task_status,
+)
 from src.plugins.ai_chat.deepseek import DeepSeekTrace
 
 
@@ -117,6 +126,18 @@ class RuntimeV2Tests(unittest.IsolatedAsyncioTestCase):
         self.store.append_event(task.task_id, "agent.tool_finished", {**event, "state": "succeeded"}, run_id=run.run_id)
         self.assertFalse(self.store.run_resume_safe(run.run_id), "A reused provider call id must not acknowledge a newer execution")
 
+    async def test_committed_conversation_progress_is_safe_to_resume(self):
+        task = self.submit()
+        run = self.store.create_run(task.task_id, TaskStep("code", "coder", "write", "code"), allowed_tools=[], model_profile="qwen-local")
+        event = {"idempotency": "non-idempotent", "call_id": "say1", "tool_name": "say"}
+        self.store.append_event(task.task_id, "agent.tool_started", event, run_id=run.run_id)
+        self.store.append_event(task.task_id, "agent.tool_finished", {**event, "state": "committed"}, run_id=run.run_id)
+        self.store.save_agent_session(task.task_id, run.run_id, [
+            {"role": "tool", "tool_call_id": "say1", "content": "sent"},
+        ], scope_key=task.scope_key, requester_user_id=task.requester_user_id,
+            model_profile="qwen-local", expected_version=0)
+        self.assertTrue(self.store.run_resume_safe(run.run_id))
+
     async def test_cancel_queued_task_does_not_resurrect(self):
         task = self.submit()
         self.assertTrue(self.coordinator.cancel(task.task_id))
@@ -148,6 +169,38 @@ class RuntimeV2Tests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(result[0]["ok"])
         self.assertEqual(execute.await_count, 1)
         self.assertEqual(self.store.deliveries(task.task_id)[0]["state"], "unknown")
+
+    async def test_delivery_prefers_final_or_repair_artifact(self):
+        task = self.submit()
+        design_run = self.store.create_run(task.task_id, TaskStep("design", "analyst", "design", "plan"), allowed_tools=[], model_profile="qwen-local")
+        repair_run = self.store.create_run(task.task_id, TaskStep("design__repair_1", "coder", "repair", "zip"), allowed_tools=[], model_profile="qwen-local")
+        design = StepOutcome(TaskStep("design", "analyst", "design", "plan"), design_run,
+            {"status": "success", "artifacts": [{"handle": "s111111:/workspace/plan.md"}]}, DeepSeekTrace(), "success")
+        repair = StepOutcome(TaskStep("design__repair_1", "coder", "repair", "zip"), repair_run,
+            {"status": "success", "artifacts": [{"handle": "s222222:/workspace/app.zip"}]}, DeepSeekTrace(), "success")
+        selected = _delivery_outcomes(task, {"design": design, "design__repair_1": repair})
+        self.assertEqual([item.step.key for item in selected], ["design__repair_1"])
+
+    async def test_delivery_only_acceptance_gap_does_not_block_upload(self):
+        self.assertTrue(_only_deferred_delivery_unresolved({
+            "unresolved": ["将压缩包发送到当前 QQ 群并确认群文件"],
+        }))
+        self.assertFalse(_only_deferred_delivery_unresolved({
+            "unresolved": ["还没有运行集成测试", "还没有发到群里"],
+        }))
+
+    async def test_successful_repair_and_delivery_settle_task_as_completed(self):
+        task = self.submit()
+        failed_run = self.store.create_run(task.task_id, TaskStep("frontend", "coder", "front", "code"), allowed_tools=[], model_profile="qwen-local")
+        repair_run = self.store.create_run(task.task_id, TaskStep("frontend__repair_1", "coder", "repair", "zip"), allowed_tools=[], model_profile="qwen-local")
+        failed = StepOutcome(TaskStep("frontend", "coder", "front", "code"), failed_run,
+            {"status": "failed"}, DeepSeekTrace(), "failed")
+        repair = StepOutcome(TaskStep("frontend__repair_1", "coder", "repair", "zip"), repair_run,
+            {"status": "success"}, DeepSeekTrace(), "success")
+        status = _settled_task_status(
+            [failed, repair], [{"ok": True}], {"status": "passed"},
+        )
+        self.assertEqual(status, "completed")
 
     async def test_old_delivery_receipt_does_not_change_new_revision(self):
         task = self.submit()
@@ -236,17 +289,65 @@ class RuntimeV2Tests(unittest.IsolatedAsyncioTestCase):
 
     async def test_snapshot_immutable_and_upstream_scope_enforced(self):
         executor = Mock(owner="owner")
-        executor.sandbox_manager.read_file = AsyncMock(return_value=b"artifact-v1")
+        executor.sandbox_manager.export_artifact = AsyncMock(return_value=(b"artifact-v1", False))
         executor.sandbox_manager.install_readonly_file = AsyncMock()
         workspaces = StepWorkspaces(Path(self.tmp.name), executor)
         artifact = (await workspaces.capture(1, [{"handle": "s123abc:/workspace/code.zip"}]))[0]
-        self.assertEqual(executor.sandbox_manager.read_file.await_args.args[2], "code.zip")
+        self.assertEqual(executor.sandbox_manager.export_artifact.await_args.args[2], "code.zip")
         await workspaces.import_artifact(1, {"code": {"artifacts": [artifact]}}, {"step_id": "code", "artifact_index": 0, "sandbox_id": "s456abc"})
         self.assertEqual(executor.sandbox_manager.install_readonly_file.await_args.args[2], f"upstream/{artifact['snapshot']}/code.zip")
         with self.assertRaises(ValueError):
             await workspaces.import_artifact(1, {"code": {"artifacts": [artifact]}}, {"step_id": "other", "artifact_index": 0, "sandbox_id": "s456abc"})
         with self.assertRaises(FileNotFoundError):
             await workspaces.import_artifact(2, {"code": {"artifacts": [artifact]}}, {"step_id": "code", "artifact_index": 0, "sandbox_id": "s456abc"})
+
+    async def test_directory_artifact_is_exported_as_zip(self):
+        executor = Mock(owner="owner")
+        executor.sandbox_manager.export_artifact = AsyncMock(return_value=(b"PK-directory", True))
+        workspaces = StepWorkspaces(Path(self.tmp.name), executor)
+        artifact = (await workspaces.capture(1, [{
+            "handle": "s123abc:/workspace/source", "kind": "directory", "name": "source",
+        }]))[0]
+        self.assertEqual(artifact["name"], "source.zip")
+        self.assertEqual(artifact["kind"], "file")
+        self.assertEqual(artifact["source_kind"], "directory")
+
+    async def test_capture_preserves_valid_artifacts_when_another_path_is_bad(self):
+        executor = Mock(owner="owner")
+        executor.sandbox_manager.export_artifact = AsyncMock(side_effect=[
+            (b"valid", False), FileNotFoundError("missing"),
+        ])
+        workspaces = StepWorkspaces(Path(self.tmp.name), executor)
+        with self.assertRaises(ArtifactCaptureError) as raised:
+            await workspaces.capture(1, [
+                {"handle": "s123abc:/workspace/result.zip", "name": "result.zip"},
+                {"handle": "s123abc:/workspace/missing.txt", "name": "missing.txt"},
+            ])
+        self.assertEqual([item["name"] for item in raised.exception.captured], ["result.zip"])
+
+    async def test_worker_keeps_captured_file_when_sibling_artifact_is_invalid(self):
+        task = self.submit()
+        step = TaskStep("files", "coder", "build", "zip")
+        run = self.store.create_run(task.task_id, step, allowed_tools=[], model_profile="qwen-local")
+        captured = [{"handle": "s123abc:/workspace/result.zip", "name": "result.zip", "snapshot": "a" * 64}]
+        workspaces = Mock()
+        workspaces.capture = AsyncMock(side_effect=ArtifactCaptureError(captured, ["missing.txt: missing"]))
+        answer = json.dumps({
+            "status": "success", "summary": "built",
+            "artifacts": [
+                {"handle": "s123abc:/workspace/result.zip", "name": "result.zip"},
+                {"handle": "s123abc:/workspace/missing.txt", "name": "missing.txt"},
+            ],
+        })
+        with patch("src.plugins.ai_chat.subagents.ask_deepseek_with_tools", new=AsyncMock(return_value=answer)):
+            outcome = await self.coordinator._run_step(
+                task, step, run, context=self.packet, upstream={},
+                selected_profile=self.catalog.default, tools_by_name={},
+                execute_tool=AsyncMock(), hooks=AgentExecutionHooks(workspaces=workspaces),
+            )
+        self.assertEqual(outcome.state, "partial")
+        self.assertEqual(outcome.result["artifacts"], captured)
+        self.assertIn("missing.txt", outcome.result["warnings"][0])
 
     async def test_validation_and_delivery_use_manager_relative_paths(self):
         from src.plugins.ai_chat.sandbox import DockerSandboxManager

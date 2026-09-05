@@ -29,6 +29,8 @@ execution 需要动手执行，不能 direct；project 或 research_delivery 需
 “继续/改成 Java/加购物车”必须结合当前已授权的话题及任务；不要新建一个无关项目。
 持久文件写入、项目实现、构建和交付必须由子任务执行。主控保留解释、检索及最终回复。
 任务需要 objective、deliverables、constraints、acceptance。用户需要把产物发回当前会话时设置 delivery_required。
+acceptance 只列发送前可验证的内容质量和可运行性，不把“已发送到群”列为文件验收条件。
+发送和回执由宿主在验收通过后执行，不要规划只负责群文件上传的子 Agent；最后的子步骤负责打包和运行说明。
 不得把完整项目偷偷缩成演示并宣称完成。
 每个步骤声明 objective、deliverable、depends_on。独立工作目录由宿主按任务和步骤分配。
 接口和交付文件通过上游产物句柄交接，不能假设共享工作目录；集成步骤显式依赖实现步骤。

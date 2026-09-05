@@ -61,7 +61,7 @@ READ_AGENT_RESULT = {
             "type": "object", "additionalProperties": False,
             "properties": {
                 "step_id": {"type": "string"},
-                "section": {"type": "string", "enum": ["summary", "facts", "artifacts", "citations", "warnings", "unresolved"]},
+                "section": {"type": "string", "enum": ["summary", "facts", "artifacts", "citations", "warnings", "unresolved", "handoff"]},
                 "offset": {"type": "integer", "minimum": 0},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 20},
             },
@@ -73,7 +73,7 @@ READ_AGENT_RESULT = {
 
 def read_upstream_result(upstream, arguments) -> str:
     key, section = str(arguments.get("step_id", "")), str(arguments.get("section", ""))
-    if key not in upstream or section not in {"summary", "facts", "artifacts", "citations", "warnings", "unresolved"}:
+    if key not in upstream or section not in {"summary", "facts", "artifacts", "citations", "warnings", "unresolved", "handoff"}:
         return json.dumps({"ok": False, "error": "No authorized upstream result or section"})
     value = upstream[key].get(section, "" if section == "summary" else [])
     offset = max(int(arguments.get("offset", 0)), 0)
@@ -90,6 +90,6 @@ def read_upstream_result(upstream, arguments) -> str:
 def upstream_index(upstream) -> str:
     return json.dumps({key: {
         "status": result.get("status", "partial"), "summary": str(result.get("summary", ""))[:160],
-        "sections": {field: len(result.get(field) or []) for field in ("facts", "artifacts", "citations", "unresolved")},
+        "sections": {field: len(result.get(field) or []) for field in ("facts", "artifacts", "citations", "unresolved", "handoff")},
         "read_with": "read_agent_result", "step_id": key,
     } for key, result in upstream.items()}, ensure_ascii=False, separators=(",", ":"))

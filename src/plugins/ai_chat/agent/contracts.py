@@ -288,6 +288,7 @@ class AgentResult:
     unresolved: tuple[str, ...] = ()
     confidence: float = 0.5
     metadata: dict[str, Any] = field(default_factory=dict)
+    handoff: tuple[str, ...] = ()
 
     @classmethod
     def parse(cls, answer: str) -> "AgentResult":
@@ -343,6 +344,7 @@ class AgentResult:
             "unresolved",
             "confidence",
             "metadata",
+            "handoff",
         }
         raw_metadata = payload.get("metadata")
         metadata = dict(raw_metadata) if isinstance(raw_metadata, Mapping) else {}
@@ -359,6 +361,7 @@ class AgentResult:
             unresolved=unresolved,
             confidence=min(max(confidence, 0.0), 1.0),
             metadata=metadata,
+            handoff=_string_tuple(payload.get("handoff")),
         )
 
     def as_payload(self) -> dict[str, Any]:
@@ -372,6 +375,7 @@ class AgentResult:
             "unresolved": list(self.unresolved),
             "confidence": self.confidence,
             "metadata": dict(self.metadata),
+            "handoff": list(self.handoff),
         }
 
 

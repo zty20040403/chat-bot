@@ -30,7 +30,7 @@ from .ai_tools import ToolDefinition
 from .agent.execution import EntryDecision, active_agent_step
 from .agent.model_routing import agent_profile_names, choose_agent_profile, scoped_agent_models, model_scope_for_role, validate_model_policy
 from .agent.scheduling import SpecialistScheduler
-from .agent.workspaces import IMPORT_AGENT_ARTIFACT
+from .agent.workspaces import ArtifactCaptureError, IMPORT_AGENT_ARTIFACT
 from .agent.sessions import AgentSessionStoreMixin, READ_AGENT_RESULT, read_upstream_result, upstream_index
 from .agent.control import (CONTROL_SQL, TaskControlStoreMixin, LeaseLost,
                             active_job_fence, active_task_id, active_model_policy, assert_job_owned)
@@ -1994,8 +1994,6 @@ class SubAgentCoordinator:
             trace=final_trace,
         )
         _merge_trace(parent_trace, final_trace)
-        degraded = [item for item in completed.values() if not item.succeeded]
-        delivery_failed = any(not bool(item.get("ok")) for item in delivery_results)
         result = {
             "answer": final_text,
             "deliveries": delivery_results,
@@ -2011,7 +2009,10 @@ class SubAgentCoordinator:
             },
         }
         result["validation"]["acceptance"] = validation
-        status = "partial" if degraded or delivery_failed or validation.get("status") == "failed" else "completed"
+        status = _settled_task_status(list(completed.values()), delivery_results, validation)
+        if status == "completed" and validation.get("status") == "passed":
+            result["execution_state"] = "succeeded"
+            result["validation"]["result_contract"] = "passed"
         self.store.set_task_state(task.task_id, status, result=result)
         self.store.append_checkpoint(task.task_id, "workflow_completed", result)
         return f"{task.handle}\n{final_text}" if final_text else f"{task.handle} 已完成。"
@@ -2024,8 +2025,14 @@ class SubAgentCoordinator:
             return {"status": "failed", "reason": "管理员已禁止验收所需的沙盒工具"}
         self.store.set_task_state(task.task_id, "verifying")
         checks = []
+        checked_artifacts: set[str] = set()
         for outcome in list(completed.values()):
             for artifact in outcome.result.get("artifacts", []):
+                artifact_key = str(artifact.get("snapshot") or artifact.get("handle") or "")
+                if artifact_key and artifact_key in checked_artifacts:
+                    continue
+                if artifact_key:
+                    checked_artifacts.add(artifact_key)
                 try:
                     check = await hooks.workspaces.validate(task.task_id, artifact)
                 except Exception as exc:
@@ -2040,16 +2047,28 @@ class SubAgentCoordinator:
         key = f"acceptance_r{revision}_{fingerprint}"
         previous = next((r for r in self.store.runs(task.task_id) if r.step_key == key), None)
         if previous and previous.status in {"succeeded", "partial", "failed"}:
-            return {"status": "passed" if previous.status == "succeeded" else "failed", "run_id": previous.run_id, "checks": checks}
+            accepted = previous.status == "succeeded" or (
+                previous.status == "partial"
+                and _only_deferred_delivery_unresolved(previous.result)
+            )
+            return {"status": "passed" if accepted else "failed", "run_id": previous.run_id, "checks": checks,
+                    "summary": previous.result.get("summary"), "unresolved": previous.result.get("unresolved", [])}
         step = TaskStep(key=key, role="coder" if checks else "analyst",
-            objective=("你是独立验收人，不是产物作者。检查原始目标和验收条款是否真的实现。"
+            objective=("你是独立验收人，不是产物作者。这里只做发送前验收：检查内容、格式、"
+                "可运行性和用户要求的功能，不检查文件是否已发送、是否已出现在群文件中。"
+                "发送与回执是验收通过后由宿主执行的独立阶段；尚未发送绝不能成为 partial 或 failed 的理由。"
+                "检查原始目标和验收条款中除发送动作之外的部分是否真的实现。"
                 "读取获准的上游结果；有文件必须 import_agent_artifact 到自己的隔离沙盒，"
                 "复制只读快照到工作目录后解包、运行实际检查/测试。不要仅复述作者的成功声明。"
                 "不得替作者改代码或生成新的交付物。研究结论检查来源与证据。"
                 "中文 PDF 检查文本内容和字体；不能把机器格式检查说成人工视觉验收。"
-                "不满足目标返回 partial/failed 并列出可操作问题；真正通过才返回 success。\n"
-                + json.dumps({"objective": task.objective, "acceptance": contract.get("acceptance", [])}, ensure_ascii=False)),
-            deliverable="独立验收结果、实际执行的检查与未通过项", dependencies=tuple(completed))
+                "不满足发送前目标才返回 partial/failed；发送前内容真正通过就返回 success，"
+                "把后续发送动作写进 handoff，不要写进 unresolved。\n"
+                + json.dumps({"objective": task.objective, "pre_delivery_acceptance": [
+                    item for item in contract.get("acceptance", [])
+                    if not _DELIVERY_REQUEST_PATTERN.search(str(item))
+                ]}, ensure_ascii=False)),
+            deliverable="发送前独立验收结果、实际执行的检查与内容缺陷", dependencies=tuple(completed))
         run = previous or self.store.create_run(task.task_id, step,
             allowed_tools=sorted(self.registry.worker(step.role).allowed_tools & tools_by_name.keys()),
             model_profile=self._profile_for(step.role, selected_profile).name)
@@ -2062,7 +2081,10 @@ class SubAgentCoordinator:
         events = [e for e in self.store.events(task.task_id, limit=2000) if e.get("run_id") == run.run_id]
         executed = any(e["event_type"] == "agent.tool_finished" and e["payload"].get("tool_name") == "sandbox_exec"
             and _tool_result_payload(e["payload"].get("result", "")).get("returncode", -1) == 0 for e in events)
-        status = "passed" if outcome.succeeded and (not checks or executed) else "failed"
+        status = "passed" if (
+            (outcome.succeeded or _only_deferred_delivery_unresolved(outcome.result))
+            and (not checks or executed)
+        ) else "failed"
         if status == "failed" and outcome.succeeded:
             self.store.finish_run(run.run_id, "partial", result={**outcome.result, "status": "partial"}, error="缺少独立工具验收证据")
         result = {"status": status, "run_id": run.run_id, "checks": checks,
@@ -2322,7 +2344,7 @@ class SubAgentCoordinator:
 
         deliveries: list[dict[str, Any]] = []
         seen: set[tuple[str, str]] = set()
-        for outcome in completed.values():
+        for outcome in _delivery_outcomes(task, completed):
             if outcome.state == "failed":
                 continue
             artifacts = outcome.result.get("artifacts")
@@ -2564,9 +2586,18 @@ class SubAgentCoordinator:
                         compensate_tool=(hooks.compensate_tool if hooks else None),
                         transcript_sink=save_transcript,
                     )
-            result = _parse_worker_result(answer)
+            result = _normalize_worker_scope_result(_parse_worker_result(answer))
             if hooks and hooks.workspaces and result.get("artifacts"):
-                result["artifacts"] = await hooks.workspaces.capture(task.task_id, result["artifacts"])
+                try:
+                    result["artifacts"] = await hooks.workspaces.capture(
+                        task.task_id, result["artifacts"]
+                    )
+                except ArtifactCaptureError as exc:
+                    result["artifacts"] = exc.captured
+                    result.setdefault("warnings", []).extend(
+                        f"产物未能收取：{error}" for error in exc.errors
+                    )
+                    result["status"] = "partial" if exc.captured else "failed"
             state = _worker_outcome_state(result)
             error = _worker_failure_message(result) if state == "failed" else ""
             self.store.finish_run(
@@ -2897,6 +2928,9 @@ def _worker_prompt(spec: AgentSpec) -> str:
 {spec.instructions}
 
 你只处理分配给你的步骤，不重新规划整个任务，也不能创建其他 Agent。
+status 只评价你被分配的步骤和本步骤交付标准，不评价整个任务是否已经完成。
+本步骤完整交付时必须返回 success，即使后续 Agent 尚未工作或文件尚未发送。
+unresolved 只填写本步骤交付标准中仍未完成的缺口；需要后续步骤继续做的事项写入 handoff。
 需要完整上游数据时根据结果索引调用 read_agent_result 分页读取，不猜测被省略的内容。
 文件分别放在此步骤指定的工作目录。每个步骤有独立容器；通过 import_agent_artifact 导入上游快照，复制到自己的工作目录再修改。
 不要自行发送文件。交付物在 artifacts 返回 s123abc:/workspace/path.ext 格式的真实沙盒句柄，宿主独立验收后发送。
@@ -2908,7 +2942,8 @@ def _worker_prompt(spec: AgentSpec) -> str:
   "artifacts": [{{"handle":"工具返回的完整句柄","kind":"file","name":"名称"}}],
   "citations": ["完整来源链接或消息句柄"],
   "warnings": ["限制和风险"],
-  "unresolved": ["尚未解决的问题"],
+  "unresolved": ["尚未解决的本步骤问题"],
+  "handoff": ["交给下游步骤继续处理的事项"],
   "confidence": 0.0
 }}
 不要使用 Markdown 代码围栏包裹 JSON。"""
@@ -3050,6 +3085,31 @@ def _normalize_worker_result(payload: Mapping[str, Any]) -> dict[str, Any]:
     return AgentResult.from_payload(payload).as_payload()
 
 
+_HANDOFF_ITEM_PATTERN = re.compile(
+    r"(?:等待|交给|由|尚需)?(?:后续|下游|宿主|主控|其他).{0,24}(?:agent|步骤|处理|实现|发送|上传|交付)",
+    re.IGNORECASE,
+)
+
+
+def _normalize_worker_scope_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Keep downstream work from downgrading an otherwise complete assigned step."""
+    unresolved = _string_list(result.get("unresolved"))
+    deferred = [item for item in unresolved if _HANDOFF_ITEM_PATTERN.search(item)]
+    if not deferred:
+        return result
+    remaining = [item for item in unresolved if item not in deferred]
+    handoff = list(dict.fromkeys([*_string_list(result.get("handoff")), *deferred]))
+    result["unresolved"] = remaining
+    result["handoff"] = handoff
+    if (
+        str(result.get("status") or "").casefold() == "partial"
+        and not remaining
+        and str(result.get("summary") or "").strip()
+    ):
+        result["status"] = "success"
+    return result
+
+
 def _string_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
@@ -3072,6 +3132,51 @@ def _retryable_outcome(outcome: StepOutcome) -> bool:
         and isinstance(metadata, Mapping)
         and metadata.get("retryable") is True
     )
+
+
+def _only_deferred_delivery_unresolved(result: Mapping[str, Any]) -> bool:
+    """A pre-delivery review must not fail merely because delivery has not run yet."""
+    unresolved = _string_list(result.get("unresolved"))
+    if not unresolved:
+        return False
+    delivery_pattern = re.compile(
+        r"(?:发送|上传|发到|发至|群文件|交付到|send|upload|deliver)",
+        re.IGNORECASE,
+    )
+    return all(delivery_pattern.search(item) for item in unresolved)
+
+
+def _delivery_outcomes(
+    task: TaskRecord,
+    completed: Mapping[str, StepOutcome],
+) -> list[StepOutcome]:
+    """Prefer final or repair artifacts over intermediate planning material."""
+    raw_steps = task.plan.get("steps")
+    planned = [raw for raw in raw_steps if isinstance(raw, Mapping)] if isinstance(raw_steps, list) else []
+    dependencies = {
+        str(dependency)
+        for raw in planned
+        for dependency in raw.get("depends_on", [])
+    }
+    leaves = {
+        str(raw.get("id"))
+        for raw in planned
+        if raw.get("id") and str(raw.get("id")) not in dependencies
+    }
+    with_artifacts = [
+        outcome for outcome in completed.values()
+        if outcome.state != "failed" and isinstance(outcome.result.get("artifacts"), list)
+        and outcome.result.get("artifacts")
+    ]
+    terminal = [
+        outcome for outcome in with_artifacts
+        if outcome.step.key in leaves
+    ]
+    repairs = [
+        outcome for outcome in with_artifacts
+        if "__repair_" in outcome.step.key
+    ]
+    return terminal or repairs or with_artifacts
 
 
 def _is_retryable_worker_exception(exc: BaseException) -> bool:
@@ -3207,6 +3312,17 @@ def _completion_states(outcomes: Sequence[StepOutcome], deliveries: Sequence[Map
         "delivery_state": ("not_requested" if not deliveries else
                            "acknowledged" if all(item.get("ok") is True for item in deliveries) else "failed_or_unknown"),
     }
+
+
+def _settled_task_status(
+    outcomes: Sequence[StepOutcome],
+    deliveries: Sequence[Mapping[str, Any]],
+    validation: Mapping[str, Any],
+) -> Literal["completed", "partial"]:
+    delivery_failed = any(item.get("ok") is not True for item in deliveries)
+    execution_complete = bool(outcomes) and all(outcome.succeeded for outcome in outcomes)
+    independently_accepted = validation.get("status") == "passed"
+    return "completed" if not delivery_failed and (execution_complete or independently_accepted) else "partial"
 
 
 def _validate_context_owner(packet: ContextPacket | None, scope_key: str, conversation_id: str, requester_user_id: int) -> None:

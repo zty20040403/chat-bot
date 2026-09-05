@@ -21,6 +21,13 @@ IMPORT_AGENT_ARTIFACT = {"type": "function", "function": {
         "sandbox_id": {"type": "string"}}, "required": ["step_id", "artifact_index", "sandbox_id"]}}}
 
 
+class ArtifactCaptureError(ValueError):
+    def __init__(self, captured: list[dict], errors: list[str]):
+        self.captured = captured
+        self.errors = errors
+        super().__init__("; ".join(errors))
+
+
 class StepWorkspaces:
     def __init__(self, root: Path, executor):
         self.root = root / "subagent_artifacts"
@@ -46,19 +53,30 @@ class StepWorkspaces:
 
     async def capture(self, task_id: int, artifacts: list) -> list[dict]:
         captured = []
+        errors = []
         for item in artifacts:
-            if not isinstance(item, dict):
-                raise ValueError("Invalid artifact entry")
-            match = re.fullmatch(r"(s[0-9a-f]{6}):(/workspace/.+)", str(item.get("handle", "")))
-            if not match:
-                raise ValueError("Artifact must reference a real sandbox file")
-            sandbox_id, path = match.groups()
-            content = await self.manager.read_file(self.executor.owner, sandbox_id, path.removeprefix("/workspace/"), max_bytes=None)
-            if not content:
-                raise ValueError("Artifact is empty")
-            digest = await asyncio.to_thread(self._persist, task_id, content)
-            captured.append({**item, "snapshot": digest, "size": len(content),
-                             "name": PurePosixPath(str(item.get("name") or path)).name})
+            try:
+                if not isinstance(item, dict):
+                    raise ValueError("Invalid artifact entry")
+                match = re.fullmatch(r"(s[0-9a-f]{6}):(/workspace/.+)", str(item.get("handle", "")))
+                if not match:
+                    raise ValueError("Artifact must reference a real sandbox file or directory")
+                sandbox_id, path = match.groups()
+                content, directory = await self.manager.export_artifact(
+                    self.executor.owner, sandbox_id, path.removeprefix("/workspace/"))
+                if not content:
+                    raise ValueError("Artifact is empty")
+                digest = await asyncio.to_thread(self._persist, task_id, content)
+                filename = PurePosixPath(str(item.get("name") or path)).name
+                if directory and not filename.lower().endswith(".zip"):
+                    filename += ".zip"
+                captured.append({**item, "snapshot": digest, "size": len(content),
+                                 "kind": "file", "source_kind": "directory" if directory else "file", "name": filename})
+            except Exception as exc:
+                handle = str(item.get("handle", "")) if isinstance(item, dict) else "invalid entry"
+                errors.append(f"{handle}: {exc}")
+        if errors:
+            raise ArtifactCaptureError(captured, errors)
         return captured
 
     async def import_artifact(self, task_id: int, upstream: dict, arguments: dict) -> str:

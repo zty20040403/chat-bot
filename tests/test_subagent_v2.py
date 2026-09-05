@@ -22,7 +22,12 @@ from src.plugins.ai_chat.agent.sessions import read_upstream_result
 from src.plugins.ai_chat.deepseek import DeepSeekTrace, ask_deepseek_with_tools
 from src.plugins.ai_chat.llm_gateway import LLMGateway, completion_profile_scope
 from src.plugins.ai_chat.model_catalog import ModelCatalog, ModelProfile
-from src.plugins.ai_chat.subagents import SubAgentCoordinator, SubAgentStore, TaskStep
+from src.plugins.ai_chat.subagents import (
+    SubAgentCoordinator,
+    SubAgentStore,
+    TaskStep,
+    _normalize_worker_scope_result,
+)
 
 
 def profile(name="test"):
@@ -79,8 +84,40 @@ class EntryContractTests(unittest.TestCase):
         self.assertEqual(AgentResult.from_payload({"summary": "done"}).status, "partial")
         self.assertEqual(AgentResult.from_payload({"status": "success", "summary": ""}).status, "partial")
 
+    def test_downstream_handoff_does_not_make_completed_step_partial(self):
+        result = AgentResult.from_payload({
+            "status": "success",
+            "summary": "分析方案已完成",
+            "unresolved": [],
+            "handoff": ["前端和后端按方案继续实现", "宿主验收后发送文件"],
+        })
+        self.assertEqual(result.status, "success")
+        self.assertEqual(result.handoff, ("前端和后端按方案继续实现", "宿主验收后发送文件"))
+        self.assertEqual(result.as_payload()["handoff"], list(result.handoff))
+
+    def test_host_moves_obvious_downstream_work_out_of_unresolved(self):
+        result = _normalize_worker_scope_result({
+            "status": "partial",
+            "summary": "商城分析和接口方案已经完成",
+            "unresolved": ["尚需后续前后端步骤按方案实现，并由宿主发送压缩包"],
+            "handoff": [],
+        })
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["unresolved"], [])
+        self.assertEqual(len(result["handoff"]), 1)
+
+    def test_host_keeps_real_step_gap_as_partial(self):
+        result = _normalize_worker_scope_result({
+            "status": "partial",
+            "summary": "只写了一半",
+            "unresolved": ["仍缺少接口字段定义"],
+        })
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["unresolved"], ["仍缺少接口字段定义"])
+
     def test_handoff_is_valid_json_and_can_read_tail_without_cross_task_access(self):
-        upstream = {"frontend": {"status": "success", "summary": "长结果" * 6000, "facts": [f"fact-{i}" for i in range(100)]}}
+        upstream = {"frontend": {"status": "success", "summary": "长结果" * 6000,
+                                 "facts": [f"fact-{i}" for i in range(100)], "handoff": ["接入后端"]}}
         packet = ContextPacket("group:1", "group:1:user:2", 2, 3, "集成", supporting_context="正文" * 5000)
         rendered = packet.for_agent(DEFAULT_AGENT_REGISTRY.worker("coder"), upstream=upstream).rendered_context
         capsule = json.loads(rendered.split("[上游结构化结果索引]\n")[1])
@@ -89,6 +126,8 @@ class EntryContractTests(unittest.TestCase):
         self.assertEqual(tail["data"], ["fact-99"])
         denied = json.loads(read_upstream_result(upstream, {"step_id": "other-task", "section": "facts"}))
         self.assertFalse(denied["ok"])
+        handoff = json.loads(read_upstream_result(upstream, {"step_id": "frontend", "section": "handoff"}))
+        self.assertEqual(handoff["data"], ["接入后端"])
 
 
 class EntryLoopTests(unittest.IsolatedAsyncioTestCase):
