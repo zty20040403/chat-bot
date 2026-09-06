@@ -81,7 +81,7 @@ qq-deepseek-bot-db check
 2. 创建两份随机且不同的 SOPS 凭据：内部控制 API、Kennethbot MaxOps 身份。
 3. 在 MaxOps 添加 `kennethbot` 客户端，只授予确认过的只读主机、能力和服务。
 4. 先评估 NixOS 配置，再升级数据库。
-5. 启动 `kennethbot-cluster-control.service`，确认健康、目录和拒绝测试。
+5. 启动 `kennethbot-cluster-control.service`；它先幂等升级 schema，Bot 随后启动并再次确认版本，避免首次部署循环重启。
 6. 启动或重启 `qq-deepseek-bot.service`。
 7. 从管理员私聊和获准群各做一次工具验收，再检查控制台与 Prometheus。
 

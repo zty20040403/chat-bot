@@ -209,7 +209,9 @@ in {
           LoadCredential =
             lib.optional (cfg.apiTokenFile != null) "api-token:${cfg.apiTokenFile}"
             ++ lib.optional (cfg.maxops.enable && cfg.maxops.tokenFile != null) "maxops-token:${cfg.maxops.tokenFile}";
-          ExecStartPre = "${cfg.package}/bin/qq-deepseek-bot-db check";
+          # The bot starts after this service, so the control plane owns the
+          # idempotent schema upgrade and avoids a startup dependency cycle.
+          ExecStartPre = "${cfg.package}/bin/qq-deepseek-bot-db upgrade";
           ExecStart = "${cfg.package}/bin/kennethbot-cluster-control";
           Restart = "on-failure";
           RestartSec = 5;
