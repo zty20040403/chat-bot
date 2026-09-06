@@ -40,6 +40,11 @@ class BackgroundTasks:
 
 
 class SandboxManager:
+    def __init__(self):
+        self.started = []
+        self.stopped = []
+        self.destroyed = []
+
     async def admin_snapshot(self):
         return {
             "items": [
@@ -48,14 +53,36 @@ class SandboxManager:
                     "owner": "group:930690526:user:3526452465",
                     "activities": [
                         {
+                            "activity_id": "exec-1",
                             "command": "python main.py",
                             "elapsed_seconds": 2,
                         }
                     ],
-                }
+                    "status": "Up 2 minutes",
+                    "running": True,
+                },
+                {
+                    "sandbox_id": "s456def",
+                    "owner": "group:930690526:user:3526452465",
+                    "activities": [],
+                    "status": "Exited (0) 1 minute ago",
+                    "running": False,
+                    "purpose": "task",
+                    "workspace_size_bytes": 1024,
+                    "workspace_file_count": 1,
+                },
             ],
             "active_commands": 1,
         }
+
+    async def start_owned(self, owner, sandbox_id):
+        self.started.append((owner, sandbox_id))
+
+    async def stop_owned(self, owner, sandbox_id):
+        self.stopped.append((owner, sandbox_id))
+
+    async def destroy(self, owner, sandbox_id):
+        self.destroyed.append((owner, sandbox_id))
 
 
 class ModelPreferences:
@@ -478,6 +505,7 @@ class AdminTests(unittest.TestCase):
         self.addCleanup(deliveries.close)
         self.addCleanup(usage.close)
         app = FastAPI()
+        sandbox_manager = SandboxManager()
         register_admin(
             app,
             AdminServices(
@@ -492,7 +520,7 @@ class AdminTests(unittest.TestCase):
                 user_profiles=UserProfiles(),
                 message_ledger=MessageLedger(),
                 settings=Settings(),
-                sandbox_manager=SandboxManager(),
+                sandbox_manager=sandbox_manager,
                 sticker_inventory=lambda: {
                     "counts": {"total": 1, "learned_images": 1},
                     "items": [
@@ -560,6 +588,32 @@ class AdminTests(unittest.TestCase):
                     "/bot-admin/api/sandboxes",
                     headers={"Authorization": "Bearer secret"},
                 )
+                sandbox_start = await client.post(
+                    "/bot-admin/api/v1/sandboxes/s456def/action",
+                    headers={
+                        "Authorization": "Bearer secret",
+                        "If-Match": '"0"',
+                        "X-Admin-Actor": "Kenneth",
+                    },
+                    json={"action": "start"},
+                )
+                sandbox_destroy_denied = await client.post(
+                    "/bot-admin/api/v1/sandboxes/s456def/action",
+                    headers={
+                        "Authorization": "Bearer secret",
+                        "If-Match": '"1"',
+                    },
+                    json={"action": "destroy"},
+                )
+                sandbox_destroy = await client.post(
+                    "/bot-admin/api/v1/sandboxes/s456def/action",
+                    headers={
+                        "Authorization": "Bearer secret",
+                        "If-Match": '"1"',
+                        "X-Admin-Actor": "Kenneth",
+                    },
+                    json={"action": "destroy", "confirmation": "s456def"},
+                )
                 stickers = await client.get(
                     "/bot-admin/api/stickers",
                     headers={"Authorization": "Bearer secret"},
@@ -620,6 +674,9 @@ class AdminTests(unittest.TestCase):
                     allowed,
                     v1_allowed,
                     sandboxes,
+                    sandbox_start,
+                    sandbox_destroy_denied,
+                    sandbox_destroy,
                     stickers,
                     group_models,
                     media,
@@ -641,6 +698,9 @@ class AdminTests(unittest.TestCase):
             allowed,
             v1_allowed,
             sandboxes,
+            sandbox_start,
+            sandbox_destroy_denied,
+            sandbox_destroy,
             stickers,
             group_models,
             media,
@@ -684,6 +744,20 @@ class AdminTests(unittest.TestCase):
         self.assertIn('/bot-admin/favicon.svg?v=test', page.text)
         self.assertNotIn("unpkg.com", page.text)
         self.assertEqual(sandboxes.json()["active_commands"], 1)
+        self.assertEqual(sandboxes.json()["resource"], "sandboxes")
+        self.assertEqual(sandbox_start.status_code, 200)
+        self.assertEqual(sandbox_start.json()["resource_version"], 1)
+        self.assertEqual(sandbox_destroy_denied.status_code, 400)
+        self.assertEqual(sandbox_destroy.status_code, 200)
+        self.assertEqual(sandbox_destroy.json()["resource_version"], 2)
+        self.assertEqual(
+            sandbox_manager.started,
+            [("group:930690526:user:3526452465", "s456def")],
+        )
+        self.assertEqual(
+            sandbox_manager.destroyed,
+            [("group:930690526:user:3526452465", "s456def")],
+        )
         self.assertEqual(
             sandboxes.json()["items"][0]["agent_tasks"],
             [],

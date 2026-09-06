@@ -16,6 +16,7 @@ import {
   RotateCcw,
   ShieldCheck,
   Square,
+  Trash2,
   X,
 } from 'lucide-react'
 import { TokenUsageChart } from './TokenUsageChart'
@@ -325,7 +326,7 @@ export function OverviewView({ plane, onOpenDetail }: { plane: Plane; onOpenDeta
       <div className="metric-grid overview-metrics">
         <Metric label="服务状态" value={plane.online ? '运行中' : '连接断开'} hint={`v${overview.version ?? window.__KENNETHBOT_ADMIN__.version} · 已运行 ${fmtDuration(overview.uptime_seconds)}`} />
         <Metric label="运行任务" value={fmtNumber(Number(overview.running_tasks ?? 0) + Number(overview.subagent_tasks?.running ?? 0) + Number(overview.subagent_tasks?.planning ?? 0) + Number(overview.subagent_tasks?.verifying ?? 0))} hint={`${fmtNumber(overview.durable_jobs?.running)} 个持久任务 · ${fmtNumber(overview.subagent_tasks?.completed)} 个 Sub-Agent 任务完成 · ${fmtNumber(totals.turns)} 个 Agent 回合`} />
-        <Metric label="沙盒活动" value={fmtNumber(sandboxes.active_commands)} hint={`${fmtNumber(rows(sandboxes.items).length)} 个沙盒 · 任务结束后自动销毁`} />
+        <Metric label="沙盒活动" value={fmtNumber(sandboxes.active_commands)} hint={`${fmtNumber(rows(sandboxes.items).length)} 个保留沙盒 · 空闲时停止`} />
         <Metric label="90 天 Token" value={fmtNumber(usageTotals.input + usageTotals.output)} hint={`${fmtNumber(usageTotals.calls)} 次调用 · 输入 ${fmtNumber(usageTotals.input)} / 输出 ${fmtNumber(usageTotals.output)}`} />
       </div>
       <TokenUsageChart rows={usage} />
@@ -1042,12 +1043,69 @@ export function FleetView({ plane }: { plane: Plane }) {
 export function SandboxesView({ plane }: { plane: Plane }) {
   const payload = plane.data.sandboxes ?? {}
   const sandboxes = rows(payload.items)
+  const [pendingSandbox, setPendingSandbox] = useState('')
+
+  const runAction = async (sandbox: any, action: 'start' | 'stop' | 'destroy') => {
+    const sandboxId = String(sandbox.sandbox_id ?? '')
+    if (!sandboxId || pendingSandbox) return
+    if (action === 'destroy' && !window.confirm(
+      `确认永久删除沙盒 ${sandboxId}？容器和 /workspace 都会被删除，此操作不能撤销。`,
+    )) return
+    setPendingSandbox(sandboxId)
+    try {
+      await plane.mutate(
+        'sandboxes',
+        `/sandboxes/${sandboxId}/action`,
+        'POST',
+        { action, confirmation: action === 'destroy' ? sandboxId : '' },
+        ['sandboxes', 'overview'],
+      )
+    } finally {
+      setPendingSandbox('')
+    }
+  }
+
   return (
     <>
-      <PageHeader title="沙盒" description="临时工作区、资源使用和 Agent 当前任务" action={<RefreshButton onClick={() => void plane.refresh('sandboxes')} />} />
-      <div className="metric-grid compact"><Metric label="沙盒数量" value={sandboxes.length} /><Metric label="活动命令" value={fmtNumber(payload.active_commands)} /><Metric label="Docker" value={<StatusBadge value={payload.available ? 'online' : 'offline'} />} /></div>
-      <div className="sandbox-grid">{sandboxes.map((sandbox) => <section className="sandbox-card" key={sandbox.sandbox_id}><div className="sandbox-head"><div><h2>{sandbox.sandbox_id}</h2><code>{sandbox.owner}</code></div><StatusBadge value={rows(sandbox.activities).length ? 'running' : 'ready'} /></div><dl><div><dt>工作区</dt><dd>{sandbox.workspace ?? '/workspace'}</dd></div><div><dt>镜像</dt><dd>{sandbox.image ?? '-'}</dd></div><div><dt>内存</dt><dd>{fmtBytes(sandbox.memory_bytes)}</dd></div></dl>{rows(sandbox.activities).map((activity) => <div className="command-row" key={activity.command}><code>{activity.command}</code><span>{fmtDuration(activity.elapsed_seconds)}</span></div>)}{rows(sandbox.agent_tasks).map((task) => <div className="task-chip" key={task.task_id}>{task.summary}</div>)}</section>)}</div>
-      {!sandboxes.length && <EmptyState>当前没有沙盒，任务结束后的沙盒会自动销毁</EmptyState>}
+      <PageHeader title="沙盒" description="停止后保留工作区；删除只由管理员明确执行" action={<RefreshButton onClick={() => void plane.refresh('sandboxes')} />} />
+      <div className="metric-grid compact">
+        <Metric label="保留沙盒" value={sandboxes.length} />
+        <Metric label="运行中" value={sandboxes.filter((item) => item.running).length} />
+        <Metric label="活动命令" value={fmtNumber(payload.active_commands)} />
+        <Metric label="Docker" value={<StatusBadge value={payload.available ? 'online' : 'offline'} />} />
+      </div>
+      <div className="sandbox-grid">
+        {sandboxes.map((sandbox) => {
+          const sandboxId = String(sandbox.sandbox_id ?? '')
+          const activities = rows(sandbox.activities)
+          const busy = pendingSandbox === sandboxId || activities.length > 0
+          return (
+            <section className="sandbox-card" key={sandboxId}>
+              <div className="sandbox-head">
+                <div><h2>{sandboxId}</h2><code>{sandbox.owner}</code></div>
+                <div className="sandbox-status"><StatusBadge value={sandbox.running ? 'running' : 'stopped'} /></div>
+                <div className="sandbox-actions">
+                  {!sandbox.running && <button className="icon-button success" title="恢复沙盒" aria-label={`恢复沙盒 ${sandboxId}`} disabled={Boolean(pendingSandbox)} onClick={() => void runAction(sandbox, 'start')}><Play size={15} /></button>}
+                  {sandbox.running && <button className="icon-button" title="停止并保留工作区" aria-label={`停止沙盒 ${sandboxId}`} disabled={busy} onClick={() => void runAction(sandbox, 'stop')}><Square size={15} /></button>}
+                  <button className="icon-button danger" title="永久删除沙盒和工作区" aria-label={`删除沙盒 ${sandboxId}`} disabled={busy} onClick={() => void runAction(sandbox, 'destroy')}><Trash2 size={15} /></button>
+                </div>
+              </div>
+              <dl>
+                <div><dt>用途</dt><dd>{sandbox.purpose ?? 'task'}</dd></div>
+                <div><dt>运行环境</dt><dd>{sandbox.runtime ?? '-'}</dd></div>
+                <div><dt>内存</dt><dd>{sandbox.memory_usage ?? '-'}</dd></div>
+                <div><dt>工作区大小</dt><dd>{fmtBytes(sandbox.workspace_size_bytes)}</dd></div>
+                <div><dt>文件数量</dt><dd>{fmtNumber(sandbox.workspace_file_count)}</dd></div>
+                <div><dt>状态</dt><dd>{sandbox.status ?? '-'}</dd></div>
+              </dl>
+              {activities.map((activity) => <div className="command-row" key={activity.activity_id ?? activity.command}><code>{activity.command}</code><span>{fmtDuration(activity.elapsed_seconds)}</span></div>)}
+              {rows(sandbox.workspace_files).slice(0, 5).map((file) => <div className="sandbox-file" key={file.path}><code>{file.path}</code><span>{fmtBytes(file.size_bytes)}</span></div>)}
+              {rows(sandbox.agent_tasks).map((task) => <div className="task-chip" key={task.task_id}>{task.summary}</div>)}
+            </section>
+          )
+        })}
+      </div>
+      {!sandboxes.length && <EmptyState>当前没有保留的沙盒</EmptyState>}
     </>
   )
 }

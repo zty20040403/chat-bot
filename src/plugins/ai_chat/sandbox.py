@@ -318,22 +318,26 @@ class DockerSandboxManager:
         }
 
     async def destroy(self, owner: str, sandbox_id: str) -> None:
-        name = await self._owned_container(
-            owner,
-            sandbox_id,
-            require_running=False,
-        )
-        result = await self._run(
-            "docker",
-            "rm",
-            "-f",
-            name,
-            timeout=30,
-        )
-        if result.returncode != 0:
-            raise SandboxError(self._docker_error(result.stderr))
-        if self.image:
-            await self._remove_volume(self._workspace_volume_name(sandbox_id))
+        self._ensure_idle(sandbox_id)
+        lock = self._exec_locks.setdefault(sandbox_id, asyncio.Lock())
+        async with lock:
+            self._ensure_idle(sandbox_id)
+            name = await self._owned_container(
+                owner,
+                sandbox_id,
+                require_running=False,
+            )
+            result = await self._run(
+                "docker",
+                "rm",
+                "-f",
+                name,
+                timeout=30,
+            )
+            if result.returncode != 0:
+                raise SandboxError(self._docker_error(result.stderr))
+            if self.image:
+                await self._remove_volume(self._workspace_volume_name(sandbox_id))
         self._exec_locks.pop(sandbox_id, None)
 
     async def exec(
@@ -940,25 +944,38 @@ with tempfile.TemporaryFile() as output:
 
     async def stop_owned(self, owner: str, sandbox_id: str) -> None:
         """Stop a container without deleting its persistent workspace volume."""
-        name = await self._owned_container(owner, sandbox_id, require_running=False)
-        owned = await self.list(owner)
-        target = next(
-            (
-                item
-                for item in owned
-                if str(item.get("sandbox_id") or "") == sandbox_id
-            ),
-            None,
-        )
-        if target is not None and not self._status_is_running(target):
-            return
-        result = await self._run("docker", "stop", "--time", "5", name, timeout=15)
-        if result.returncode:
-            raise SandboxError(self._docker_error(result.stderr))
+        self._ensure_idle(sandbox_id)
+        lock = self._exec_locks.setdefault(sandbox_id, asyncio.Lock())
+        async with lock:
+            self._ensure_idle(sandbox_id)
+            name = await self._owned_container(owner, sandbox_id, require_running=False)
+            owned = await self.list(owner)
+            target = next(
+                (
+                    item
+                    for item in owned
+                    if str(item.get("sandbox_id") or "") == sandbox_id
+                ),
+                None,
+            )
+            if target is not None and not self._status_is_running(target):
+                return
+            result = await self._run(
+                "docker", "stop", "--time", "5", name, timeout=15
+            )
+            if result.returncode:
+                raise SandboxError(self._docker_error(result.stderr))
 
     @staticmethod
     def _status_is_running(item: dict[str, str]) -> bool:
         return str(item.get("status") or "").lower().startswith("up ")
+
+    def _ensure_idle(self, sandbox_id: str) -> None:
+        if any(
+            activity.sandbox_id == sandbox_id
+            for activity in self._active_execs.values()
+        ):
+            raise SandboxError("沙盒正在执行命令，不能停止或删除。")
 
     async def _owned_container(
         self,

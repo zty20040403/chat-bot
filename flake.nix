@@ -101,7 +101,7 @@
         pname = "kennethbot-admin-ui";
         version = project.project.version;
         src = ./admin-ui;
-        npmDepsHash = "sha256-SFwP8nT2yds9rb++FhzsYPNiAiIdFOdwkAPmtUveLUw=";
+        npmDepsHash = "sha256-pnqEfM6kd3rXPq4OKy11VUTvSAwNURPCStHwv7P4b28=";
         npmBuildScript = "build";
         installPhase = ''
           runHook preInstall
