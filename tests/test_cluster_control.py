@@ -305,6 +305,17 @@ class FleetControlServiceTests(unittest.IsolatedAsyncioTestCase):
         },
     )
 
+    def test_observed_at_accepts_maxops_rfc3339_timestamp(self) -> None:
+        self.assertEqual(
+            FleetControlService._observed_at(
+                {"observed_at": "2026-09-06T07:00:00Z"}
+            ),
+            1788678000,
+        )
+        self.assertIsNone(
+            FleetControlService._observed_at({"observed_at": "not-a-time"})
+        )
+
     async def test_deduplicates_fresh_queries_and_uses_stale_evidence(self) -> None:
         maxops = FakeMaxOps()
         store = FakeStore()

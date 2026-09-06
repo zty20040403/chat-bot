@@ -4,6 +4,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, replace
+from datetime import datetime
 from typing import Any
 
 from prometheus_client import CollectorRegistry, Counter, Histogram
@@ -83,6 +84,12 @@ class FleetControlService:
             value = data.get(key)
             if isinstance(value, (int, float)) and value > 0:
                 return int(value)
+            if isinstance(value, str):
+                try:
+                    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+                return int(parsed.timestamp())
         return None
 
     @staticmethod
