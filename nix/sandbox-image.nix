@@ -35,6 +35,7 @@ let
 
   nixConfigPackage = pkgs.writeTextDir "etc/nix/nix.conf" ''
     sandbox = false
+    build-users-group =
     experimental-features = nix-command
     warn-dirty = false
     keep-outputs = true

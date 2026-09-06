@@ -104,6 +104,18 @@ class DockerSandboxCancellationTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertEqual(created["toolset"], "advanced")
+        calls = [call.args for call in manager._run.await_args_list]
+        self.assertIn(
+            ("docker", "volume", "create", "kennethbot-nix-v2"),
+            calls,
+        )
+        self.assertTrue(
+            any(
+                call[:3] == ("docker", "volume", "create")
+                and str(call[3]).startswith("kennethbot-work-s")
+                for call in calls
+            )
+        )
 
     async def test_destroy_removes_the_owned_workspace_volume(self) -> None:
         manager = DockerSandboxManager(image="kennethbot-sandbox:latest")

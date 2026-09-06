@@ -491,6 +491,18 @@ class DockerSandboxManager:
         async with self._nix_volume_lock:
             if self._nix_volume_ready:
                 return
+            created = await self._run(
+                "docker",
+                "volume",
+                "create",
+                self.nix_cache_volume,
+                timeout=30,
+            )
+            if created.returncode != 0:
+                raise SandboxError(
+                    "Nix 共享缓存卷创建失败："
+                    + self._docker_error(created.stderr or created.stdout)
+                )
             result = await self._run(
                 "docker",
                 "run",
@@ -528,6 +540,18 @@ class DockerSandboxManager:
             self._nix_volume_ready = True
 
     async def _prepare_workspace_volume(self, image: str, volume: str) -> None:
+        created = await self._run(
+            "docker",
+            "volume",
+            "create",
+            volume,
+            timeout=30,
+        )
+        if created.returncode != 0:
+            raise SandboxError(
+                "沙盒工作卷创建失败："
+                + self._docker_error(created.stderr or created.stdout)
+            )
         result = await self._run(
             "docker",
             "run",
