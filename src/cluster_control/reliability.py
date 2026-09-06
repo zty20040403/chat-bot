@@ -44,17 +44,22 @@ class ReliabilityStore:
         self.database = database
 
     @staticmethod
-    def _incident(item: Mapping[str, Any], cursor: Any) -> dict[str, Any]:
+    def _incident(
+        item: Mapping[str, Any], cursor: Any, *, event_limit: int = 200
+    ) -> dict[str, Any]:
         result = dict(item)
+        if event_limit <= 0:
+            result["events"] = []
+            return result
         events = cursor.execute(
             """SELECT event_id, event_type, source_ref, confidence, payload_json,
                       occurred_at, created_at
                FROM fleet_incident_events WHERE incident_id = ?
-               ORDER BY occurred_at, event_id""",
-            (result["incident_id"],),
+               ORDER BY occurred_at DESC, event_id DESC LIMIT ?""",
+            (result["incident_id"], min(max(event_limit, 1), 1000)),
         ).fetchall()
         result["events"] = []
-        for event in events:
+        for event in reversed(events):
             decoded = dict(event)
             decoded["payload"] = _decode(decoded.pop("payload_json", "{}"), {})
             result["events"].append(decoded)
@@ -75,6 +80,10 @@ class ReliabilityStore:
         connection = self.database.store_connection()
         cursor = connection.cursor()
         try:
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(?, 0))",
+                (incident_key,),
+            )
             row = cursor.execute(
                 """SELECT * FROM fleet_incidents WHERE incident_key = ?
                    AND status != 'resolved' ORDER BY created_at DESC LIMIT 1 FOR UPDATE""",
@@ -173,6 +182,10 @@ class ReliabilityStore:
         connection = self.database.store_connection()
         cursor = connection.cursor()
         try:
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(?, 0))",
+                (incident_key,),
+            )
             row = cursor.execute(
                 """SELECT * FROM fleet_incidents WHERE incident_key = ?
                    AND status != 'resolved' ORDER BY created_at DESC LIMIT 1 FOR UPDATE""",
@@ -224,7 +237,7 @@ class ReliabilityStore:
                 """SELECT * FROM fleet_incidents ORDER BY last_seen_at DESC LIMIT ?""",
                 (min(max(limit, 1), 500),),
             ).fetchall()
-            return [self._incident(row, cursor) for row in rows]
+            return [self._incident(row, cursor, event_limit=0) for row in rows]
         finally:
             cursor.close()
             connection.close()

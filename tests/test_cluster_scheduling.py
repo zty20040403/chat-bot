@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import unittest
+from unittest.mock import Mock
 
 import httpx
 import nonebot
@@ -330,6 +331,30 @@ class SchedulingPolicyTests(unittest.TestCase):
                 confidence="confirmed",
                 payload={},
             )
+
+    def test_incident_recovery_lock_is_bound_to_the_incident_key(self) -> None:
+        cursor = Mock()
+        cursor.execute.return_value = cursor
+        cursor.fetchone.return_value = {
+            "incident_id": "incident_" + "a" * 32,
+            "incident_key": "guardian:admin",
+            "status": "open",
+            "resource_version": 1,
+        }
+        connection = Mock()
+        connection.cursor.return_value = cursor
+        database = Mock()
+        database.store_connection.return_value = connection
+        store = ReliabilityStore(database)
+        store.incident = Mock(return_value={"status": "resolved"})  # type: ignore[method-assign]
+
+        store.recover_incident(
+            incident_key="guardian:admin", source_ref="guardian", payload={}
+        )
+
+        queries = [str(call.args[0]) for call in cursor.execute.call_args_list]
+        self.assertIn("pg_advisory_xact_lock", queries[0])
+        self.assertIn("incident_key = ?", queries[1])
 
     def test_guardian_action_is_bound_and_materialized_at_execution_time(self) -> None:
         template = validate_guardian_action(

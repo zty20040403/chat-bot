@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import re
 
+import sqlalchemy as sa
 from alembic import op
 
 
@@ -29,6 +30,38 @@ def upgrade() -> None:
         "gpu_limit_slots >= 0 AND resource_version >= 1",
         schema=schema,
     )
+    op.execute(
+        sa.text(
+            f"""WITH ranked AS (
+                    SELECT incident_id,
+                           row_number() OVER (
+                               PARTITION BY incident_key
+                               ORDER BY last_seen_at DESC, created_at DESC, incident_id DESC
+                           ) AS duplicate_rank
+                    FROM {schema}.fleet_incidents
+                    WHERE status <> 'resolved'
+                )
+                UPDATE {schema}.fleet_incidents AS incident
+                SET status = 'resolved',
+                    resolved_at = COALESCE(
+                        incident.resolved_at,
+                        EXTRACT(EPOCH FROM clock_timestamp())::bigint
+                    ),
+                    resource_version = incident.resource_version + 1,
+                    updated_at = EXTRACT(EPOCH FROM clock_timestamp())::bigint
+                FROM ranked
+                WHERE incident.incident_id = ranked.incident_id
+                  AND ranked.duplicate_rank > 1"""
+        )
+    )
+    op.create_index(
+        "uq_fleet_incidents_active_key",
+        "fleet_incidents",
+        ["incident_key"],
+        unique=True,
+        postgresql_where=sa.text("status <> 'resolved'"),
+        schema=schema,
+    )
     op.create_check_constraint(
         "ck_fleet_borrow_grant_budget",
         "fleet_borrow_grants",
@@ -50,6 +83,11 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     schema = _schema()
+    op.drop_index(
+        "uq_fleet_incidents_active_key",
+        table_name="fleet_incidents",
+        schema=schema,
+    )
     op.drop_constraint(
         "ck_fleet_guardian_action_accounting",
         "fleet_guardians",
