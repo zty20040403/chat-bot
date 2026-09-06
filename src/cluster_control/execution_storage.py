@@ -473,7 +473,7 @@ class ClusterExecutionStore:
                 "SELECT * FROM fleet_worker_policies WHERE worker_id = ? FOR UPDATE",
                 (worker_id,),
             ).fetchone()
-            if policy is not None and policy["desired_availability"] != "available":
+            if policy is None or policy["desired_availability"] != "available":
                 connection.commit()
                 return None
             capabilities = set(_decode(worker["capabilities_json"], []))
@@ -492,6 +492,9 @@ class ClusterExecutionStore:
                 if row["kind"] not in capabilities:
                     continue
                 request = ResourceRequest.parse(_decode(row["constraints_json"], {}))
+                external_borrow = (
+                    str(row["actor_id"]) != str(policy["owner_actor_id"])
+                )
                 grant = None
                 grant_rows = cursor.execute(
                     """SELECT * FROM fleet_borrow_grants
@@ -506,6 +509,7 @@ class ClusterExecutionStore:
                     reason = eligibility_reason(
                         request, worker=worker, host=host_policy, policy=policy,
                         grant=candidate, job_kind=str(row["kind"]), now=now,
+                        external_borrow=external_borrow,
                     )
                     if not reason:
                         grant = candidate
@@ -513,6 +517,7 @@ class ClusterExecutionStore:
                 reason = eligibility_reason(
                     request, worker=worker, host=host_policy, policy=policy,
                     grant=grant, job_kind=str(row["kind"]), now=now,
+                    external_borrow=external_borrow,
                 )
                 if reason:
                     cursor.execute(

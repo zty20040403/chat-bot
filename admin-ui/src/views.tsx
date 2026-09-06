@@ -775,8 +775,6 @@ export function FleetView({ plane }: { plane: Plane }) {
     try {
       await plane.mutate('fleet', '/fleet/guardians', 'POST', {
         target_id: target,
-        host_id: 'h610',
-        service_ref: '',
         mode: 'observe',
         expires_at: Math.floor(Date.now() / 1000) + Math.max(1, guardianHours) * 3600,
         interval_seconds: 60,

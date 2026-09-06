@@ -9,7 +9,12 @@ import nonebot
 
 nonebot.init()
 
-from src.cluster_control.reliability import GuardianService, ReliabilityStore
+from src.cluster_control.reliability import (
+    GuardianService,
+    ReliabilityStore,
+    guardian_status_after_check,
+    resolve_guardian_target,
+)
 from src.cluster_control.scheduling import ResourceRequest, eligibility_reason
 from src.cluster_worker.service import ClusterWorker
 from src.plugins.ai_chat.fleet_case_recall import semantic_runbook_scores
@@ -100,6 +105,37 @@ class SchedulingPolicyTests(unittest.TestCase):
             "cost_budget_exhausted",
         )
 
+    def test_external_borrow_always_requires_a_matching_grant(self) -> None:
+        request = ResourceRequest.parse({})
+        policy = {"desired_availability": "available"}
+        self.assertEqual(
+            eligibility_reason(
+                request, worker=_worker(), host={"gpu_compute": False},
+                policy=policy, grant=None, job_kind="media.inspect", now=200,
+                external_borrow=True,
+            ),
+            "borrow_grant_required",
+        )
+        self.assertEqual(
+            eligibility_reason(
+                request, worker=_worker(), host={"gpu_compute": False},
+                policy=policy, grant=_grant(), job_kind="media.inspect", now=200,
+                external_borrow=True,
+            ),
+            "",
+        )
+
+    def test_owner_work_does_not_require_a_borrow_grant(self) -> None:
+        self.assertEqual(
+            eligibility_reason(
+                ResourceRequest.parse({}), worker=_worker(),
+                host={"gpu_compute": False},
+                policy={"desired_availability": "available"}, grant=None,
+                job_kind="media.inspect", now=200, external_borrow=False,
+            ),
+            "",
+        )
+
     def test_case_applicability_is_revalidated(self) -> None:
         ok, reasons = ReliabilityStore.validate_applicability(
             {"runtime.system_closure": "/nix/store/new"},
@@ -108,12 +144,62 @@ class SchedulingPolicyTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(reasons, ["runtime.system_closure changed"])
 
+    def test_guardian_target_binding_is_server_authoritative(self) -> None:
+        targets = {
+            "admin": {
+                "target_id": "admin",
+                "observer_host": "h610",
+                "host_id": "tank",
+                "service_ref": "nginx.service",
+            }
+        }
+        self.assertEqual(
+            resolve_guardian_target({"target_id": "admin"}, targets),
+            ("tank", "nginx.service"),
+        )
+        with self.assertRaises(PermissionError):
+            resolve_guardian_target(
+                {"target_id": "admin", "host_id": "h610"}, targets
+            )
+        with self.assertRaises(PermissionError):
+            resolve_guardian_target(
+                {"target_id": "admin", "service_ref": "ssh.service"}, targets
+            )
+
+    def test_guardian_attention_state_can_recover_or_expire(self) -> None:
+        common = {
+            "failure_threshold": 3,
+            "mode": "observe",
+            "actions_used": 0,
+            "max_actions": 0,
+            "requires_attention": False,
+        }
+        self.assertEqual(
+            guardian_status_after_check(
+                outcome="failed", failures=3, expired=False, **common
+            ),
+            "needs_attention",
+        )
+        self.assertEqual(
+            guardian_status_after_check(
+                outcome="passed", failures=0, expired=False, **common
+            ),
+            "active",
+        )
+        self.assertEqual(
+            guardian_status_after_check(
+                outcome="failed", failures=4, expired=True, **common
+            ),
+            "completed",
+        )
+
 
 class _GuardianStore:
     def __init__(self, guardian: dict) -> None:
         self.items = [guardian]
         self.finished: list[dict] = []
         self.incidents: list[dict] = []
+        self.recoveries: list[dict] = []
 
     def claim_due_guardians(self, **_kwargs: object) -> list[dict]:
         items, self.items = self.items, []
@@ -125,6 +211,10 @@ class _GuardianStore:
 
     def observe_incident(self, **kwargs: object) -> dict:
         self.incidents.append(dict(kwargs))
+        return {"incident_id": "incident_" + "b" * 32}
+
+    def recover_incident(self, **kwargs: object) -> dict:
+        self.recoveries.append(dict(kwargs))
         return {"incident_id": "incident_" + "b" * 32}
 
 
@@ -164,6 +254,76 @@ class GuardianRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(actions, [])
         self.assertEqual(store.incidents, [])
         self.assertEqual(store.finished[0]["outcome"], "passed")
+
+    async def test_redirect_is_not_treated_as_healthy(self) -> None:
+        store = _GuardianStore(
+            {
+                "guardian_id": "guardian_" + "f" * 32,
+                "target_id": "admin",
+                "host_id": "h610",
+                "service_ref": "",
+                "mode": "observe",
+                "consecutive_failures": 0,
+                "failure_threshold": 3,
+                "actions_used": 0,
+                "max_actions": 0,
+                "authorized_action": {},
+                "actor_id": "admin:kenneth",
+                "origin_scope": "admin-console",
+            }
+        )
+        service = GuardianService(
+            store,  # type: ignore[arg-type]
+            ({"target_id": "admin", "url": "http://admin.test/health"},),
+            operation_factory=lambda _payload, _actor, _scope: {},
+        )
+        await service._client.aclose()
+        service._client = httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda _request: httpx.Response(302, headers={"location": "/login"})
+            ),
+            trust_env=False,
+        )
+        try:
+            self.assertEqual(await service.tick(), 1)
+        finally:
+            await service.close()
+        self.assertEqual(store.finished[0]["outcome"], "failed")
+
+    async def test_recovery_closes_the_guardian_incident(self) -> None:
+        store = _GuardianStore(
+            {
+                "guardian_id": "guardian_" + "9" * 32,
+                "target_id": "admin",
+                "host_id": "h610",
+                "service_ref": "nginx.service",
+                "mode": "observe",
+                "consecutive_failures": 3,
+                "failure_threshold": 3,
+                "actions_used": 0,
+                "max_actions": 0,
+                "authorized_action": {},
+                "actor_id": "admin:kenneth",
+                "origin_scope": "admin-console",
+            }
+        )
+        service = GuardianService(
+            store,  # type: ignore[arg-type]
+            ({"target_id": "admin", "url": "http://admin.test/health"},),
+        )
+        await service._client.aclose()
+        service._client = httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda _request: httpx.Response(200)),
+            trust_env=False,
+        )
+        try:
+            await service.tick()
+        finally:
+            await service.close()
+        self.assertEqual(len(store.recoveries), 1)
+        self.assertEqual(
+            store.finished[0]["incident_id"], "incident_" + "b" * 32
+        )
 
     async def test_action_limit_prevents_more_remediation(self) -> None:
         store = _GuardianStore(

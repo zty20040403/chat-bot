@@ -142,6 +142,7 @@ def eligibility_reason(
     grant: Mapping[str, Any] | None,
     job_kind: str,
     now: int,
+    external_borrow: bool = False,
 ) -> str:
     if worker.get("availability") != "available":
         return "worker_not_available"
@@ -158,7 +159,12 @@ def eligibility_reason(
         return "data_site_mismatch"
     if request.gpu_slots and not bool(host.get("gpu_compute", False)):
         return "gpu_not_authorized"
-    if request.borrow_required or request.gpu_slots or request.expected_cost_microunits:
+    if (
+        external_borrow
+        or request.borrow_required
+        or request.gpu_slots
+        or request.expected_cost_microunits
+    ):
         if grant is None:
             return "borrow_grant_required"
         if grant.get("status") != "available":

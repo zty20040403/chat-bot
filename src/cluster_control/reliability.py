@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import time
 import uuid
@@ -12,6 +13,9 @@ import httpx
 from src.bot_storage import PostgresDatabase
 
 from .execution_contracts import canonical_json, new_handle
+
+
+logger = logging.getLogger(__name__)
 
 
 def _decode(value: Any, fallback: Any) -> Any:
@@ -26,6 +30,61 @@ def _tokens(text: str) -> set[str]:
     words = set(re.findall(r"[a-z0-9_.:-]{2,}|[\u4e00-\u9fff]{2,}", normalized))
     words.update(normalized[index:index + 2] for index in range(max(len(normalized) - 1, 0)))
     return {word for word in words if word.strip()}
+
+
+def resolve_guardian_target(
+    raw: Mapping[str, Any],
+    known_targets: Mapping[str, Mapping[str, Any]],
+) -> tuple[str, str]:
+    """Resolve immutable guardian ownership from the registered target catalog."""
+    target_id = str(raw.get("target_id") or "").strip()
+    target = known_targets.get(target_id)
+    if target is None:
+        raise PermissionError("guardian target is not registered")
+    host_id = str(target.get("host_id") or target.get("observer_host") or "").strip()
+    service_ref = str(target.get("service_ref") or "").strip()
+    if not host_id:
+        raise ValueError("guardian target has no registered host")
+    requested_host_id = str(raw.get("host_id") or "").strip()
+    requested_service_ref = str(raw.get("service_ref") or "").strip()
+    if requested_host_id and requested_host_id != host_id:
+        raise PermissionError("guardian host does not match the registered target")
+    if requested_service_ref and requested_service_ref != service_ref:
+        raise PermissionError("guardian service does not match the registered target")
+    return host_id, service_ref
+
+
+def guardian_target_snapshot(target: Mapping[str, Any]) -> dict[str, str]:
+    return {
+        key: str(target.get(key) or "")
+        for key in (
+            "target_id", "kind", "url", "observer_host", "host_id", "service_ref"
+        )
+    }
+
+
+def guardian_status_after_check(
+    *,
+    outcome: str,
+    failures: int,
+    failure_threshold: int,
+    mode: str,
+    actions_used: int,
+    max_actions: int,
+    expired: bool,
+    requires_attention: bool,
+) -> str:
+    if expired:
+        return "completed"
+    if outcome == "passed":
+        return "active"
+    if outcome == "unknown" or requires_attention:
+        return "needs_attention"
+    if failures >= failure_threshold and (
+        mode == "observe" or actions_used >= max_actions
+    ):
+        return "needs_attention"
+    return "active"
 
 
 class ReliabilityStore:
@@ -145,6 +204,45 @@ class ReliabilityStore:
             )
             connection.commit()
             return self.incident(incident_id) or {}
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            cursor.close()
+            connection.close()
+
+    def recover_incident(
+        self, *, incident_key: str, source_ref: str, payload: Mapping[str, Any]
+    ) -> dict[str, Any] | None:
+        """Close the current incident after a deterministic recovery probe."""
+        now = int(time.time())
+        connection = self.database.store_connection()
+        cursor = connection.cursor()
+        try:
+            row = cursor.execute(
+                """SELECT * FROM fleet_incidents WHERE incident_key = ?
+                   AND status != 'resolved' ORDER BY created_at DESC LIMIT 1 FOR UPDATE""",
+                (incident_key,),
+            ).fetchone()
+            if row is None:
+                connection.commit()
+                return None
+            incident_id = str(row["incident_id"])
+            cursor.execute(
+                """UPDATE fleet_incidents SET status = 'resolved', resolved_at = ?,
+                   last_seen_at = ?, resource_version = resource_version + 1,
+                   updated_at = ? WHERE incident_id = ?""",
+                (now, now, now, incident_id),
+            )
+            cursor.execute(
+                """INSERT INTO fleet_incident_events
+                   (incident_id, event_type, source_ref, confidence, payload_json,
+                    occurred_at, created_at)
+                   VALUES (?, 'recovered', ?, 'confirmed', ?, ?, ?)""",
+                (incident_id, source_ref[:240], canonical_json(dict(payload)), now, now),
+            )
+            connection.commit()
+            return self.incident(incident_id)
         except Exception:
             connection.rollback()
             raise
@@ -284,10 +382,10 @@ class ReliabilityStore:
         try:
             rows = cursor.execute(
                 """SELECT * FROM fleet_runbook_cases WHERE status = 'verified'
-                   AND (host_id = '' OR host_id = ?)
-                   AND (service_ref = '' OR service_ref = ?)
+                   AND (? = '' OR host_id = '' OR host_id = ?)
+                   AND (? = '' OR service_ref = '' OR service_ref = ?)
                    ORDER BY updated_at DESC LIMIT 200""",
-                (host_id, service_ref),
+                (host_id, host_id, service_ref, service_ref),
             ).fetchall()
         finally:
             cursor.close()
@@ -324,13 +422,15 @@ class ReliabilityStore:
 
     def create_guardian(
         self, raw: Mapping[str, Any], *, actor_id: str, origin_scope: str,
-        known_targets: set[str],
+        known_targets: Mapping[str, Mapping[str, Any]],
     ) -> dict[str, Any]:
         if not actor_id.startswith("admin:"):
             raise PermissionError("only an administrator can create guardians")
         target_id = str(raw.get("target_id") or "").strip()
-        if target_id not in known_targets:
-            raise PermissionError("guardian target is not registered")
+        target_host_id, target_service_ref = resolve_guardian_target(
+            raw, known_targets
+        )
+        target_snapshot = guardian_target_snapshot(known_targets[target_id])
         now = int(time.time())
         starts_at = int(raw.get("starts_at") or now)
         expires_at = int(raw.get("expires_at") or 0)
@@ -351,6 +451,8 @@ class ReliabilityStore:
             raise ValueError("observe-only guardians cannot authorize actions")
         if mode == "remediate" and (not isinstance(action, dict) or not action):
             raise ValueError("remediation guardian requires a fixed authorized action")
+        probe_policy = dict(raw.get("probe_policy") or {})
+        probe_policy["registered_target"] = target_snapshot
         guardian_id = new_handle("guardian")
         connection = self.database.store_connection()
         cursor = connection.cursor()
@@ -365,10 +467,9 @@ class ReliabilityStore:
                    VALUES (?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""",
                 (
                     guardian_id, actor_id, origin_scope, target_id,
-                    str(raw.get("host_id") or "")[:64],
-                    str(raw.get("service_ref") or "")[:160], mode,
+                    target_host_id[:64], target_service_ref[:160], mode,
                     starts_at, expires_at, interval, threshold, max_actions,
-                    canonical_json(dict(raw.get("probe_policy") or {})),
+                    canonical_json(probe_policy),
                     canonical_json(dict(action)), starts_at, now, now,
                 ),
             )
@@ -423,7 +524,8 @@ class ReliabilityStore:
             cursor.execute(
                 """UPDATE fleet_guardians SET status = 'completed', updated_at = ?,
                    resource_version = resource_version + 1
-                   WHERE status IN ('scheduled','active','paused') AND expires_at <= ?""",
+                   WHERE status IN ('scheduled','active','paused','needs_attention')
+                     AND expires_at <= ?""",
                 (now, now),
             )
             rows = cursor.execute(
@@ -484,12 +586,13 @@ class ReliabilityStore:
             cursor.execute(
                 """UPDATE fleet_guardians SET status = 'completed', updated_at = ?,
                    resource_version = resource_version + 1
-                   WHERE status IN ('scheduled','active','paused') AND expires_at <= ?""",
+                   WHERE status IN ('scheduled','active','paused','needs_attention')
+                     AND expires_at <= ?""",
                 (now, now),
             )
             rows = cursor.execute(
                 """SELECT * FROM fleet_guardians
-                   WHERE status IN ('scheduled','active') AND starts_at <= ?
+                   WHERE status IN ('scheduled','active','needs_attention') AND starts_at <= ?
                      AND expires_at > ? AND next_check_at <= ?
                      AND (check_lease_until IS NULL OR check_lease_until <= ?)
                    ORDER BY next_check_at, guardian_id
@@ -540,16 +643,16 @@ class ReliabilityStore:
             if outcome == "failed":
                 failures += 1
             actions = int(row["actions_used"]) + (1 if action_used else 0)
-            status = str(row["status"])
-            if int(row["expires_at"]) <= now:
-                status = "completed"
-            elif outcome == "unknown":
-                status = "needs_attention"
-            elif requires_attention:
-                status = "needs_attention"
-            elif failures >= int(row["failure_threshold"]):
-                if row["mode"] == "observe" or actions >= int(row["max_actions"]):
-                    status = "needs_attention"
+            status = guardian_status_after_check(
+                outcome=outcome,
+                failures=failures,
+                failure_threshold=int(row["failure_threshold"]),
+                mode=str(row["mode"]),
+                actions_used=actions,
+                max_actions=int(row["max_actions"]),
+                expired=int(row["expires_at"]) <= now,
+                requires_attention=requires_attention,
+            )
             cursor.execute(
                 """INSERT INTO fleet_guardian_checks
                    (guardian_id, status, facts_json, incident_id, operation_id,
@@ -613,6 +716,7 @@ class GuardianService:
             except asyncio.TimeoutError:
                 pass
             except Exception:
+                logger.exception("Guardian control loop failed")
                 await asyncio.sleep(5)
 
     async def tick(self) -> int:
@@ -632,12 +736,27 @@ class GuardianService:
                 facts={"error": "target_removed"},
             )
             return
+        probe_policy = guardian.get("probe_policy")
+        expected_target = (
+            probe_policy.get("registered_target")
+            if isinstance(probe_policy, Mapping)
+            else None
+        )
+        if isinstance(expected_target, Mapping) and guardian_target_snapshot(
+            target
+        ) != dict(expected_target):
+            await asyncio.to_thread(
+                self.store.finish_guardian_check,
+                str(guardian["guardian_id"]), owner=self.owner, outcome="unknown",
+                facts={"error": "target_definition_changed"},
+            )
+            return
         started = time.monotonic()
         try:
             response = await self._client.get(
                 str(target["url"]), headers={"Accept": "application/json,text/plain"}
             )
-            ok = 200 <= response.status_code < 400
+            ok = 200 <= response.status_code < 300
             facts: dict[str, Any] = {
                 "status_code": response.status_code,
                 "latency_ms": round((time.monotonic() - started) * 1000),
@@ -656,6 +775,19 @@ class GuardianService:
         operation_id = ""
         action_used = False
         requires_attention = False
+        if (
+            outcome == "passed"
+            and int(guardian["consecutive_failures"])
+            >= int(guardian["failure_threshold"])
+        ):
+            recovered = await asyncio.to_thread(
+                self.store.recover_incident,
+                incident_key=f"guardian:{guardian['target_id']}",
+                source_ref=str(guardian["guardian_id"]),
+                payload=facts,
+            )
+            if recovered is not None:
+                incident_id = str(recovered["incident_id"])
         if outcome == "failed" and failures >= int(guardian["failure_threshold"]):
             incident = await asyncio.to_thread(
                 self.store.observe_incident,

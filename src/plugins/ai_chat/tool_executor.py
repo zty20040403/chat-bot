@@ -1791,8 +1791,6 @@ class ToolExecutor(HandlerService):
                         payload = await client.create_guardian(
                             {
                                 "target_id": str(arguments.get("target_id") or ""),
-                                "host_id": host_id,
-                                "service_ref": str(arguments.get("service_ref") or ""),
                                 "mode": "observe",
                                 "expires_at": int(arguments.get("expires_at") or 0),
                                 "interval_seconds": int(arguments.get("interval_seconds") or 60),

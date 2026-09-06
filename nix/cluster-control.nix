@@ -98,6 +98,16 @@
         default = "h610";
         description = "Inventory host whose network path performs the probe.";
       };
+      host_id = lib.mkOption {
+        type = lib.types.str;
+        default = "";
+        description = "Inventory host that owns the guarded target; defaults to observer_host.";
+      };
+      service_ref = lib.mkOption {
+        type = lib.types.str;
+        default = "";
+        description = "Optional registered systemd service represented by this target.";
+      };
     };
   };
   workerIdentityType = lib.types.submodule {
@@ -317,8 +327,21 @@ in {
         message = "Kennethbot diagnostics contains duplicate target_id values";
       }
       {
-        assertion = lib.all (target: builtins.elem target.observer_host inventoryHostIds) cfg.diagnostics.targets;
-        message = "Every diagnostic observer_host must exist in the cluster inventory";
+        assertion = lib.all (target:
+          builtins.elem target.observer_host inventoryHostIds
+          && builtins.elem (if target.host_id == "" then target.observer_host else target.host_id) inventoryHostIds
+        ) cfg.diagnostics.targets;
+        message = "Every diagnostic observer_host and target host_id must exist in the cluster inventory";
+      }
+      {
+        assertion = lib.all (target:
+          target.service_ref == ""
+          || lib.any (host:
+            host.host_id == (if target.host_id == "" then target.observer_host else target.host_id)
+            && builtins.elem target.service_ref host.readable_units
+          ) cfg.inventory
+        ) cfg.diagnostics.targets;
+        message = "Every diagnostic service_ref must be readable on its registered target host";
       }
       {
         assertion = builtins.elem cfg.localHostId inventoryHostIds;

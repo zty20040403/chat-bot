@@ -36,7 +36,7 @@ class RunbookCaseRequest(BaseModel):
 class GuardianRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     target_id: str
-    host_id: str
+    host_id: str = ""
     service_ref: str = ""
     mode: str = "observe"
     starts_at: int | None = None
@@ -188,7 +188,7 @@ def build_reliability_router(
                 body.model_dump(exclude_none=True),
                 actor_id=principal[0],
                 origin_scope=principal[1],
-                known_targets=set(execution_service().diagnostic_targets),
+                known_targets=execution_service().diagnostic_targets,
             )
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from None

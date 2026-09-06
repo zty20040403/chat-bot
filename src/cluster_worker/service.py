@@ -272,7 +272,7 @@ class ClusterWorker:
             "target_id": payload["target_id"],
             "status_code": response.status_code,
             "latency_ms": round((time.monotonic() - started) * 1000),
-            "ok": 200 <= response.status_code < 400,
+            "ok": 200 <= response.status_code < 300,
         }
 
     @staticmethod

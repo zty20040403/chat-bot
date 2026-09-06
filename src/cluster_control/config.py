@@ -174,6 +174,17 @@ def _diagnostic_targets(raw: str) -> tuple[dict[str, str], ...]:
             raise ValueError(
                 f"Invalid diagnostic observer_host: {observer_host!r}"
             )
+        host_id = str(item.get("host_id") or observer_host).strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", host_id):
+            raise ValueError(f"Invalid diagnostic host_id: {host_id!r}")
+        service_ref = str(item.get("service_ref") or "").strip()
+        if service_ref and not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9_.@:-]{0,119}\.service",
+            service_ref,
+        ):
+            raise ValueError(
+                f"Invalid diagnostic service_ref: {service_ref!r}"
+            )
         seen.add(target_id)
         result.append(
             {
@@ -182,6 +193,8 @@ def _diagnostic_targets(raw: str) -> tuple[dict[str, str], ...]:
                 "kind": kind,
                 "url": url,
                 "observer_host": observer_host,
+                "host_id": host_id,
+                "service_ref": service_ref,
             }
         )
     return tuple(result)
@@ -416,6 +429,20 @@ class ClusterControlSettings:
         }:
             raise ValueError("KC_LOCAL_HOST_ID must exist in KC_INVENTORY_JSON")
         inventory = {str(item.get("host_id") or ""): item for item in self.inventory}
+        for target in self.diagnostic_targets:
+            observer_host = str(target["observer_host"])
+            target_host_id = str(target["host_id"])
+            if observer_host not in inventory or target_host_id not in inventory:
+                raise ValueError(
+                    f"Diagnostic target {target['target_id']} references an unknown host"
+                )
+            service_ref = str(target.get("service_ref") or "")
+            if service_ref and service_ref not in set(
+                inventory[target_host_id].get("readable_units", [])
+            ):
+                raise ValueError(
+                    f"Diagnostic target {target['target_id']} references an unreadable service"
+                )
         for worker in self.worker_identities:
             host = inventory.get(worker["host_id"])
             if host is None or not host.get("compute"):

@@ -103,7 +103,7 @@ class FleetStatusRequest(BaseModel):
 class FleetGuardianRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     target_id: str
-    host_id: str
+    host_id: str = ""
     service_ref: str = ""
     mode: str = "observe"
     expires_at: int

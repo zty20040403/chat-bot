@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 import unittest
 from dataclasses import asdict
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import httpx
 import nonebot
@@ -14,7 +16,11 @@ nonebot.init()
 
 from src.cluster_control.api import create_app
 from src.cluster_control.capabilities import capability_manifest
-from src.cluster_control.config import _diagnostic_targets, _inventory
+from src.cluster_control.config import (
+    ClusterControlSettings,
+    _diagnostic_targets,
+    _inventory,
+)
 from src.cluster_control.diagnostics import (
     IncidentDiagnosticService,
     _summarize_model_routes,
@@ -322,6 +328,46 @@ class ClusterControlConfigTests(unittest.TestCase):
             _inventory(json.dumps([
                 {"host_id": "h610", "readable_units": ["/bin/sh"]}
             ]))
+
+    def test_diagnostic_target_binds_host_and_service(self) -> None:
+        targets = _diagnostic_targets(json.dumps([
+            {
+                "target_id": "admin",
+                "kind": "admin",
+                "url": "http://127.0.0.1:8080/health",
+                "observer_host": "h610",
+                "host_id": "tank",
+                "service_ref": "nginx.service",
+            }
+        ]))
+        self.assertEqual(targets[0]["host_id"], "tank")
+        self.assertEqual(targets[0]["service_ref"], "nginx.service")
+
+    def test_settings_reject_unreadable_diagnostic_service(self) -> None:
+        environment = {
+            "KC_API_TOKEN_FILE": "/run/credentials/control-token",
+            "AI_POSTGRES_DSN": "postgresql://localhost/kennethbot",
+            "KC_INVENTORY_JSON": json.dumps([
+                {
+                    "host_id": "h610",
+                    "observe": True,
+                    "readable_units": ["kennethbot.service"],
+                }
+            ]),
+            "KC_DIAGNOSTIC_TARGETS_JSON": json.dumps([
+                {
+                    "target_id": "admin",
+                    "kind": "admin",
+                    "url": "http://127.0.0.1:8080/health",
+                    "observer_host": "h610",
+                    "service_ref": "nginx.service",
+                }
+            ]),
+        }
+        with patch.dict(os.environ, environment, clear=True):
+            settings = ClusterControlSettings.from_env()
+        with self.assertRaisesRegex(ValueError, "unreadable service"):
+            settings.validate()
 
 
 class MaxOpsCompatibilityTests(unittest.IsolatedAsyncioTestCase):

@@ -41,6 +41,8 @@ class DiagnosticTarget:
     kind: str
     url: str
     observer_host: str
+    host_id: str = ""
+    service_ref: str = ""
 
 
 @dataclass(frozen=True)

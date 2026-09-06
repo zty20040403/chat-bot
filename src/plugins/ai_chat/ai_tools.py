@@ -428,19 +428,18 @@ CLUSTER_GUARDIAN_CREATE_TOOL: ToolDefinition = {
         "name": CLUSTER_GUARDIAN_CREATE_TOOL_NAME,
         "description": (
             "为已登记探测目标创建有开始、结束时间和次数上限的守护合同。仅管理员可用；"
-            "默认只观察，不能把任意 URL、命令或未批准动作塞进守护。"
+            "默认只观察；主机和服务由服务端登记目标绑定，不能把任意 URL、命令或"
+            "未批准动作塞进守护。"
         ),
         "parameters": {
             "type": "object", "additionalProperties": False,
             "properties": {
                 "target_id": {"type": "string"},
-                "host_id": {"type": "string"},
-                "service_ref": {"type": "string"},
                 "expires_at": {"type": "integer"},
                 "interval_seconds": {"type": "integer", "minimum": 15, "maximum": 86400},
                 "failure_threshold": {"type": "integer", "minimum": 1, "maximum": 20},
             },
-            "required": ["target_id", "host_id", "expires_at"],
+            "required": ["target_id", "expires_at"],
         },
     },
 }
