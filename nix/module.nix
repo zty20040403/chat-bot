@@ -510,6 +510,37 @@ in {
       after = ["docker.service"];
       script = ''
         ${pkgs.docker}/bin/docker load --input ${cfg.sandbox.imageArchive}
+
+        volume=${lib.escapeShellArg cfg.sandbox.nixCacheVolume}
+        if ${pkgs.docker}/bin/docker volume inspect "$volume" >/dev/null 2>&1; then
+          if ! ${pkgs.docker}/bin/docker run --rm \
+            --network none \
+            --user 0:0 \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --read-only \
+            --mount type=volume,source="$volume",target=/nix \
+            ${lib.escapeShellArg cfg.sandbox.imageName} \
+            test -f /nix/.kennethbot-cache-ready; then
+            ${pkgs.docker}/bin/docker volume rm -f "$volume"
+          fi
+        fi
+        ${pkgs.docker}/bin/docker volume create \
+          --label io.kennethbot.nix-cache=true "$volume" >/dev/null
+        ${pkgs.docker}/bin/docker run --rm \
+          --network none \
+          --user 0:0 \
+          --cap-drop ALL \
+          --security-opt no-new-privileges \
+          --memory 2g \
+          --memory-swap 2g \
+          --read-only \
+          --tmpfs /tmp:rw,nosuid,nodev,size=256m,mode=1777 \
+          --tmpfs /root:rw,nosuid,nodev,size=64m,mode=700 \
+          --mount type=volume,source="$volume",target=/nix \
+          ${lib.escapeShellArg cfg.sandbox.imageName} \
+          sh -lc 'nix-store --verify && touch /nix/.kennethbot-cache-ready'
+
         ${pkgs.docker}/bin/docker image ls --quiet \
           --filter dangling=true \
           --filter label=io.kennethbot.sandbox=advanced \
@@ -518,6 +549,7 @@ in {
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
+        TimeoutStartSec = "15min";
       };
     };
 

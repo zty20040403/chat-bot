@@ -117,6 +117,25 @@ class DockerSandboxCancellationTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    async def test_nix_cache_initialization_allows_slow_first_copy(self) -> None:
+        manager = DockerSandboxManager(image="kennethbot-sandbox:latest")
+        manager._run = AsyncMock(  # type: ignore[method-assign]
+            side_effect=[
+                SandboxResult("kennethbot-nix-v2\n", "", 0),
+                SandboxResult("", "", 0),
+            ]
+        )
+
+        await manager._ensure_nix_volume("kennethbot-sandbox:latest")
+
+        initialization = manager._run.await_args_list[1]
+        self.assertEqual(initialization.kwargs["timeout"], 300)
+        self.assertIn(
+            "touch /nix/.kennethbot-cache-ready",
+            initialization.args[-1],
+        )
+        self.assertTrue(manager._nix_volume_ready)
+
     async def test_destroy_removes_the_owned_workspace_volume(self) -> None:
         manager = DockerSandboxManager(image="kennethbot-sandbox:latest")
         manager._owned_container = AsyncMock(return_value="qqbot-sabc123")  # type: ignore[method-assign]

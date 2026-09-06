@@ -529,8 +529,12 @@ class DockerSandboxManager:
                 image,
                 "sh",
                 "-lc",
-                "test -x \"$(command -v nix-store)\" && nix-store --version",
-                timeout=120,
+                (
+                    "test -x \"$(command -v nix-store)\" "
+                    "&& nix-store --verify "
+                    "&& touch /nix/.kennethbot-cache-ready"
+                ),
+                timeout=300,
             )
             if result.returncode != 0:
                 raise SandboxError(
