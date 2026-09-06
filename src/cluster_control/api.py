@@ -23,7 +23,7 @@ from .diagnostics import IncidentDiagnosticService
 from .execution_service import ClusterExecutionService, WorkerAuthenticator
 from .guardian import GuardianService
 from .reliability import ReliabilityStore
-from .scheduling import ResourcePolicyStore
+from .resource_policy import ResourcePolicyStore
 from .service import FleetControlService
 
 

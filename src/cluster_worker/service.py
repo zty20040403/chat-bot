@@ -17,13 +17,13 @@ from typing import Any
 
 import httpx
 
+from src.cluster_control.job_kinds import WORKER_JOB_KINDS
+
 from .client import WorkerControlClient
 from .config import WorkerSettings
 
 
-CAPABILITIES = (
-    "probe.http", "artifact.inspect", "document.verify", "media.inspect", "preview.static"
-)
+CAPABILITIES = tuple(sorted(WORKER_JOB_KINDS))
 EXECUTOR_VERSION = "worker-v2"
 logger = logging.getLogger("kennethbot.cluster_worker")
 

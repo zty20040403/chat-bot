@@ -19,7 +19,7 @@ from .execution_service import ClusterExecutionService, WorkerAuthenticator
 from .execution_storage import ClusterExecutionStore
 from .guardian import GuardianService
 from .reliability import ReliabilityStore
-from .scheduling import ResourcePolicyStore
+from .resource_policy import ResourcePolicyStore
 
 
 def main() -> None:

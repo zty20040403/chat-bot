@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any, Mapping
 
+from .job_kinds import WORKER_JOB_KINDS
 from .scheduling import ResourceRequest
 
 
@@ -17,11 +18,6 @@ UNIT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.@:-]{0,119}\.service")
 ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:@/-]{0,199}")
 HASH_RE = re.compile(r"[a-f0-9]{64}")
 OPERATION_ACTIONS = frozenset({"service.start", "service.stop", "service.restart"})
-WORKER_JOB_KINDS = frozenset(
-    {"probe.http", "artifact.inspect", "document.verify", "media.inspect", "preview.static"}
-)
-
-
 def canonical_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 

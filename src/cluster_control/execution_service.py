@@ -15,8 +15,9 @@ from .execution_contracts import (
     new_handle,
     bounded_object,
 )
+from .job_kinds import WORKER_JOB_KINDS
 from .execution_storage import ClusterExecutionStore
-from .scheduling import ResourcePolicyStore
+from .resource_policy import ResourcePolicyStore
 
 
 @dataclass(frozen=True)
@@ -67,10 +68,7 @@ class ClusterExecutionService:
                 "available": bool(self.worker_hosts),
                 "workers": sorted(self.worker_hosts),
                 "compute_hosts": compute_hosts,
-                "job_kinds": [
-                    "probe.http", "artifact.inspect", "document.verify",
-                    "media.inspect", "preview.static",
-                ],
+                "job_kinds": sorted(WORKER_JOB_KINDS),
                 "borrow_scheduling": self.resource_policies is not None,
                 "checkpoint_format": "kennethbot-result-v1",
             },
@@ -279,8 +277,7 @@ class ClusterExecutionService:
         if availability not in {"available", "draining", "unavailable"}:
             raise ValueError("invalid worker availability")
         if not isinstance(capabilities, list) or any(
-            item not in {"probe.http", "artifact.inspect", "document.verify", "media.inspect", "preview.static"}
-            for item in capabilities
+            item not in WORKER_JOB_KINDS for item in capabilities
         ):
             raise ValueError("invalid worker capabilities")
         if not isinstance(runtime, dict) or not isinstance(capacity, dict):

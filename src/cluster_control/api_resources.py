@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 
-from .scheduling import ResourcePolicyStore
+from .resource_policy import ResourcePolicyStore
 
 
 class WorkerAvailabilityRequest(BaseModel):
