@@ -46,7 +46,7 @@ in {
       wantedBy = ["multi-user.target"];
       wants = ["network-online.target" "kennethbot-cluster-control.service"];
       after = ["network-online.target" "kennethbot-cluster-control.service"];
-      path = [pkgs.poppler_utils pkgs.ffmpeg-headless];
+      path = [pkgs.poppler-utils pkgs.ffmpeg-headless];
       environment = {
         KW_WORKER_ID = cfg.workerId;
         KW_TOKEN_FILE = "%d/worker-token";
