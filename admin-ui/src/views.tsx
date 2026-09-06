@@ -564,6 +564,9 @@ export function FleetView({ plane }: { plane: Plane }) {
   const operationCapability = executionCapabilities.operations ?? {}
   const workerCapability = executionCapabilities.worker ?? {}
   const operations = rows(payload.operations?.items)
+  const deploymentCapabilities = payload.deployment_capabilities ?? {}
+  const deploymentRepositories = rows(deploymentCapabilities.repositories)
+  const deployments = rows(payload.deployments?.items)
   const workers = rows(payload.workers?.items)
   const jobs = rows(payload.jobs?.items)
   const reservations = rows(payload.reservations?.items)
@@ -618,6 +621,21 @@ export function FleetView({ plane }: { plane: Plane }) {
   const [caseResolution, setCaseResolution] = useState('')
   const [caseEvidence, setCaseEvidence] = useState('')
   const [fleetMutationError, setFleetMutationError] = useState('')
+  const [deploymentRepository, setDeploymentRepository] = useState('')
+  const [deploymentRevision, setDeploymentRevision] = useState('')
+  const [deploymentTargets, setDeploymentTargets] = useState('')
+  const [deploymentChanges, setDeploymentChanges] = useState('')
+  const [deploymentStrategy, setDeploymentStrategy] = useState('serial')
+  const [deploymentCanary, setDeploymentCanary] = useState('')
+  const [deploymentFailurePolicy, setDeploymentFailurePolicy] = useState('pause')
+  const [deploymentDetail, setDeploymentDetail] = useState<any>(null)
+  useEffect(() => {
+    if (deploymentRepository || !deploymentRepositories.length) return
+    const repository = deploymentRepositories[0]
+    setDeploymentRepository(String(repository.repository_id ?? ''))
+    setDeploymentTargets(rows(repository.targets).map((target) => target.host_id).join(','))
+    setDeploymentChanges(rows(repository.allowed_changes)[0] ?? '')
+  }, [deploymentRepository, deploymentRepositories])
   const selectedHost = knownHosts.find((host) => String(host.host ?? host.host_id) === selectedHostId)
   const loadHost = async (hostId: string) => {
     setSelectedHostId(hostId)
@@ -812,6 +830,68 @@ export function FleetView({ plane }: { plane: Plane }) {
       setFleetMutationError(reason instanceof Error ? reason.message : '故障案例发布失败')
     }
   }
+  const selectDeploymentRepository = (repositoryId: string) => {
+    setDeploymentRepository(repositoryId)
+    const repository = deploymentRepositories.find((item) => item.repository_id === repositoryId)
+    setDeploymentTargets(rows(repository?.targets).map((target) => target.host_id).join(','))
+    setDeploymentChanges(rows(repository?.allowed_changes)[0] ?? '')
+    setDeploymentCanary('')
+  }
+  const prepareDeployment = async () => {
+    const targets = deploymentTargets.split(/[,，\s]+/).map((item) => item.trim()).filter(Boolean)
+    const changes = deploymentChanges.split(/[,，\s]+/).map((item) => item.trim()).filter(Boolean)
+    if (!deploymentRepository || !/^[a-f0-9]{40}$/.test(deploymentRevision) || !targets.length || !changes.length) {
+      setFleetMutationError('部署需要仓库、40 位提交、至少一个目标和一个变更范围')
+      return
+    }
+    try {
+      const prepared = await plane.mutate('fleet', '/fleet/deployments', 'POST', {
+        repository_id: deploymentRepository,
+        source_revision: deploymentRevision,
+        expected_remote_revision: deploymentRevision,
+        target_hosts: targets,
+        requested_changes: changes,
+        strategy: deploymentStrategy,
+        canary_host_id: deploymentStrategy === 'canary' ? deploymentCanary : '',
+        failure_policy: deploymentFailurePolicy,
+        deadline_at: Math.floor(Date.now() / 1000) + 3600,
+        idempotency_key: `console-${Date.now()}-${deploymentRevision.slice(0, 8)}`,
+      }, ['fleet'])
+      setDeploymentDetail(prepared)
+      setFleetMutationError('')
+    } catch (reason) {
+      setFleetMutationError(reason instanceof Error ? reason.message : '部署预检创建失败')
+    }
+  }
+  const loadDeployment = async (deploymentId: string) => {
+    try {
+      setDeploymentDetail(await plane.query(`/fleet/deployments/${encodeURIComponent(deploymentId)}`))
+      setFleetMutationError('')
+    } catch (reason) {
+      setFleetMutationError(reason instanceof Error ? reason.message : '部署详情读取失败')
+    }
+  }
+  const approveDeployment = async (item: any) => {
+    try {
+      const approved = await plane.mutate('fleet', `/fleet/deployments/${encodeURIComponent(item.deployment_id)}/approve`, 'POST', {
+        contract_hash: item.contract_hash,
+        resource_version: item.resource_version,
+      }, ['fleet'])
+      setDeploymentDetail(approved)
+      setFleetMutationError('')
+    } catch (reason) {
+      setFleetMutationError(reason instanceof Error ? reason.message : '部署批准失败；请重新查看预检结果')
+    }
+  }
+  const cancelDeployment = async (deploymentId: string) => {
+    try {
+      const cancelled = await plane.mutate('fleet', `/fleet/deployments/${encodeURIComponent(deploymentId)}/cancel`, 'POST', {}, ['fleet'])
+      setDeploymentDetail(cancelled)
+      setFleetMutationError('')
+    } catch (reason) {
+      setFleetMutationError(reason instanceof Error ? reason.message : '部署取消失败')
+    }
+  }
   return (
     <>
       <PageHeader title="服务器集群" description="只读证据、受控操作、远程 Worker、资源预留与临时预览" action={<RefreshButton loading={plane.loading.has('fleet')} onClick={() => void plane.refresh('fleet')} />} />
@@ -851,6 +931,26 @@ export function FleetView({ plane }: { plane: Plane }) {
       <Section title="受控操作" description="合同、人工批准、执行和验收分开；没有写后端时不会伪装成已重启">
         <DataTable><thead><tr><th>更新时间</th><th>操作</th><th>目标</th><th>发起者</th><th>能力</th><th>状态</th></tr></thead><tbody>{operations.slice(0, 5).map((item) => <tr key={item.operation_id}><td>{fmtTime(item.updated_at)}</td><td><code>{item.operation_id}</code><small className="cell-sub">{item.operation}</small></td><td>{item.host_id}<small className="cell-sub">{item.resource_ref}</small></td><td><code>{item.actor_id}</code></td><td><StatusBadge value={item.capability_status} /></td><td><StatusBadge value={item.status} /></td></tr>)}</tbody></DataTable>
         {!operations.length && <EmptyState>还没有远程操作合同；当前写能力为 {operationCapability.reason || '未知'}</EmptyState>}
+      </Section>
+      <Section title="固定版本部署" description="先对固定 Git 提交做隔离预检，再批准同一份闭包；不接受任意命令">
+        <div className="diagnostic-controls">
+          <label><span>配置仓库</span><select value={deploymentRepository} onChange={(event) => selectDeploymentRepository(event.target.value)}><option value="">选择仓库</option>{deploymentRepositories.map((item) => <option key={item.repository_id} value={item.repository_id}>{item.repository_id}</option>)}</select></label>
+          <label className="diagnostic-subject"><span>Git 提交（40 位）</span><input value={deploymentRevision} maxLength={40} placeholder="完整 commit SHA" onChange={(event) => setDeploymentRevision(event.target.value.trim().toLowerCase())} /></label>
+          <label><span>目标（逗号分隔）</span><input value={deploymentTargets} onChange={(event) => setDeploymentTargets(event.target.value)} /></label>
+          <label><span>变更范围</span><input value={deploymentChanges} onChange={(event) => setDeploymentChanges(event.target.value)} /></label>
+          <label><span>批次</span><select value={deploymentStrategy} onChange={(event) => setDeploymentStrategy(event.target.value)}><option value="serial">逐台</option><option value="canary">金丝雀优先</option></select></label>
+          <label><span>金丝雀节点</span><input value={deploymentCanary} disabled={deploymentStrategy !== 'canary'} onChange={(event) => setDeploymentCanary(event.target.value)} /></label>
+          <label><span>失败策略</span><select value={deploymentFailurePolicy} onChange={(event) => setDeploymentFailurePolicy(event.target.value)}><option value="pause">暂停并保留现场</option><option value="rollback_deployed">回滚已部署节点</option></select></label>
+          <button className="command-button" type="button" disabled={!deploymentCapabilities.available} onClick={() => void prepareDeployment()}><GitBranch size={15} />创建预检</button>
+        </div>
+        <DataTable><thead><tr><th>更新时间</th><th>部署</th><th>提交</th><th>节点</th><th>阶段</th><th>状态</th><th></th></tr></thead><tbody>{deployments.slice(0, 5).map((item) => <tr key={item.deployment_id}><td>{fmtTime(item.updated_at)}</td><td><code>{item.deployment_id}</code><small className="cell-sub">{item.repository_id}</small></td><td><code title={item.source_revision}>{String(item.source_revision ?? '').slice(0, 12)}</code></td><td>{rows(item.target_hosts).join(' → ')}</td><td>{item.phase}</td><td><StatusBadge value={item.status} /></td><td className="actions"><button type="button" className="icon-button" title="查看预检、节点和事件" onClick={() => void loadDeployment(item.deployment_id)}><Eye size={15} /></button>{!['succeeded', 'failed', 'cancelled', 'rolled_back', 'needs_attention'].includes(item.status) && <button type="button" className="icon-button danger" title="取消部署" onClick={() => void cancelDeployment(item.deployment_id)}><Ban size={15} /></button>}</td></tr>)}</tbody></DataTable>
+        {!deployments.length && <EmptyState>{deploymentCapabilities.available ? '还没有部署记录' : '尚未配置独立部署执行器'}</EmptyState>}
+        {deploymentDetail && <div className="diagnostic-detail">
+          <div className="diagnostic-detail-head"><div><strong>{deploymentDetail.deployment_id} · {String(deploymentDetail.source_revision ?? '').slice(0, 12)}</strong><small>批准哈希：{deploymentDetail.contract_hash}</small></div><div className="actions"><StatusBadge value={deploymentDetail.status} />{deploymentDetail.status === 'awaiting_approval' && <button type="button" className="command-button" title="只批准当前详情中显示的精确预检版本" onClick={() => void approveDeployment(deploymentDetail)}><Check size={15} />批准此预检</button>}</div></div>
+          <DataTable><thead><tr><th>节点</th><th>顺序</th><th>步骤</th><th>当前闭包</th><th>目标闭包</th><th>状态</th></tr></thead><tbody>{rows(deploymentDetail.targets).map((target) => <tr key={target.host_id}><td>{target.host_id}</td><td>{target.ordinal + 1}</td><td>{target.step}</td><td><code title={target.current_toplevel}>{String(target.current_toplevel ?? '').split('/').pop() || '-'}</code></td><td><code title={target.target_toplevel}>{String(target.target_toplevel ?? '').split('/').pop() || '-'}</code></td><td><StatusBadge value={target.status} /></td></tr>)}</tbody></DataTable>
+          {Object.entries(deploymentDetail.preflight?.targets ?? {}).map(([hostId, value]: [string, any]) => <div className="deployment-preview" key={hostId}><strong>{hostId} 软件包变化</strong><pre>{value.change_preview || '等待预检'}</pre></div>)}
+          <DataTable><thead><tr><th>时间</th><th>事件</th><th>节点</th><th>步骤</th><th>状态</th><th>操作者</th></tr></thead><tbody>{rows(deploymentDetail.events).slice(-20).reverse().map((event) => <tr key={event.sequence}><td>{fmtTime(event.created_at)}</td><td>{event.event_type}</td><td>{event.host_id || '-'}</td><td>{event.step || '-'}</td><td><StatusBadge value={event.status} /></td><td><code>{event.actor_id}</code></td></tr>)}</tbody></DataTable>
+        </div>}
       </Section>
       <Section title="远程 Worker" description="主人状态优先于心跳；draining 会停止接新任务，但允许当前可保存步骤收尾">
         <div className="diagnostic-controls">

@@ -9,6 +9,8 @@
   inventoryHostIds = map (host: host.host_id) cfg.inventory;
   diagnosticTargetIds = map (target: target.target_id) cfg.diagnostics.targets;
   workerIds = map (worker: worker.workerId) cfg.workers;
+  deploymentRepositoryIds = map (repository: repository.repositoryId) cfg.deployments.repositories;
+  deployerIds = map (deployer: deployer.deployerId) cfg.deployments.deployers;
   inventoryHostType = lib.types.submodule {
     options = {
       host_id = lib.mkOption {
@@ -103,6 +105,36 @@
       workerId = lib.mkOption {type = lib.types.str;};
       hostId = lib.mkOption {type = lib.types.str;};
       tokenFile = lib.mkOption {type = lib.types.str;};
+    };
+  };
+  deploymentTargetType = lib.types.submodule {
+    options = {
+      hostId = lib.mkOption {type = lib.types.str;};
+      flakeHost = lib.mkOption {type = lib.types.str;};
+      sshTarget = lib.mkOption {type = lib.types.str;};
+      verificationUnits = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [];
+      };
+      useRemoteSudo = lib.mkOption {type = lib.types.bool; default = false;};
+      resourceVersion = lib.mkOption {type = lib.types.ints.positive; default = 1;};
+    };
+  };
+  deploymentRepositoryType = lib.types.submodule {
+    options = {
+      repositoryId = lib.mkOption {type = lib.types.str;};
+      url = lib.mkOption {type = lib.types.str;};
+      defaultBranch = lib.mkOption {type = lib.types.str; default = "main";};
+      resourceVersion = lib.mkOption {type = lib.types.ints.positive; default = 1;};
+      allowedChanges = lib.mkOption {type = lib.types.listOf lib.types.str;};
+      targets = lib.mkOption {type = lib.types.listOf deploymentTargetType;};
+    };
+  };
+  deployerIdentityType = lib.types.submodule {
+    options = {
+      deployerId = lib.mkOption {type = lib.types.str;};
+      tokenFile = lib.mkOption {type = lib.types.str;};
+      repositoryIds = lib.mkOption {type = lib.types.listOf lib.types.str;};
     };
   };
 in {
@@ -201,6 +233,19 @@ in {
       description = "Worker identities bound to credentials and compute-enabled inventory hosts.";
     };
 
+    deployments = {
+      repositories = lib.mkOption {
+        type = lib.types.listOf deploymentRepositoryType;
+        default = [];
+        description = "Server-owned repositories, change labels and deployment target allowlists.";
+      };
+      deployers = lib.mkOption {
+        type = lib.types.listOf deployerIdentityType;
+        default = [];
+        description = "Independent deployer identities and the repositories each may claim.";
+      };
+    };
+
     inventory = lib.mkOption {
       type = lib.types.listOf inventoryHostType;
       default = [];
@@ -279,6 +324,31 @@ in {
         assertion = builtins.elem cfg.localHostId inventoryHostIds;
         message = "The cluster-control localHostId must exist in the cluster inventory";
       }
+      {
+        assertion = builtins.length deploymentRepositoryIds == builtins.length (lib.unique deploymentRepositoryIds);
+        message = "Kennethbot deployment repository identities must be unique";
+      }
+      {
+        assertion = builtins.length deployerIds == builtins.length (lib.unique deployerIds);
+        message = "Kennethbot deployer identities must be unique";
+      }
+      {
+        assertion = lib.all (repository:
+          builtins.match "^[a-z][a-z0-9_-]{0,63}$" repository.repositoryId != null
+          && repository.allowedChanges != []
+          && repository.targets != []
+          && lib.all (target: builtins.elem target.hostId inventoryHostIds) repository.targets
+        ) cfg.deployments.repositories;
+        message = "Kennethbot deployment repositories require valid IDs, changes and inventory targets";
+      }
+      {
+        assertion = lib.all (deployer:
+          builtins.match "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$" deployer.deployerId != null
+          && deployer.repositoryIds != []
+          && lib.all (repositoryId: builtins.elem repositoryId deploymentRepositoryIds) deployer.repositoryIds
+        ) cfg.deployments.deployers;
+        message = "Kennethbot deployers may only reference configured repositories";
+      }
     ];
 
     networking.firewall.allowedTCPPorts = lib.optionals cfg.openFirewall [cfg.port];
@@ -305,6 +375,26 @@ in {
           host_id = worker.hostId;
           token_file = "%d/worker-${worker.workerId}";
         }) cfg.workers);
+        KC_DEPLOYMENT_REPOSITORIES_JSON = builtins.toJSON (map (repository: {
+          repository_id = repository.repositoryId;
+          url = repository.url;
+          default_branch = repository.defaultBranch;
+          resource_version = repository.resourceVersion;
+          allowed_changes = repository.allowedChanges;
+          targets = map (target: {
+            host_id = target.hostId;
+            flake_host = target.flakeHost;
+            ssh_target = target.sshTarget;
+            verification_units = target.verificationUnits;
+            use_remote_sudo = target.useRemoteSudo;
+            resource_version = target.resourceVersion;
+          }) repository.targets;
+        }) cfg.deployments.repositories);
+        KC_DEPLOYER_IDENTITIES_JSON = builtins.toJSON (map (deployer: {
+          deployer_id = deployer.deployerId;
+          token_file = "%d/deployer-${deployer.deployerId}";
+          repository_ids = deployer.repositoryIds;
+        }) cfg.deployments.deployers);
         KC_ARTIFACT_DIR = "/var/lib/kennethbot-cluster-control/artifacts";
         PYTHONUNBUFFERED = "1";
       } // cfg.environment;
@@ -317,7 +407,8 @@ in {
           LoadCredential =
             lib.optional (cfg.apiTokenFile != null) "api-token:${cfg.apiTokenFile}"
             ++ lib.optional (cfg.maxops.enable && cfg.maxops.tokenFile != null) "maxops-token:${cfg.maxops.tokenFile}"
-            ++ map (worker: "worker-${worker.workerId}:${worker.tokenFile}") cfg.workers;
+            ++ map (worker: "worker-${worker.workerId}:${worker.tokenFile}") cfg.workers
+            ++ map (deployer: "deployer-${deployer.deployerId}:${deployer.tokenFile}") cfg.deployments.deployers;
           # The bot starts after this service, so the control plane owns the
           # idempotent schema upgrade and avoids a startup dependency cycle.
           ExecStartPre = "${cfg.package}/bin/qq-deepseek-bot-db upgrade";

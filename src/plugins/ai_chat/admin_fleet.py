@@ -42,6 +42,20 @@ class FleetApprovalRequest(BaseModel):
     resource_version: int = Field(ge=1)
 
 
+class FleetDeploymentRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    repository_id: str
+    source_revision: str = Field(pattern="^[a-f0-9]{40}$")
+    expected_remote_revision: str = Field(default="", pattern="^$|^[a-f0-9]{40}$")
+    target_hosts: list[str] = Field(min_length=1, max_length=8)
+    requested_changes: list[str] = Field(min_length=1, max_length=32)
+    strategy: str = "serial"
+    canary_host_id: str = ""
+    failure_policy: str = "pause"
+    deadline_at: int | None = None
+    idempotency_key: str
+
+
 class FleetJobRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     kind: str
@@ -191,6 +205,8 @@ def register_fleet_admin_routes(
                     "diagnostics": {"items": []},
                     "execution_capabilities": {},
                     "operations": {"items": []},
+                    "deployment_capabilities": {},
+                    "deployments": {"items": []},
                     "workers": {"items": []},
                     "jobs": {"items": []},
                     "reservations": {"items": []},
@@ -211,6 +227,8 @@ def register_fleet_admin_routes(
             _safe_call("diagnostics", _optional_call(client, "diagnostics", {"items": []}, limit=30)),
             _safe_call("execution_capabilities", _optional_call(client, "execution_capabilities", {})),
             _safe_call("operations", _optional_call(client, "operations", {"items": []}, limit=50)),
+            _safe_call("deployment_capabilities", _optional_call(client, "deployment_capabilities", {})),
+            _safe_call("deployments", _optional_call(client, "deployments", {"items": []}, limit=50)),
             _safe_call("workers", _optional_call(client, "workers", {"items": []})),
             _safe_call("jobs", _optional_call(client, "jobs", {"items": []}, limit=50)),
             _safe_call("reservations", _optional_call(client, "reservations", {"items": []})),
@@ -318,6 +336,69 @@ def register_fleet_admin_routes(
         try:
             return await configured_client().prepare_operation(
                 request.model_dump(), actor="admin:kenneth", origin="admin-console"
+            )
+        except FleetControlError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from None
+
+    @router.get("/api/fleet/deployments/{deployment_id}")
+    async def fleet_deployment_detail(
+        deployment_id: str,
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
+        authorize(authorization)
+        try:
+            return await configured_client().deployment(
+                deployment_id,
+                actor="admin:kenneth",
+                origin="admin-console",
+            )
+        except FleetControlError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from None
+
+    @router.post("/api/fleet/deployments")
+    async def prepare_fleet_deployment(
+        request: FleetDeploymentRequest,
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
+        authorize(authorization)
+        try:
+            return await configured_client().prepare_deployment(
+                request.model_dump(exclude_none=True),
+                actor="admin:kenneth",
+                origin="admin-console",
+            )
+        except FleetControlError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from None
+
+    @router.post("/api/fleet/deployments/{deployment_id}/approve")
+    async def approve_fleet_deployment(
+        deployment_id: str,
+        request: FleetApprovalRequest,
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
+        authorize(authorization)
+        try:
+            return await configured_client().approve_deployment(
+                deployment_id,
+                request.contract_hash,
+                request.resource_version,
+                actor="admin:kenneth",
+                origin="admin-console",
+            )
+        except FleetControlError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from None
+
+    @router.post("/api/fleet/deployments/{deployment_id}/cancel")
+    async def cancel_fleet_deployment(
+        deployment_id: str,
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
+        authorize(authorization)
+        try:
+            return await configured_client().cancel_deployment(
+                deployment_id,
+                actor="admin:kenneth",
+                origin="admin-console",
             )
         except FleetControlError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from None

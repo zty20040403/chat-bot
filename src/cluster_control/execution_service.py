@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import hashlib
-import hmac
 import json
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
+from .auth import CredentialFileAuthenticator
 from .execution_contracts import (
     OperationProposal,
     WorkerJobProposal,
@@ -28,33 +27,7 @@ class WriteBackendBinding:
     reason: str = "尚未接入经维护者批准的唯一写后端"
 
 
-class WorkerAuthenticator:
-    """Bind a worker credential to a configured identity, never to request JSON."""
-
-    def __init__(self, credentials: Mapping[str, str | Path]) -> None:
-        self.credentials = {key: Path(value) for key, value in credentials.items()}
-
-    @staticmethod
-    def _read(path: Path) -> bytes:
-        raw = path.read_bytes()
-        token = raw.rstrip(b"\r\n")
-        if len(raw) >= 515 or not 32 <= len(token) <= 512 or any(ch < 33 or ch > 126 for ch in token):
-            raise ValueError("invalid worker credential")
-        return token
-
-    def authenticate(self, authorization: str) -> str | None:
-        scheme, _, supplied = authorization.partition(" ")
-        if scheme.lower() != "bearer" or not supplied:
-            return None
-        encoded = supplied.encode("ascii", errors="ignore")
-        for worker_id, path in self.credentials.items():
-            try:
-                expected = self._read(path)
-            except (OSError, ValueError):
-                continue
-            if hmac.compare_digest(encoded, expected):
-                return worker_id
-        return None
+WorkerAuthenticator = CredentialFileAuthenticator
 
 
 class ClusterExecutionService:

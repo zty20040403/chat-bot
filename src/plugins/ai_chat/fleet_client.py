@@ -264,6 +264,54 @@ class FleetControlClient:
     async def operations(self, *, limit: int = 50) -> dict[str, Any]:
         return await self._get(f"/v1/operations?limit={min(max(limit, 1), 200)}")
 
+    async def deployment_capabilities(self) -> dict[str, Any]:
+        return await self._get("/v1/deployment-capabilities")
+
+    async def deployments(self, *, limit: int = 50) -> dict[str, Any]:
+        return await self._get(f"/v1/deployments?limit={min(max(limit, 1), 200)}")
+
+    async def deployment(
+        self, deployment_id: str, *, actor: str, origin: str
+    ) -> dict[str, Any]:
+        return await self._signed_get(
+            f"/v1/deployments/{quote(deployment_id, safe='')}",
+            actor=actor,
+            origin=origin,
+        )
+
+    async def prepare_deployment(
+        self, payload: dict[str, Any], *, actor: str, origin: str
+    ) -> dict[str, Any]:
+        return await self._signed_post(
+            "/v1/deployments/prepare", payload, actor=actor, origin=origin
+        )
+
+    async def approve_deployment(
+        self,
+        deployment_id: str,
+        contract_hash: str,
+        resource_version: int,
+        *,
+        actor: str,
+        origin: str,
+    ) -> dict[str, Any]:
+        return await self._signed_post(
+            f"/v1/deployments/{quote(deployment_id, safe='')}/approve",
+            {"contract_hash": contract_hash, "resource_version": resource_version},
+            actor=actor,
+            origin=origin,
+        )
+
+    async def cancel_deployment(
+        self, deployment_id: str, *, actor: str, origin: str
+    ) -> dict[str, Any]:
+        return await self._signed_post(
+            f"/v1/deployments/{quote(deployment_id, safe='')}/cancel",
+            {},
+            actor=actor,
+            origin=origin,
+        )
+
     async def operation(
         self, operation_id: str, *, actor: str, origin: str
     ) -> dict[str, Any]:

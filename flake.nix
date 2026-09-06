@@ -101,7 +101,7 @@
         pname = "kennethbot-admin-ui";
         version = project.project.version;
         src = ./admin-ui;
-        npmDepsHash = "sha256-6T7w4oorAxemHOA/O69w4Eem5rEy8Jurkubxh4s9dyU=";
+        npmDepsHash = "sha256-SFwP8nT2yds9rb++FhzsYPNiAiIdFOdwkAPmtUveLUw=";
         npmBuildScript = "build";
         installPhase = ''
           runHook preInstall
@@ -151,6 +151,11 @@
             --chdir "$out/share/qq-deepseek-bot" \
             --set PYTHONDONTWRITEBYTECODE 1 \
             --set PYTHONUNBUFFERED 1
+          makeWrapper ${virtualenv}/bin/python "$out/bin/kennethbot-cluster-deployer" \
+            --add-flags "-m src.cluster_deployer" \
+            --chdir "$out/share/qq-deepseek-bot" \
+            --set PYTHONDONTWRITEBYTECODE 1 \
+            --set PYTHONUNBUFFERED 1
 
           runHook postInstall
         '';
@@ -194,6 +199,10 @@
         type = "app";
         program = "${self.packages.${system}.default}/bin/kennethbot-cluster-worker";
       };
+      cluster-deployer = {
+        type = "app";
+        program = "${self.packages.${system}.default}/bin/kennethbot-cluster-deployer";
+      };
     });
 
     checks = forAllSystems (system: let
@@ -231,6 +240,7 @@
       qwen-control = import ./nix/qwen-control.nix;
       cluster-control = import ./nix/cluster-control.nix {inherit self;};
       cluster-worker = import ./nix/cluster-worker.nix {inherit self;};
+      cluster-deployer = import ./nix/cluster-deployer.nix {inherit self;};
     };
   };
 }

@@ -59,9 +59,15 @@ class HandlerServices:
         self.tools = ToolExecutor(self)
         self.replies = ReplyService(self)
         self.delivery = OneBotDelivery(self)
-        if self.context.subagent_coordinator is not None and self.context.job_store is not None and self.context.delivery_store is not None:
+        coordinator = getattr(self.context, "subagent_coordinator", None)
+        if (
+            coordinator is not None
+            and getattr(self.context, "job_store", None) is not None
+            and getattr(self.context, "delivery_store", None) is not None
+        ):
             from .agent.background import SubAgentDispatcher
-            self.context.subagent_coordinator.dispatcher = SubAgentDispatcher(self)
+
+            coordinator.dispatcher = SubAgentDispatcher(self)
 
     def group_enabled(self, group_id: int) -> bool:
         override = self.context.model_preferences.get_group_enabled_override(group_id)

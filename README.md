@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.16.0-22c55e?style=for-the-badge">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.17.0-22c55e?style=for-the-badge">
   <img alt="Python" src="https://img.shields.io/badge/Python-3.12-3776ab?style=for-the-badge&amp;logo=python&amp;logoColor=white">
   <img alt="NoneBot2" src="https://img.shields.io/badge/NoneBot2-OneBot_V11-ea5252?style=for-the-badge">
   <img alt="PostgreSQL" src="https://img.shields.io/badge/PostgreSQL-Durable-4169e1?style=for-the-badge&amp;logo=postgresql&amp;logoColor=white">
@@ -69,6 +69,10 @@ Kennethbot 通过 NapCatQQ 接收 OneBot V11 事件，使用 NoneBot2 处理消�
     <td><strong>可靠文件交付</strong><br>QQ 群文件真实可见后才确认成功并清理沙盒；回执不明时保留工作区与不可变产物快照供核对和补发。</td>
     <td><strong>实时资源控制</strong><br>控制台统一管理 Worker 状态、资源上限、借用授权、守护合同、故障事件和运行手册案例。</td>
   </tr>
+  <tr>
+    <td><strong>固定版本部署</strong><br>先在隔离 worktree 校验精确 Git 提交和 flake.lock，再展示 Nix 闭包差异并等待管理员批准。</td>
+    <td><strong>分批切换与恢复</strong><br>独立部署器支持串行、金丝雀、逐节点验收和受限回滚；租约、fencing 与主机锁阻止重复副作用。</td>
+  </tr>
 </table>
 
 ## 系统结构
@@ -99,15 +103,18 @@ flowchart LR
     CC --> OPS[Read-only Operations API]
     CC --> QUEUE[(Operation / Job Ledger)]
     CC --> MEMORY[Incident / Runbook / Guardian]
+    CC --> DEPLOY[Immutable Deployment Contracts]
     CW[Isolated Cluster Worker] -->|Heartbeat / Lease / Receipt| CC
     CC -->|Assigned artifact| CW
     CW --> PREVIEW[Expiring Preview Origin]
+    CD[Independent Nix Deployer] -->|Lease / Evidence / Receipt| DEPLOY
+    DEPLOY -->|Approved Exact Closure| CD
 
     classDef core fill:#18181b,stroke:#22c55e,color:#fafafa,stroke-width:2px;
     classDef service fill:#27272a,stroke:#71717a,color:#fafafa;
     classDef data fill:#172554,stroke:#60a5fa,color:#eff6ff;
     class AGENT,LLM core;
-    class NC,NB,IR,CTX,TOOLS,MEDIA,BOX,OUT,CC,OPS,CW,PREVIEW,MEMORY service;
+    class NC,NB,IR,CTX,TOOLS,MEDIA,BOX,OUT,CC,OPS,CW,PREVIEW,MEMORY,DEPLOY,CD service;
     class PG,QUEUE data;
 ```
 
@@ -130,8 +137,8 @@ OneBot 消息段并发送。
 | 视频分析 | Bilibili 公共接口、QQ 媒体流、FFmpeg、whisper.cpp |
 | 语音 | Edge TTS、腾讯 SILK、NapCat 语音转写 |
 | 富文本 | CodeSnap、Pygments |
-| 部署 | Nix Flakes、NixOS、systemd |
-| 集群控制 | 独立控制服务、只读运维 API、操作合同、资源租约、隔离 Worker、Prometheus 指标 |
+| 部署 | Nix Flakes、NixOS、systemd、固定提交与闭包验收 |
+| 集群控制 | 独立控制服务、只读运维 API、操作合同、资源租约、隔离 Worker、受限部署器、Prometheus 指标 |
 
 ## 目录结构
 
@@ -144,6 +151,7 @@ bot/
 ├── nix/module.nix               # Bot NixOS 服务模块
 ├── nix/cluster-control.nix      # 集群控制服务模块
 ├── nix/cluster-worker.nix       # 隔离 Worker 模块
+├── nix/cluster-deployer.nix     # 固定合同 Nix 部署器模块
 ├── migrations/                  # PostgreSQL / Alembic 迁移
 ├── admin-ui/                    # React + TypeScript 管理控制台
 ├── skills/                      # Agent 按需加载的操作说明
@@ -152,6 +160,7 @@ bot/
 └── src/
     ├── cluster_control/         # 控制服务、权限、操作合同、队列和产物登记
     ├── cluster_worker/          # 固定计算模板、租约回执和静态预览
+    ├── cluster_deployer/        # Git/Nix/SSH 固定部署流程与节点验收
     ├── bot_storage/             # PostgreSQL、迁移与存储工具
     └── plugins/ai_chat/
         ├── __init__.py          # NoneBot Matcher 与兼容入口

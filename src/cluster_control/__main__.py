@@ -7,7 +7,10 @@ from src.bot_storage import PostgresDatabase
 from src.bot_storage.schema import HEAD_REVISION
 
 from .api import create_app
+from .auth import CredentialFileAuthenticator
 from .config import ClusterControlSettings
+from .deployment_service import DeploymentService
+from .deployment_storage import DeploymentStore
 from .diagnostics import DiagnosticStore, IncidentDiagnosticService
 from .adapters.maxops import MaxOpsClient
 from .service import FleetControlService
@@ -78,6 +81,20 @@ def main() -> None:
     worker_authenticator = WorkerAuthenticator(
         {item["worker_id"]: item["token_file"] for item in settings.worker_identities}
     )
+    deployments = DeploymentService(
+        DeploymentStore(database),
+        repositories=settings.deployment_repositories,
+        deployer_repositories={
+            str(item["deployer_id"]): tuple(item["repository_ids"])
+            for item in settings.deployer_identities
+        },
+    )
+    deployer_authenticator = CredentialFileAuthenticator(
+        {
+            str(item["deployer_id"]): str(item["token_file"])
+            for item in settings.deployer_identities
+        }
+    )
     app = create_app(
         service,
         api_token_file=settings.api_token_file,
@@ -87,6 +104,8 @@ def main() -> None:
         resource_policies=resource_policies,
         reliability=reliability,
         guardian=guardian,
+        deployments=deployments,
+        deployer_authenticator=deployer_authenticator,
     )
     uvicorn.run(app, host=settings.host, port=settings.port, log_level="info")
 

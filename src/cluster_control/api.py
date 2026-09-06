@@ -14,8 +14,11 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Res
 from prometheus_client import make_asgi_app
 from pydantic import BaseModel, ConfigDict, Field
 
+from .api_deployments import build_deployment_router
 from .api_reliability import build_reliability_router
 from .api_resources import build_resource_router
+from .auth import CredentialFileAuthenticator
+from .deployment_service import DeploymentService
 from .diagnostics import IncidentDiagnosticService
 from .execution_service import ClusterExecutionService, WorkerAuthenticator
 from .reliability import GuardianService, ReliabilityStore
@@ -132,6 +135,8 @@ def create_app(
     resource_policies: ResourcePolicyStore | None = None,
     reliability: ReliabilityStore | None = None,
     guardian: GuardianService | None = None,
+    deployments: DeploymentService | None = None,
+    deployer_authenticator: CredentialFileAuthenticator | None = None,
 ) -> FastAPI:
     token_path = Path(api_token_file)
 
@@ -341,6 +346,11 @@ def create_app(
         if reliability is None:
             raise HTTPException(status_code=503, detail="Reliability service unavailable")
         return reliability
+
+    def deployment_service() -> DeploymentService:
+        if deployments is None:
+            raise HTTPException(status_code=503, detail="Deployment service unavailable")
+        return deployments
 
     @app.get("/v1/execution/capabilities", dependencies=auth)
     async def execution_capabilities() -> dict[str, object]:
@@ -610,6 +620,14 @@ def create_app(
             signed_principal=signed_principal,
             reliability_store=reliability_store,
             execution_service=execution_service,
+        )
+    )
+    app.include_router(
+        build_deployment_router(
+            auth=auth,
+            signed_principal=signed_principal,
+            deployment_service=deployment_service,
+            deployer_authenticator=deployer_authenticator,
         )
     )
 

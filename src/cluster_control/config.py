@@ -187,6 +187,148 @@ def _diagnostic_targets(raw: str) -> tuple[dict[str, str], ...]:
     return tuple(result)
 
 
+def _deployment_repositories(raw: str) -> tuple[dict[str, object], ...]:
+    if not raw.strip():
+        return ()
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("KC_DEPLOYMENT_REPOSITORIES_JSON must be valid JSON") from exc
+    if not isinstance(value, list):
+        raise ValueError("KC_DEPLOYMENT_REPOSITORIES_JSON must be a JSON array")
+    repositories: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError("Every deployment repository must be an object")
+        repository_id = str(item.get("repository_id") or "").strip()
+        if not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", repository_id):
+            raise ValueError("Invalid deployment repository_id")
+        if repository_id in seen:
+            raise ValueError("Duplicate deployment repository_id")
+        url = str(item.get("url") or "").strip()
+        default_branch = str(item.get("default_branch") or "main").strip()
+        repository_version = int(item.get("resource_version") or 1)
+        parsed = urlsplit(url)
+        if (
+            parsed.scheme not in {"https", "ssh"}
+            and not url.startswith("git@")
+        ):
+            raise ValueError("Deployment repository URL must use HTTPS or SSH")
+        if parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise ValueError("Deployment repository URL must not contain credentials")
+        if any(value in url for value in ("\n", "\r", "\x00")):
+            raise ValueError("Invalid deployment repository URL")
+        if not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._/-]{0,119}", default_branch
+        ) or repository_version < 1:
+            raise ValueError("Invalid deployment repository version or branch")
+        allowed_changes = item.get("allowed_changes", [])
+        targets = item.get("targets", [])
+        if not isinstance(allowed_changes, list) or not allowed_changes or not all(
+            isinstance(change, str)
+            and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:@/-]{0,159}", change)
+            for change in allowed_changes
+        ):
+            raise ValueError("Deployment repository needs valid allowed_changes")
+        if not isinstance(targets, list) or not targets:
+            raise ValueError("Deployment repository needs at least one target")
+        normalized_targets: list[dict[str, object]] = []
+        target_ids: set[str] = set()
+        for target in targets:
+            if not isinstance(target, dict):
+                raise ValueError("Deployment target must be an object")
+            host_id = str(target.get("host_id") or "").strip()
+            flake_host = str(target.get("flake_host") or host_id).strip()
+            ssh_target = str(target.get("ssh_target") or "").strip()
+            verification_units = target.get("verification_units", [])
+            target_version = int(target.get("resource_version") or 1)
+            if (
+                not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", host_id)
+                or host_id in target_ids
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", flake_host)
+                or not re.fullmatch(
+                    r"(?:[A-Za-z0-9._-]+@)?[A-Za-z0-9][A-Za-z0-9.-]{0,199}",
+                    ssh_target,
+                )
+                or not isinstance(verification_units, list)
+                or target_version < 1
+                or not all(
+                    isinstance(unit, str)
+                    and re.fullmatch(
+                        r"[A-Za-z0-9][A-Za-z0-9_.@:-]{0,119}\.service",
+                        unit,
+                    )
+                    for unit in verification_units
+                )
+            ):
+                raise ValueError("Invalid deployment target")
+            target_ids.add(host_id)
+            normalized_targets.append(
+                {
+                    "host_id": host_id,
+                    "flake_host": flake_host,
+                    "ssh_target": ssh_target,
+                    "verification_units": list(dict.fromkeys(verification_units)),
+                    "use_remote_sudo": bool(target.get("use_remote_sudo", False)),
+                    "resource_version": target_version,
+                }
+            )
+        seen.add(repository_id)
+        repositories.append(
+            {
+                "repository_id": repository_id,
+                "url": url,
+                "default_branch": default_branch,
+                "resource_version": repository_version,
+                "allowed_changes": list(dict.fromkeys(allowed_changes)),
+                "targets": normalized_targets,
+            }
+        )
+    return tuple(repositories)
+
+
+def _deployer_identities(raw: str) -> tuple[dict[str, object], ...]:
+    if not raw.strip():
+        return ()
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("KC_DEPLOYER_IDENTITIES_JSON must be valid JSON") from exc
+    if not isinstance(value, list):
+        raise ValueError("KC_DEPLOYER_IDENTITIES_JSON must be a JSON array")
+    result: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError("Every deployer identity must be an object")
+        deployer_id = str(item.get("deployer_id") or "").strip()
+        token_file = str(item.get("token_file") or "").strip()
+        repositories = item.get("repository_ids", [])
+        if (
+            not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", deployer_id)
+            or deployer_id in seen
+            or not token_file
+            or not isinstance(repositories, list)
+            or not repositories
+            or not all(
+                isinstance(repo, str)
+                and re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", repo)
+                for repo in repositories
+            )
+        ):
+            raise ValueError("Invalid deployer identity")
+        seen.add(deployer_id)
+        result.append(
+            {
+                "deployer_id": deployer_id,
+                "token_file": token_file,
+                "repository_ids": list(dict.fromkeys(repositories)),
+            }
+        )
+    return tuple(result)
+
+
 @dataclass(frozen=True)
 class ClusterControlSettings:
     host: str
@@ -201,6 +343,8 @@ class ClusterControlSettings:
     inventory: tuple[dict[str, object], ...]
     diagnostic_targets: tuple[dict[str, str], ...]
     worker_identities: tuple[dict[str, str], ...]
+    deployment_repositories: tuple[dict[str, object], ...]
+    deployer_identities: tuple[dict[str, object], ...]
     artifact_dir: str
     postgres_dsn: str
     postgres_schema: str
@@ -237,6 +381,12 @@ class ClusterControlSettings:
             worker_identities=_worker_identities(
                 os.getenv("KC_WORKER_IDENTITIES_JSON", "")
             ),
+            deployment_repositories=_deployment_repositories(
+                os.getenv("KC_DEPLOYMENT_REPOSITORIES_JSON", "")
+            ),
+            deployer_identities=_deployer_identities(
+                os.getenv("KC_DEPLOYER_IDENTITIES_JSON", "")
+            ),
             artifact_dir=os.getenv(
                 "KC_ARTIFACT_DIR", "/var/lib/kennethbot-cluster-control/artifacts"
             ).strip(),
@@ -271,6 +421,22 @@ class ClusterControlSettings:
             if host is None or not host.get("compute"):
                 raise ValueError(
                     f"Worker {worker['worker_id']} requires a compute-enabled inventory host"
+                )
+        repositories = {
+            str(item["repository_id"]): item
+            for item in self.deployment_repositories
+        }
+        for repository in repositories.values():
+            for target in repository["targets"]:
+                if str(target["host_id"]) not in inventory:
+                    raise ValueError(
+                        f"Deployment target {target['host_id']} is not in inventory"
+                    )
+        for deployer in self.deployer_identities:
+            unknown = set(deployer["repository_ids"]) - set(repositories)
+            if unknown:
+                raise ValueError(
+                    f"Deployer {deployer['deployer_id']} references unknown repositories"
                 )
         if not self.artifact_dir:
             raise ValueError("KC_ARTIFACT_DIR is required")

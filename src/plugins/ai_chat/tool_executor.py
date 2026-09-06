@@ -475,6 +475,25 @@ class ToolExecutor(HandlerService):
             if lightweight_profile is not None:
                 selected_profile = lightweight_profile
 
+        entry_profile = None
+        entry_allowed_profiles = None
+        if semantic_entry_enabled:
+            try:
+                entry_allowed_profiles = (
+                    self.context.subagent_coordinator.allowed_model_profiles()
+                )
+                if not entry_allowed_profiles:
+                    semantic_entry_enabled = False
+                else:
+                    entry_profile = self.context.subagent_coordinator.entry_profile(
+                        selected_profile
+                    )
+            except DeepSeekConfigError as exc:
+                semantic_entry_enabled = False
+                self.context.logger.info(
+                    f"Sub-Agent entry unavailable; continuing normal chat: {exc}"
+                )
+
         tools = available_tools(
             include_web_search=(
                 self.context.settings.search_enabled
@@ -2943,8 +2962,8 @@ class ToolExecutor(HandlerService):
                     ),
                     entry_handler=handle_entry if semantic_entry_enabled else None,
                     entry_max_steps=(self.context.subagent_coordinator.max_steps if semantic_entry_enabled else 8),
-                    entry_profile=(self.context.subagent_coordinator.entry_profile(selected_profile) if semantic_entry_enabled else None),
-                    entry_allowed_profiles=(self.context.subagent_coordinator.allowed_model_profiles() if semantic_entry_enabled else None),
+                    entry_profile=entry_profile,
+                    entry_allowed_profiles=entry_allowed_profiles,
                 )
         except ChatFailure:
             raise
