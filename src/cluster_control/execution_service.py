@@ -1,0 +1,320 @@
+from __future__ import annotations
+
+import hashlib
+import hmac
+import json
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Mapping
+from urllib.parse import urlsplit
+
+from .execution_contracts import (
+    OperationProposal,
+    WorkerJobProposal,
+    content_hash,
+    new_handle,
+    bounded_object,
+)
+from .execution_storage import ClusterExecutionStore
+
+
+@dataclass(frozen=True)
+class WriteBackendBinding:
+    backend_ref: str = "not-configured"
+    binding_version: int = 1
+    available: bool = False
+    reason: str = "尚未接入经维护者批准的唯一写后端"
+
+
+class WorkerAuthenticator:
+    """Bind a worker credential to a configured identity, never to request JSON."""
+
+    def __init__(self, credentials: Mapping[str, str | Path]) -> None:
+        self.credentials = {key: Path(value) for key, value in credentials.items()}
+
+    @staticmethod
+    def _read(path: Path) -> bytes:
+        raw = path.read_bytes()
+        token = raw.rstrip(b"\r\n")
+        if len(raw) >= 515 or not 32 <= len(token) <= 512 or any(ch < 33 or ch > 126 for ch in token):
+            raise ValueError("invalid worker credential")
+        return token
+
+    def authenticate(self, authorization: str) -> str | None:
+        scheme, _, supplied = authorization.partition(" ")
+        if scheme.lower() != "bearer" or not supplied:
+            return None
+        encoded = supplied.encode("ascii", errors="ignore")
+        for worker_id, path in self.credentials.items():
+            try:
+                expected = self._read(path)
+            except (OSError, ValueError):
+                continue
+            if hmac.compare_digest(encoded, expected):
+                return worker_id
+        return None
+
+
+class ClusterExecutionService:
+    def __init__(
+        self,
+        store: ClusterExecutionStore,
+        *,
+        inventory: tuple[dict[str, object], ...],
+        diagnostic_targets: tuple[dict[str, str], ...],
+        worker_hosts: Mapping[str, str],
+        write_backend: WriteBackendBinding | None = None,
+    ) -> None:
+        self.store = store
+        self.inventory = {str(item["host_id"]): item for item in inventory}
+        self.diagnostic_targets = {
+            str(item["target_id"]): dict(item) for item in diagnostic_targets
+        }
+        self.worker_hosts = dict(worker_hosts)
+        self.write_backend = write_backend or WriteBackendBinding()
+
+    def capabilities(self) -> dict[str, Any]:
+        compute_hosts = sorted(
+            host_id for host_id, item in self.inventory.items() if item.get("compute")
+        )
+        return {
+            "operations": {
+                "available": self.write_backend.available,
+                "backend": self.write_backend.backend_ref,
+                "reason": "" if self.write_backend.available else self.write_backend.reason,
+                "actions": ["service.start", "service.stop", "service.restart"],
+            },
+            "worker": {
+                "available": bool(self.worker_hosts),
+                "workers": sorted(self.worker_hosts),
+                "compute_hosts": compute_hosts,
+                "job_kinds": [
+                    "probe.http", "artifact.inspect", "document.verify",
+                    "media.inspect", "preview.static",
+                ],
+            },
+        }
+
+    def prepare_operation(
+        self, raw: Mapping[str, Any], *, actor_id: str, origin_scope: str
+    ) -> dict[str, Any]:
+        now = int(time.time())
+        proposal = OperationProposal.parse(raw, now=now)
+        host = self.inventory.get(proposal.host_id)
+        if host is None or not host.get("operate"):
+            capability_status = "forbidden"
+            reason = "该主机没有授予 Kennethbot 宿主操作权限"
+        elif proposal.resource_ref not in set(host.get("operable_units", [])):
+            capability_status = "forbidden"
+            reason = "该服务不在可操作白名单中"
+        elif not self.write_backend.available:
+            capability_status = "not_configured"
+            reason = self.write_backend.reason
+        else:
+            capability_status = "available"
+            reason = ""
+        contract = {
+            "task_ref": proposal.task_ref,
+            "step_ref": proposal.step_ref,
+            "actor_id": actor_id,
+            "origin_scope": origin_scope,
+            "host_id": proposal.host_id,
+            "resource_ref": proposal.resource_ref,
+            "operation": proposal.operation,
+            "operation_version": 1,
+            "arguments": proposal.arguments,
+            "backend_ref": self.write_backend.backend_ref,
+            "backend_binding_version": self.write_backend.binding_version,
+            "expected_state": proposal.expected_state,
+            "resource_version": 1,
+            "policy_version": 1,
+            "deadline_at": proposal.deadline_at,
+            "resource_budget": {"wall_seconds": min(proposal.deadline_at - now, 300)},
+            "idempotency_key": proposal.idempotency_key,
+            "verification": proposal.verification,
+            "compensation": proposal.compensation,
+        }
+        record = {
+            **contract,
+            "operation_id": new_handle("op"),
+            "contract_hash": content_hash(contract),
+            "status": "awaiting_approval" if capability_status == "available" else "planned",
+            "capability_status": capability_status,
+            "created_at": now,
+        }
+        result = self.store.prepare_operation(record)
+        result["executable"] = capability_status == "available"
+        result["disabled_reason"] = reason
+        return result
+
+    def approve_operation(
+        self, operation_id: str, *, actor_id: str, expected_hash: str,
+        expected_version: int,
+    ) -> dict[str, Any]:
+        if not actor_id.startswith("admin:"):
+            raise PermissionError("only an authenticated administrator can approve operations")
+        return self.store.approve_operation(
+            operation_id,
+            actor_id=actor_id,
+            expected_hash=expected_hash,
+            expected_version=expected_version,
+            expires_at=int(time.time()) + 300,
+        )
+
+    @staticmethod
+    def _visible(item: dict[str, Any] | None, actor_id: str, origin_scope: str) -> dict[str, Any] | None:
+        if item is None or actor_id.startswith("admin:"):
+            return item
+        if item.get("actor_id") != actor_id or item.get("origin_scope") != origin_scope:
+            raise PermissionError("resource belongs to another scope")
+        return item
+
+    def operation_status(
+        self, operation_id: str, *, actor_id: str, origin_scope: str
+    ) -> dict[str, Any] | None:
+        return self._visible(self.store.get_operation(operation_id), actor_id, origin_scope)
+
+    def job_status(
+        self, job_id: str, *, actor_id: str, origin_scope: str
+    ) -> dict[str, Any] | None:
+        return self._visible(self.store.get_job(job_id), actor_id, origin_scope)
+
+    def submit_job(
+        self, raw: Mapping[str, Any], *, actor_id: str, origin_scope: str
+    ) -> dict[str, Any]:
+        now = int(time.time())
+        proposal = WorkerJobProposal.parse(raw, now=now)
+        payload = dict(proposal.payload)
+        if proposal.kind == "probe.http":
+            target = self.diagnostic_targets.get(str(payload["target_id"]))
+            if target is None:
+                raise PermissionError("probe target is not configured")
+            payload = {
+                "target_id": target["target_id"],
+                "url": target["url"],
+                "expected_host": urlsplit(target["url"]).hostname,
+            }
+        artifact_id = str(payload.get("artifact_id") or "")
+        if artifact_id:
+            artifact = self.store.artifact(artifact_id)
+            if artifact is None:
+                raise LookupError("artifact not found")
+            if (
+                artifact.get("actor_id") != actor_id
+                or artifact.get("origin_scope") != origin_scope
+            ):
+                raise PermissionError("artifact belongs to another scope")
+        job_id = new_handle("job")
+        if proposal.kind == "preview.static":
+            preview_id = new_handle("preview")
+            payload["preview_id"] = preview_id
+            payload["expires_at"] = now + int(payload["ttl_seconds"])
+        record = {
+            "job_id": job_id,
+            "actor_id": actor_id,
+            "origin_scope": origin_scope,
+            "kind": proposal.kind,
+            "payload": payload,
+            "constraints": proposal.constraints,
+            "deadline_at": proposal.deadline_at,
+            "idempotency_key": proposal.idempotency_key,
+            "created_at": now,
+        }
+        job = self.store.submit_job(record)
+        if proposal.kind == "preview.static" and job["job_id"] == job_id:
+            preview_id = str(payload["preview_id"])
+            self.store.create_preview(
+                {
+                    "preview_id": preview_id,
+                    "job_id": job_id,
+                    "artifact_id": artifact_id,
+                    "actor_id": actor_id,
+                    "origin_scope": origin_scope,
+                    "route": f"/previews/{preview_id}/",
+                    "expires_at": int(payload["expires_at"]),
+                    "cleanup_policy": "disable-route-retain-artifact",
+                    "created_at": now,
+                }
+            )
+            job["preview_id"] = preview_id
+        elif proposal.kind == "preview.static":
+            job["preview_id"] = str(job.get("payload", {}).get("preview_id") or "")
+        return job
+
+    def heartbeat(self, worker_id: str, raw: Mapping[str, Any]) -> dict[str, Any]:
+        configured_host = self.worker_hosts.get(worker_id)
+        if configured_host is None:
+            raise PermissionError("worker identity is not configured")
+        host = self.inventory.get(configured_host)
+        if host is None or not host.get("compute"):
+            raise PermissionError("worker host is not authorized for compute")
+        boot_id = str(raw.get("boot_id") or "").strip()
+        availability = str(raw.get("availability") or "available").strip()
+        protocol_version = int(raw.get("protocol_version") or 0)
+        capabilities = raw.get("capabilities", [])
+        runtime = raw.get("runtime", {})
+        capacity = raw.get("capacity", {})
+        public_base_url = str(raw.get("public_base_url") or "").strip().rstrip("/")
+        if not 8 <= len(boot_id) <= 128 or protocol_version != 1:
+            raise ValueError("incompatible worker identity or protocol")
+        if availability not in {"available", "draining", "unavailable"}:
+            raise ValueError("invalid worker availability")
+        if not isinstance(capabilities, list) or any(
+            item not in {"probe.http", "artifact.inspect", "document.verify", "media.inspect", "preview.static"}
+            for item in capabilities
+        ):
+            raise ValueError("invalid worker capabilities")
+        if not isinstance(runtime, dict) or not isinstance(capacity, dict):
+            raise ValueError("invalid worker runtime or capacity")
+        for field in ("cpu_millis", "memory_bytes", "gpu_slots"):
+            if not isinstance(capacity.get(field), int) or int(capacity[field]) < 0:
+                raise ValueError("invalid worker capacity")
+        if public_base_url:
+            parsed = urlsplit(public_base_url)
+            if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.query or parsed.fragment:
+                raise ValueError("invalid public_base_url")
+        return self.store.upsert_worker(
+            worker_id,
+            {
+                "boot_id": boot_id,
+                "protocol_version": protocol_version,
+                "availability": availability,
+                "capabilities": list(dict.fromkeys(capabilities)),
+                "runtime": runtime,
+                "capacity": capacity,
+                "public_base_url": public_base_url,
+            },
+            host_id=configured_host,
+        )
+
+    def complete_job(
+        self, job_id: str, *, worker_id: str, fence: int, ok: bool,
+        result: dict[str, Any], error_code: str,
+    ) -> dict[str, Any]:
+        result = bounded_object(result, field="worker result", max_bytes=64_000)
+        job = self.store.get_job(job_id)
+        if job is None:
+            raise LookupError("job not found")
+        artifact_id = str(job.get("payload", {}).get("artifact_id") or "")
+        cancelled = job.get("status") == "cancelling"
+        if (
+            not cancelled
+            and job["kind"] in {"artifact.inspect", "document.verify", "media.inspect"}
+            and artifact_id
+        ):
+            self.store.validate_artifact(artifact_id, ok=ok)
+        if job["kind"] == "preview.static" and ok and not cancelled:
+            worker = self.store.worker(worker_id)
+            public_url = str(result.get("public_url") or "")
+            expected_base = str((worker or {}).get("public_base_url") or "").rstrip("/")
+            if not expected_base or not public_url.startswith(expected_base + "/previews/"):
+                raise PermissionError("worker returned a preview URL outside its configured base")
+        return self.store.complete_job(
+            job_id, worker_id=worker_id, fence=fence, ok=ok,
+            result=result, error_code=error_code,
+        )
+
+    @staticmethod
+    def artifact_etag(item: Mapping[str, Any]) -> str:
+        return f'"sha256:{item["sha256"]}"'

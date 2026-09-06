@@ -146,6 +146,11 @@
             --chdir "$out/share/qq-deepseek-bot" \
             --set PYTHONDONTWRITEBYTECODE 1 \
             --set PYTHONUNBUFFERED 1
+          makeWrapper ${virtualenv}/bin/python "$out/bin/kennethbot-cluster-worker" \
+            --add-flags "-m src.cluster_worker" \
+            --chdir "$out/share/qq-deepseek-bot" \
+            --set PYTHONDONTWRITEBYTECODE 1 \
+            --set PYTHONUNBUFFERED 1
 
           runHook postInstall
         '';
@@ -185,6 +190,10 @@
         type = "app";
         program = "${self.packages.${system}.default}/bin/kennethbot-cluster-control";
       };
+      cluster-worker = {
+        type = "app";
+        program = "${self.packages.${system}.default}/bin/kennethbot-cluster-worker";
+      };
     });
 
     checks = forAllSystems (system: let
@@ -221,6 +230,7 @@
       qq-deepseek-bot = self.nixosModules.default;
       qwen-control = import ./nix/qwen-control.nix;
       cluster-control = import ./nix/cluster-control.nix {inherit self;};
+      cluster-worker = import ./nix/cluster-worker.nix {inherit self;};
     };
   };
 }

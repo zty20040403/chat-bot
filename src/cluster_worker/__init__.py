@@ -1,0 +1,1 @@
+"""Isolated Kennethbot compute worker."""

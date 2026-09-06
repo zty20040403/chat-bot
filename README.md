@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.14.1-22c55e?style=for-the-badge">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.15.0-22c55e?style=for-the-badge">
   <img alt="Python" src="https://img.shields.io/badge/Python-3.12-3776ab?style=for-the-badge&amp;logo=python&amp;logoColor=white">
   <img alt="NoneBot2" src="https://img.shields.io/badge/NoneBot2-OneBot_V11-ea5252?style=for-the-badge">
   <img alt="PostgreSQL" src="https://img.shields.io/badge/PostgreSQL-Durable-4169e1?style=for-the-badge&amp;logo=postgresql&amp;logoColor=white">
@@ -57,6 +57,10 @@ Kennethbot 通过 NapCatQQ 接收 OneBot V11 事件，使用 NoneBot2 处理消�
     <td><strong>实验式排障</strong><br>六类固定流程组合 DNS、HTTP、服务、Trace、Outbox 与数据库证据，最多两层六项检查。</td>
     <td><strong>可追溯结论</strong><br>每次调查生成 diagnostic# 与 evidence#；失败、异常迹象和证据不足分开表达，控制台可逐项查看。</td>
   </tr>
+  <tr>
+    <td><strong>受控操作合同</strong><br>操作目标、操作者、期限、预期状态和验收方式写入不可变合同；写后端未获批准时明确保持不可执行。</td>
+    <td><strong>隔离集群 Worker</strong><br>固定任务模板、独立凭据、资源预留、租约与 fencing；支持产物校验、PDF/媒体检查和限时静态预览。</td>
+  </tr>
 </table>
 
 ## 系统结构
@@ -85,13 +89,17 @@ flowchart LR
     OUT --> NC
     TOOLS --> CC[Cluster Control]
     CC --> OPS[Read-only Operations API]
+    CC --> QUEUE[(Operation / Job Ledger)]
+    CW[Isolated Cluster Worker] -->|Heartbeat / Lease / Receipt| CC
+    CC -->|Assigned artifact| CW
+    CW --> PREVIEW[Expiring Preview Origin]
 
     classDef core fill:#18181b,stroke:#22c55e,color:#fafafa,stroke-width:2px;
     classDef service fill:#27272a,stroke:#71717a,color:#fafafa;
     classDef data fill:#172554,stroke:#60a5fa,color:#eff6ff;
     class AGENT,LLM core;
-    class NC,NB,IR,CTX,TOOLS,MEDIA,BOX,OUT,CC,OPS service;
-    class PG data;
+    class NC,NB,IR,CTX,TOOLS,MEDIA,BOX,OUT,CC,OPS,CW,PREVIEW service;
+    class PG,QUEUE data;
 ```
 
 模型不会直接操作 NapCat 或数据库。消息先转换成统一的 Message IR，Agent 只能调用宿主
@@ -114,7 +122,7 @@ OneBot 消息段并发送。
 | 语音 | Edge TTS、腾讯 SILK、NapCat 语音转写 |
 | 富文本 | CodeSnap、Pygments |
 | 部署 | Nix Flakes、NixOS、systemd |
-| 集群观测 | 独立控制服务、受控只读运维 API、Prometheus 指标 |
+| 集群控制 | 独立控制服务、只读运维 API、操作合同、资源租约、隔离 Worker、Prometheus 指标 |
 
 ## 目录结构
 
@@ -124,14 +132,17 @@ bot/
 ├── pyproject.toml               # Python 项目与依赖声明
 ├── uv.lock                      # 可复现依赖锁
 ├── flake.nix                    # Nix 包、开发环境和模块导出
-├── nix/module.nix               # NixOS 服务模块
+├── nix/module.nix               # Bot NixOS 服务模块
+├── nix/cluster-control.nix      # 集群控制服务模块
+├── nix/cluster-worker.nix       # 隔离 Worker 模块
 ├── migrations/                  # PostgreSQL / Alembic 迁移
 ├── admin-ui/                    # React + TypeScript 管理控制台
 ├── skills/                      # Agent 按需加载的操作说明
 ├── docs/                        # 架构、运维和迁移文档
 ├── tests/                       # 单元测试与集成测试
 └── src/
-    ├── cluster_control/         # 独立集群控制服务、权限交集与查询投影
+    ├── cluster_control/         # 控制服务、权限、操作合同、队列和产物登记
+    ├── cluster_worker/          # 固定计算模板、租约回执和静态预览
     ├── bot_storage/             # PostgreSQL、迁移与存储工具
     └── plugins/ai_chat/
         ├── __init__.py          # NoneBot Matcher 与兼容入口

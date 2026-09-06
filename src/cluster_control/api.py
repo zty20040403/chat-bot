@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
+import json
 import re
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from prometheus_client import make_asgi_app
 from pydantic import BaseModel, ConfigDict, Field
 
 from .diagnostics import IncidentDiagnosticService
+from .execution_service import ClusterExecutionService, WorkerAuthenticator
 from .service import FleetControlService
 
 
@@ -27,6 +31,67 @@ class DiagnosticRunRequest(BaseModel):
     target_id: str = Field(default="", max_length=64)
     subject: str = Field(default="", max_length=1000)
     requested_by: str = Field(default="kennethbot", min_length=1, max_length=200)
+
+
+class OperationPrepareRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    host_id: str
+    resource_ref: str
+    operation: str
+    arguments: dict[str, object] = Field(default_factory=dict)
+    expected_state: dict[str, object] = Field(default_factory=dict)
+    verification: dict[str, object] = Field(default_factory=dict)
+    compensation: dict[str, object] = Field(default_factory=dict)
+    deadline_at: int | None = None
+    idempotency_key: str
+    task_ref: str = ""
+    step_ref: str = ""
+
+
+class OperationApproveRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    contract_hash: str = Field(pattern="^[a-f0-9]{64}$")
+    resource_version: int = Field(ge=1)
+
+
+class WorkerHeartbeatRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    boot_id: str
+    protocol_version: int
+    availability: str
+    capabilities: list[str]
+    runtime: dict[str, object]
+    capacity: dict[str, int]
+    public_base_url: str = ""
+
+
+class WorkerCompleteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    fence: int = Field(ge=1)
+    ok: bool
+    result: dict[str, object] = Field(default_factory=dict)
+    error_code: str = Field(default="", max_length=80)
+
+
+class WorkerLeaseRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    fence: int = Field(ge=1)
+
+
+class WorkerJobRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    kind: str
+    payload: dict[str, object] = Field(default_factory=dict)
+    constraints: dict[str, object] = Field(default_factory=dict)
+    deadline_at: int | None = None
+    idempotency_key: str
+
+
+class ArtifactUploadRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str
+    media_type: str = Field(default="application/octet-stream", max_length=120)
+    content_base64: str
 
 
 def _read_api_token(path: Path) -> str:
@@ -49,6 +114,8 @@ def create_app(
     *,
     api_token_file: str | Path,
     diagnostics: IncidentDiagnosticService | None = None,
+    execution: ClusterExecutionService | None = None,
+    worker_authenticator: WorkerAuthenticator | None = None,
 ) -> FastAPI:
     token_path = Path(api_token_file)
 
@@ -73,6 +140,47 @@ def create_app(
         scheme, _, value = authorization.partition(" ")
         if scheme.lower() != "bearer" or not hmac.compare_digest(value, expected):
             raise HTTPException(status_code=401, detail="Unauthorized")
+
+    async def signed_principal(
+        request: Request,
+        authorization: str = Header(default=""),
+        actor: str = Header(default="", alias="X-KC-Actor"),
+        origin: str = Header(default="", alias="X-KC-Origin"),
+        timestamp: str = Header(default="", alias="X-KC-Time"),
+        signature: str = Header(default="", alias="X-KC-Signature"),
+    ) -> tuple[str, str]:
+        authenticate(authorization)
+        if not actor or len(actor) > 200 or not origin or len(origin) > 240:
+            raise HTTPException(status_code=401, detail="Signed actor is required")
+        try:
+            request_time = int(timestamp)
+        except ValueError:
+            raise HTTPException(status_code=401, detail="Invalid request time") from None
+        if abs(int(time.time()) - request_time) > 60:
+            raise HTTPException(status_code=401, detail="Expired signed request")
+        body = await request.body()
+        message = "\n".join(
+            (
+                request.method.upper(), request.url.path, actor, origin,
+                timestamp, hashlib.sha256(body).hexdigest(),
+            )
+        ).encode("utf-8")
+        expected = hmac.new(
+            _read_api_token(token_path).encode("ascii"), message, hashlib.sha256
+        ).hexdigest()
+        if not hmac.compare_digest(signature, expected):
+            raise HTTPException(status_code=401, detail="Invalid signed actor")
+        return actor, origin
+
+    def worker_principal(authorization: str = Header(default="")) -> str:
+        worker_id = (
+            worker_authenticator.authenticate(authorization)
+            if worker_authenticator is not None
+            else None
+        )
+        if worker_id is None:
+            raise HTTPException(status_code=401, detail="Unauthorized worker")
+        return worker_id
 
     def valid_host(host: str) -> str:
         if _HOST_RE.fullmatch(host) is None:
@@ -180,5 +288,245 @@ def create_app(
             raise HTTPException(status_code=422, detail=str(exc)) from None
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from None
+
+    def execution_service() -> ClusterExecutionService:
+        if execution is None:
+            raise HTTPException(status_code=503, detail="Execution control unavailable")
+        return execution
+
+    @app.get("/v1/execution/capabilities", dependencies=auth)
+    async def execution_capabilities() -> dict[str, object]:
+        return execution_service().capabilities()
+
+    @app.get("/v1/operations", dependencies=auth)
+    async def operations(limit: int = Query(default=50, ge=1, le=200)) -> dict[str, object]:
+        return {"items": await asyncio.to_thread(execution_service().store.recent_operations, limit)}
+
+    @app.post("/v1/operations/prepare")
+    async def prepare_operation(
+        body: OperationPrepareRequest,
+        principal: tuple[str, str] = Depends(signed_principal),
+    ) -> dict[str, object]:
+        actor, origin = principal
+        try:
+            return await asyncio.to_thread(
+                execution_service().prepare_operation,
+                body.model_dump(exclude_none=True), actor_id=actor, origin_scope=origin,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+
+    @app.get("/v1/operations/{operation_id}")
+    async def operation(
+        operation_id: str,
+        principal: tuple[str, str] = Depends(signed_principal),
+    ) -> dict[str, object]:
+        actor, origin = principal
+        try:
+            item = await asyncio.to_thread(
+                execution_service().operation_status,
+                operation_id, actor_id=actor, origin_scope=origin,
+            )
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from None
+        if item is None:
+            raise HTTPException(status_code=404, detail="Operation not found")
+        return item
+
+    @app.post("/v1/operations/{operation_id}/approve")
+    async def approve_operation(
+        operation_id: str,
+        body: OperationApproveRequest,
+        principal: tuple[str, str] = Depends(signed_principal),
+    ) -> dict[str, object]:
+        actor, _ = principal
+        try:
+            return await asyncio.to_thread(
+                execution_service().approve_operation,
+                operation_id, actor_id=actor, expected_hash=body.contract_hash,
+                expected_version=body.resource_version,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+
+    @app.post("/v1/operations/{operation_id}/cancel")
+    async def cancel_operation(
+        operation_id: str,
+        principal: tuple[str, str] = Depends(signed_principal),
+    ) -> dict[str, object]:
+        actor, _ = principal
+        try:
+            return await asyncio.to_thread(
+                execution_service().store.cancel_operation, operation_id,
+                actor_id=actor, origin_scope=principal[1],
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+
+    @app.get("/v1/workers", dependencies=auth)
+    async def workers() -> dict[str, object]:
+        return {"items": await asyncio.to_thread(execution_service().store.workers)}
+
+    @app.post("/v1/worker/heartbeat")
+    async def worker_heartbeat(
+        body: WorkerHeartbeatRequest,
+        worker_id: str = Depends(worker_principal),
+    ) -> dict[str, object]:
+        try:
+            return await asyncio.to_thread(
+                execution_service().heartbeat, worker_id, body.model_dump()
+            )
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    @app.post("/v1/worker/claim")
+    async def worker_claim(worker_id: str = Depends(worker_principal)) -> dict[str, object]:
+        item = await asyncio.to_thread(execution_service().store.claim_job, worker_id)
+        return {"job": item}
+
+    @app.post("/v1/worker/jobs/{job_id}/complete")
+    async def worker_complete(
+        job_id: str,
+        body: WorkerCompleteRequest,
+        worker_id: str = Depends(worker_principal),
+    ) -> dict[str, object]:
+        try:
+            return await asyncio.to_thread(
+                execution_service().complete_job,
+                job_id, worker_id=worker_id, fence=body.fence, ok=body.ok,
+                result=body.result, error_code=body.error_code,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except PermissionError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+
+    @app.post("/v1/worker/jobs/{job_id}/renew")
+    async def worker_renew(
+        job_id: str,
+        body: WorkerLeaseRequest,
+        worker_id: str = Depends(worker_principal),
+    ) -> dict[str, int]:
+        try:
+            return await asyncio.to_thread(
+                execution_service().store.renew_job,
+                job_id, worker_id=worker_id, fence=body.fence,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except (PermissionError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+
+    @app.get("/v1/worker/artifacts/{artifact_id}")
+    async def worker_artifact(
+        artifact_id: str,
+        job_id: str = Query(min_length=36, max_length=36),
+        fence: int = Query(ge=1),
+        worker_id: str = Depends(worker_principal),
+    ) -> Response:
+        try:
+            item, content = await asyncio.to_thread(
+                execution_service().store.artifact_bytes_for_worker,
+                artifact_id, job_id=job_id, worker_id=worker_id, fence=fence,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from None
+        return Response(
+            content,
+            media_type=str(item["media_type"]),
+            headers={
+                "ETag": execution_service().artifact_etag(item),
+                "X-Artifact-SHA256": str(item["sha256"]),
+            },
+        )
+
+    @app.get("/v1/jobs", dependencies=auth)
+    async def jobs(limit: int = Query(default=50, ge=1, le=200)) -> dict[str, object]:
+        return {"items": await asyncio.to_thread(execution_service().store.recent_jobs, limit)}
+
+    @app.post("/v1/jobs")
+    async def submit_job(
+        body: WorkerJobRequest,
+        principal: tuple[str, str] = Depends(signed_principal),
+    ) -> dict[str, object]:
+        actor, origin = principal
+        try:
+            return await asyncio.to_thread(
+                execution_service().submit_job,
+                body.model_dump(exclude_none=True), actor_id=actor, origin_scope=origin,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+
+    @app.get("/v1/jobs/{job_id}")
+    async def job(
+        job_id: str,
+        principal: tuple[str, str] = Depends(signed_principal),
+    ) -> dict[str, object]:
+        actor, origin = principal
+        try:
+            item = await asyncio.to_thread(
+                execution_service().job_status,
+                job_id, actor_id=actor, origin_scope=origin,
+            )
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from None
+        if item is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        return item
+
+    @app.post("/v1/jobs/{job_id}/cancel")
+    async def cancel_job(
+        job_id: str,
+        principal: tuple[str, str] = Depends(signed_principal),
+    ) -> dict[str, object]:
+        try:
+            return await asyncio.to_thread(
+                execution_service().store.cancel_job, job_id,
+                actor_id=principal[0], origin_scope=principal[1],
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from None
+
+    @app.get("/v1/reservations", dependencies=auth)
+    async def reservations() -> dict[str, object]:
+        return {"items": await asyncio.to_thread(execution_service().store.reservations)}
+
+    @app.post("/v1/artifacts")
+    async def upload_artifact(
+        body: ArtifactUploadRequest,
+        principal: tuple[str, str] = Depends(signed_principal),
+    ) -> dict[str, object]:
+        actor, origin = principal
+        try:
+            item = await asyncio.to_thread(
+                execution_service().store.store_artifact,
+                actor_id=actor, origin_scope=origin, name=body.name,
+                media_type=body.media_type, content_base64=body.content_base64,
+            )
+            item.pop("storage_ref", None)
+            return item
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    @app.get("/v1/previews", dependencies=auth)
+    async def previews(limit: int = Query(default=50, ge=1, le=200)) -> dict[str, object]:
+        return {"items": await asyncio.to_thread(execution_service().store.previews, limit)}
 
     return app

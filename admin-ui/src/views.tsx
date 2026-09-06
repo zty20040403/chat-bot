@@ -560,6 +560,14 @@ export function FleetView({ plane }: { plane: Plane }) {
   const observations = rows(payload.observations?.items)
   const diagnosticTemplates = rows(payload.diagnostic_templates?.items)
   const diagnosticRuns = rows(payload.diagnostics?.items)
+  const executionCapabilities = payload.execution_capabilities ?? {}
+  const operationCapability = executionCapabilities.operations ?? {}
+  const workerCapability = executionCapabilities.worker ?? {}
+  const operations = rows(payload.operations?.items)
+  const workers = rows(payload.workers?.items)
+  const jobs = rows(payload.jobs?.items)
+  const reservations = rows(payload.reservations?.items)
+  const previews = rows(payload.previews?.items)
   const observedHosts = rows(fleet.data?.hosts)
   const inventory = rows(fleet.inventory)
   const observedByHost = new Map(observedHosts.map((host) => [String(host.host), host]))
@@ -643,12 +651,18 @@ export function FleetView({ plane }: { plane: Plane }) {
   }
   return (
     <>
-      <PageHeader title="服务器集群" description="MaxOps 只读观测、来源时间和 Kennethbot 可用能力" action={<RefreshButton loading={plane.loading.has('fleet')} onClick={() => void plane.refresh('fleet')} />} />
+      <PageHeader title="服务器集群" description="只读证据、受控操作、远程 Worker、资源预留与临时预览" action={<RefreshButton loading={plane.loading.has('fleet')} onClick={() => void plane.refresh('fleet')} />} />
       <div className="metric-grid">
         <Metric label="控制链路" value={<StatusBadge value={status} />} hint={payload.configured ? `MaxOps：${backend.state ?? 'unknown'}` : '尚未配置集群控制服务'} />
         <Metric label="登记节点" value={fmtNumber(knownHosts.length)} hint={`${fmtNumber(observedHosts.length)} 台有当前观测`} />
         <Metric label="可用能力" value={`${availableCapabilities.length}/${capabilities.length}`} hint="新能力不会自动授权" />
         <Metric label="最后成功" value={fmtTime(backend.last_success_at ?? fleet.observed_at)} hint={fleet.cached ? '当前结果来自缓存' : '当前结果来自上游'} />
+      </div>
+      <div className="metric-grid compact">
+        <Metric label="宿主操作" value={<StatusBadge value={operationCapability.available ? 'ready' : operationCapability.reason ? 'not_configured' : 'unknown'} />} hint={operationCapability.available ? `后端：${operationCapability.backend}` : operationCapability.reason || '尚未取得能力'} />
+        <Metric label="计算 Worker" value={`${workers.filter((item) => item.fresh).length}/${workers.length}`} hint={`${workerCapability.job_kinds?.length ?? 0} 类固定任务`} />
+        <Metric label="运行任务" value={jobs.filter((item) => ['running', 'verifying'].includes(item.status)).length} hint={`${reservations.filter((item) => item.status === 'active').length} 个资源预留`} />
+        <Metric label="活动预览" value={previews.filter((item) => item.state === 'active').length} hint="到期关闭入口，原产物仍保留" />
       </div>
       <Section title="实验式排障" description="固定目标、最多两层六项检查；证据不足时保持未知">
         <div className="diagnostic-controls">
@@ -667,6 +681,22 @@ export function FleetView({ plane }: { plane: Plane }) {
       </Section>
       <Section title="节点状态" description="unknown 只表示证据不足，不等于机器关机">
         {knownHosts.length ? <DataTable><thead><tr><th>节点</th><th>角色</th><th>Agent</th><th>Exporter</th><th>失败服务</th><th>观测状态</th><th></th></tr></thead><tbody>{knownHosts.map((host) => { const hostId = String(host.host ?? host.host_id); return <tr key={hostId}><td><strong>{host.label || hostId}</strong><small className="cell-sub">{hostId} · {host.site ?? host.architecture ?? '-'}</small></td><td>{host.role ?? host.roles?.join?.('、') ?? '-'}</td><td><StatusBadge value={host.agent?.state ?? 'unknown'} /></td><td><StatusBadge value={host.exporter?.state ?? 'unknown'} /></td><td>{host.agent?.failed_units == null ? '-' : fmtNumber(host.agent.failed_units)}</td><td><StatusBadge value={fleetHostState(host)} /></td><td className="actions"><button className="icon-button" title={`查看 ${hostId} 详情`} aria-label={`查看 ${hostId} 详情`} onClick={() => void loadHost(hostId)}><Eye size={15} /></button></td></tr>})}</tbody></DataTable> : <EmptyState>暂无登记节点；控制服务离线时不会猜测机器状态</EmptyState>}
+      </Section>
+      <Section title="受控操作" description="合同、人工批准、执行和验收分开；没有写后端时不会伪装成已重启">
+        <DataTable><thead><tr><th>更新时间</th><th>操作</th><th>目标</th><th>发起者</th><th>能力</th><th>状态</th></tr></thead><tbody>{operations.slice(0, 5).map((item) => <tr key={item.operation_id}><td>{fmtTime(item.updated_at)}</td><td><code>{item.operation_id}</code><small className="cell-sub">{item.operation}</small></td><td>{item.host_id}<small className="cell-sub">{item.resource_ref}</small></td><td><code>{item.actor_id}</code></td><td><StatusBadge value={item.capability_status} /></td><td><StatusBadge value={item.status} /></td></tr>)}</tbody></DataTable>
+        {!operations.length && <EmptyState>还没有远程操作合同；当前写能力为 {operationCapability.reason || '未知'}</EmptyState>}
+      </Section>
+      <Section title="远程 Worker" description="心跳过期不会显示在线；任务容器拿不到控制凭据、宿主目录或 Docker socket">
+        <DataTable><thead><tr><th>Worker</th><th>节点</th><th>状态</th><th>最后心跳</th><th>运行环境</th><th>容量</th></tr></thead><tbody>{workers.map((item) => <tr key={item.worker_id}><td><code>{item.worker_id}</code></td><td>{item.host_id}</td><td><StatusBadge value={item.fresh ? item.availability : 'stale'} /></td><td>{fmtTime(item.last_seen_at)}</td><td>{item.runtime?.system ?? '-'} / {item.runtime?.machine ?? '-'}</td><td>{fmtNumber(item.capacity?.cpu_millis)}m CPU · {fmtBytes(item.capacity?.memory_bytes)} · {fmtNumber(item.capacity?.gpu_slots)} GPU</td></tr>)}</tbody></DataTable>
+        {!workers.length && <EmptyState>没有已认证 Worker 心跳</EmptyState>}
+      </Section>
+      <Section title="计算任务" description="排队、领取、资源预留、执行和回执均有独立记录">
+        <DataTable><thead><tr><th>更新时间</th><th>任务</th><th>类型</th><th>节点</th><th>代次</th><th>状态</th><th>结果</th></tr></thead><tbody>{jobs.slice(0, 5).map((item) => <tr key={item.job_id}><td>{fmtTime(item.updated_at)}</td><td><code>{item.job_id}</code></td><td><code>{item.kind}</code></td><td>{item.worker_id || '等待调度'}</td><td>{item.fence || '-'}</td><td><StatusBadge value={item.status} /></td><td className="cluster-result" title={JSON.stringify(item.result ?? {})}>{item.error_code || (item.result?.public_url ? <a href={item.result.public_url} target="_blank" rel="noreferrer">打开预览</a> : item.status === 'succeeded' ? '已验收' : '-')}</td></tr>)}</tbody></DataTable>
+        {!jobs.length && <EmptyState>还没有远程计算任务</EmptyState>}
+      </Section>
+      <Section title="临时预览" description="静态项目由专用 Worker 发布；过期只关闭访问入口，不删除唯一产物">
+        <DataTable><thead><tr><th>预览</th><th>节点</th><th>健康</th><th>到期时间</th><th>状态</th><th></th></tr></thead><tbody>{previews.slice(0, 5).map((item) => <tr key={item.preview_id}><td><code>{item.preview_id}</code></td><td>{item.worker_id || '等待调度'}</td><td><StatusBadge value={item.health_status} /></td><td>{fmtTime(item.expires_at)}</td><td><StatusBadge value={item.state} /></td><td>{item.public_url && item.state === 'active' ? <a href={item.public_url} target="_blank" rel="noreferrer">打开</a> : '-'}</td></tr>)}</tbody></DataTable>
+        {!previews.length && <EmptyState>还没有临时预览</EmptyState>}
       </Section>
       {selectedHostId && <Section title={`节点详情 · ${selectedHostId}`} description="主机事实和服务状态按需读取；日志不会自动加载">
         <div className="fleet-detail-toolbar">

@@ -13,6 +13,12 @@ SERVICE_INSPECT_TOOL_NAME = "service_inspect"
 MODEL_STATUS_TOOL_NAME = "model_status"
 SERVICE_LOGS_TOOL_NAME = "service_logs"
 DIAGNOSE_INCIDENT_TOOL_NAME = "diagnose_incident"
+OPERATION_PREPARE_TOOL_NAME = "operation_prepare"
+OPERATION_STATUS_TOOL_NAME = "operation_status"
+OPERATION_CANCEL_TOOL_NAME = "operation_cancel"
+CLUSTER_ARTIFACT_UPLOAD_TOOL_NAME = "cluster_artifact_upload"
+CLUSTER_JOB_SUBMIT_TOOL_NAME = "cluster_job_submit"
+CLUSTER_JOB_STATUS_TOOL_NAME = "cluster_job_status"
 READ_IMAGE_TEXT_TOOL_NAME = "read_image_text"
 VIEW_IMAGE_TOOL_NAME = "view_image"
 VIEW_VIDEO_TOOL_NAME = "view_video"
@@ -279,6 +285,112 @@ DIAGNOSE_INCIDENT_TOOL: ToolDefinition = {
             },
             "required": ["template", "host_id"],
             "additionalProperties": False,
+        },
+    },
+}
+
+OPERATION_PREPARE_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": OPERATION_PREPARE_TOOL_NAME,
+        "description": (
+            "准备一项受控服务器服务操作，只生成绑定当前真实用户的合同和审批状态。"
+            "仅支持已登记 systemd 服务的 start/stop/restart；未接入唯一写后端时会明确"
+            "返回 not_configured，不得改用 shell 或 SSH 兜底，也不能声称已经执行。"
+        ),
+        "parameters": {
+            "type": "object", "additionalProperties": False,
+            "properties": {
+                "host_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"},
+                "resource_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,119}\\.service$"},
+                "operation": {"type": "string", "enum": ["service.start", "service.stop", "service.restart"]},
+                "expected_state": {"type": "object"},
+                "verification": {"type": "object"},
+                "idempotency_key": {"type": "string", "minLength": 8, "maxLength": 160},
+            },
+            "required": ["host_id", "resource_ref", "operation", "expected_state", "verification", "idempotency_key"],
+        },
+    },
+}
+
+OPERATION_STATUS_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": OPERATION_STATUS_TOOL_NAME,
+        "description": "读取已准备远程操作的真实状态和追加式事件，不会触发新操作。",
+        "parameters": {
+            "type": "object", "additionalProperties": False,
+            "properties": {"operation_id": {"type": "string", "pattern": "^op_[a-f0-9]{32}$"}},
+            "required": ["operation_id"],
+        },
+    },
+}
+
+OPERATION_CANCEL_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": OPERATION_CANCEL_TOOL_NAME,
+        "description": "请求取消当前用户发起的远程操作；运行中的效果仍按后端能力对账。",
+        "parameters": {
+            "type": "object", "additionalProperties": False,
+            "properties": {"operation_id": {"type": "string", "pattern": "^op_[a-f0-9]{32}$"}},
+            "required": ["operation_id"],
+        },
+    },
+}
+
+CLUSTER_ARTIFACT_UPLOAD_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": CLUSTER_ARTIFACT_UPLOAD_TOOL_NAME,
+        "description": "把当前会话沙盒中不超过 25MiB 的已生成文件登记为集群产物，返回 artifact_ 句柄和 SHA-256。",
+        "parameters": {
+            "type": "object", "additionalProperties": False,
+            "properties": {
+                "sandbox_id": {"type": "string"},
+                "path": {"type": "string"},
+                "name": {"type": "string"},
+                "media_type": {"type": "string"},
+            },
+            "required": ["sandbox_id", "path", "name", "media_type"],
+        },
+    },
+}
+
+CLUSTER_JOB_SUBMIT_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": CLUSTER_JOB_SUBMIT_TOOL_NAME,
+        "description": (
+            "提交一个有资源预留、租约和回执的远程 Worker 任务。HTTP 探测只能传已配置"
+            " target_id；文件校验或静态预览必须先用 cluster_artifact_upload 获得 artifact_id。"
+        ),
+        "parameters": {
+            "type": "object", "additionalProperties": False,
+            "properties": {
+                "kind": {"type": "string", "enum": ["probe.http", "artifact.inspect", "document.verify", "media.inspect", "preview.static"]},
+                "target_id": {"type": "string"},
+                "artifact_id": {"type": "string", "pattern": "^artifact_[a-f0-9]{32}$"},
+                "ttl_seconds": {"type": "integer", "minimum": 300, "maximum": 604800},
+                "cpu_millis": {"type": "integer", "minimum": 50, "maximum": 8000},
+                "memory_bytes": {"type": "integer", "minimum": 16777216, "maximum": 8589934592},
+                "gpu_slots": {"type": "integer", "minimum": 0, "maximum": 8},
+                "idempotency_key": {"type": "string", "minLength": 8, "maxLength": 160},
+            },
+            "required": ["kind", "idempotency_key"],
+        },
+    },
+}
+
+CLUSTER_JOB_STATUS_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": CLUSTER_JOB_STATUS_TOOL_NAME,
+        "description": "查看远程 Worker 任务的节点、执行代次、状态、结果和事件。",
+        "parameters": {
+            "type": "object", "additionalProperties": False,
+            "properties": {"job_id": {"type": "string", "pattern": "^job_[a-f0-9]{32}$"}},
+            "required": ["job_id"],
         },
     },
 }
@@ -1563,7 +1675,10 @@ def available_tools(
         tools.append(QUERY_ALERTS_TOOL)
     if include_fleet_tools:
         tools.extend(
-            [FLEET_OVERVIEW_TOOL, HOST_INSPECT_TOOL, SERVICE_INSPECT_TOOL, MODEL_STATUS_TOOL, DIAGNOSE_INCIDENT_TOOL]
+            [FLEET_OVERVIEW_TOOL, HOST_INSPECT_TOOL, SERVICE_INSPECT_TOOL, MODEL_STATUS_TOOL,
+             DIAGNOSE_INCIDENT_TOOL, OPERATION_PREPARE_TOOL, OPERATION_STATUS_TOOL,
+             OPERATION_CANCEL_TOOL, CLUSTER_ARTIFACT_UPLOAD_TOOL, CLUSTER_JOB_SUBMIT_TOOL,
+             CLUSTER_JOB_STATUS_TOOL]
         )
         if include_fleet_logs:
             tools.append(SERVICE_LOGS_TOOL)

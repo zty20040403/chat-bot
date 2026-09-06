@@ -25,6 +25,8 @@ COMMON_READ_TOOLS = frozenset(
         "host_inspect",
         "service_inspect",
         "model_status",
+        "operation_status",
+        "cluster_job_status",
     }
 )
 SANDBOX_TOOLS = frozenset(
@@ -92,7 +94,9 @@ AGENT_SPECS: dict[SubAgentRole, AgentSpec] = {
             "所有代码和命令必须在任务沙盒中执行。完成前检查实际输出；需要交付时"
             "返回真实文件句柄，由宿主验收后发送，并报告执行结果和未解决问题。"
         ),
-        allowed_tools=COMMON_READ_TOOLS | BROWSER_TOOLS | SANDBOX_TOOLS | {"use_skill"},
+        allowed_tools=COMMON_READ_TOOLS | BROWSER_TOOLS | SANDBOX_TOOLS | {
+            "use_skill", "cluster_artifact_upload", "cluster_job_submit"
+        },
         model_policy="coding",
         max_turns=20,
         timeout_seconds=1200,
@@ -117,6 +121,7 @@ AGENT_SPECS: dict[SubAgentRole, AgentSpec] = {
             COMMON_READ_TOOLS
             | SANDBOX_TOOLS
             | {"read_image_text", "view_image", "use_skill"}
+            | {"cluster_artifact_upload", "cluster_job_submit"}
         ),
         model_policy="document",
         max_turns=20,
@@ -140,6 +145,7 @@ AGENT_SPECS: dict[SubAgentRole, AgentSpec] = {
             COMMON_READ_TOOLS
             | BROWSER_TOOLS
             | {"read_image_text", "view_image", "view_video", "transcribe_voice"}
+            | {"cluster_artifact_upload", "cluster_job_submit"}
         ),
         model_policy="vision",
         max_turns=16,
@@ -188,6 +194,9 @@ AGENT_SPECS: dict[SubAgentRole, AgentSpec] = {
                 "model_status",
                 "service_logs",
                 "diagnose_incident",
+                "operation_prepare",
+                "operation_cancel",
+                "cluster_job_submit",
                 "sandbox_list",
                 "job_status",
                 "group_members",

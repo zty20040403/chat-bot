@@ -125,6 +125,8 @@ _IDENTITY_COLUMNS = {
     "fleet_observations": "observation_id",
     "diagnostic_runs": "run_id",
     "diagnostic_evidence": "evidence_id",
+    "fleet_operation_events": "event_id",
+    "fleet_job_events": "event_id",
 }
 
 

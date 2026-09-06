@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import json
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlsplit
@@ -65,18 +69,47 @@ class FleetControlClient:
         method: str,
         path: str,
         payload: dict[str, Any] | None = None,
+        *,
+        actor: str = "",
+        origin: str = "",
     ) -> dict[str, Any]:
         try:
             request_kwargs: dict[str, Any] = {}
+            body = b""
             if payload is not None:
-                request_kwargs["json"] = payload
+                body = json.dumps(
+                    payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+                ).encode("utf-8")
+                request_kwargs["content"] = body
+            token = self._token()
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/json",
+            }
+            if payload is not None:
+                headers["Content-Type"] = "application/json"
+            if actor and origin:
+                timestamp = str(int(time.time()))
+                message = "\n".join(
+                    (
+                        method.upper(), path.split("?", 1)[0], actor, origin,
+                        timestamp, hashlib.sha256(body).hexdigest(),
+                    )
+                ).encode("utf-8")
+                headers.update(
+                    {
+                        "X-KC-Actor": actor,
+                        "X-KC-Origin": origin,
+                        "X-KC-Time": timestamp,
+                        "X-KC-Signature": hmac.new(
+                            token.encode("ascii"), message, hashlib.sha256
+                        ).hexdigest(),
+                    }
+                )
             async with self._client.stream(
                 method,
                 f"{self.base_url}{path}",
-                headers={
-                    "Authorization": f"Bearer {self._token()}",
-                    "Accept": "application/json",
-                },
+                headers=headers,
                 **request_kwargs,
             ) as response:
                 chunks: list[bytes] = []
@@ -147,6 +180,18 @@ class FleetControlClient:
     async def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         return await self._request("POST", path, payload)
 
+    async def _signed_post(
+        self, path: str, payload: dict[str, Any], *, actor: str, origin: str
+    ) -> dict[str, Any]:
+        return await self._request(
+            "POST", path, payload, actor=actor[:200], origin=origin[:240]
+        )
+
+    async def _signed_get(self, path: str, *, actor: str, origin: str) -> dict[str, Any]:
+        return await self._request(
+            "GET", path, actor=actor[:200], origin=origin[:240]
+        )
+
     async def fleet(self) -> dict[str, Any]:
         return await self._get("/v1/fleet")
 
@@ -211,4 +256,85 @@ class FleetControlClient:
                 "subject": subject[:1000],
                 "requested_by": requested_by[:200] or "kennethbot",
             },
+        )
+
+    async def execution_capabilities(self) -> dict[str, Any]:
+        return await self._get("/v1/execution/capabilities")
+
+    async def operations(self, *, limit: int = 50) -> dict[str, Any]:
+        return await self._get(f"/v1/operations?limit={min(max(limit, 1), 200)}")
+
+    async def operation(
+        self, operation_id: str, *, actor: str, origin: str
+    ) -> dict[str, Any]:
+        return await self._signed_get(
+            f"/v1/operations/{quote(operation_id, safe='')}", actor=actor, origin=origin
+        )
+
+    async def prepare_operation(
+        self, payload: dict[str, Any], *, actor: str, origin: str
+    ) -> dict[str, Any]:
+        return await self._signed_post(
+            "/v1/operations/prepare", payload, actor=actor, origin=origin
+        )
+
+    async def approve_operation(
+        self, operation_id: str, contract_hash: str, resource_version: int,
+        *, actor: str, origin: str,
+    ) -> dict[str, Any]:
+        return await self._signed_post(
+            f"/v1/operations/{quote(operation_id, safe='')}/approve",
+            {"contract_hash": contract_hash, "resource_version": resource_version},
+            actor=actor, origin=origin,
+        )
+
+    async def cancel_operation(
+        self, operation_id: str, *, actor: str, origin: str
+    ) -> dict[str, Any]:
+        return await self._signed_post(
+            f"/v1/operations/{quote(operation_id, safe='')}/cancel",
+            {}, actor=actor, origin=origin,
+        )
+
+    async def workers(self) -> dict[str, Any]:
+        return await self._get("/v1/workers")
+
+    async def jobs(self, *, limit: int = 50) -> dict[str, Any]:
+        return await self._get(f"/v1/jobs?limit={min(max(limit, 1), 200)}")
+
+    async def job(self, job_id: str, *, actor: str, origin: str) -> dict[str, Any]:
+        return await self._signed_get(
+            f"/v1/jobs/{quote(job_id, safe='')}", actor=actor, origin=origin
+        )
+
+    async def submit_job(
+        self, payload: dict[str, Any], *, actor: str, origin: str
+    ) -> dict[str, Any]:
+        return await self._signed_post("/v1/jobs", payload, actor=actor, origin=origin)
+
+    async def cancel_job(
+        self, job_id: str, *, actor: str, origin: str
+    ) -> dict[str, Any]:
+        return await self._signed_post(
+            f"/v1/jobs/{quote(job_id, safe='')}/cancel", {}, actor=actor, origin=origin
+        )
+
+    async def reservations(self) -> dict[str, Any]:
+        return await self._get("/v1/reservations")
+
+    async def previews(self, *, limit: int = 50) -> dict[str, Any]:
+        return await self._get(f"/v1/previews?limit={min(max(limit, 1), 200)}")
+
+    async def upload_artifact(
+        self, *, name: str, media_type: str, content: bytes,
+        actor: str, origin: str,
+    ) -> dict[str, Any]:
+        return await self._signed_post(
+            "/v1/artifacts",
+            {
+                "name": name,
+                "media_type": media_type,
+                "content_base64": base64.b64encode(content).decode("ascii"),
+            },
+            actor=actor, origin=origin,
         )

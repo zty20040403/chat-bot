@@ -85,6 +85,8 @@ _READ_TOOLS = {
     "browser_snapshot",
     "job_status",
     "nix_search",
+    "operation_status",
+    "cluster_job_status",
 }
 
 _SEND_TOOLS = {
@@ -214,6 +216,35 @@ def _policy_registry() -> dict[str, ToolPolicy]:
         idempotency="non-idempotent",
         side_effects=("read:fleet", "probe:fixed-target", "write:diagnostic-ledger"),
         timeout_seconds=180.0,
+        max_identical_calls=1,
+    )
+    policies["operation_prepare"] = ToolPolicy(
+        risk="high",
+        idempotency="keyed",
+        side_effects=("write:operation-ledger",),
+        timeout_seconds=30.0,
+        max_identical_calls=1,
+    )
+    policies["operation_cancel"] = ToolPolicy(
+        risk="high",
+        idempotency="idempotent",
+        side_effects=("write:operation-ledger", "cancel:operation"),
+        timeout_seconds=30.0,
+        approval="explicit",
+        max_identical_calls=1,
+    )
+    policies["cluster_artifact_upload"] = ToolPolicy(
+        risk="medium",
+        idempotency="non-idempotent",
+        side_effects=("read:sandbox", "write:artifact-store"),
+        timeout_seconds=120.0,
+        max_identical_calls=1,
+    )
+    policies["cluster_job_submit"] = ToolPolicy(
+        risk="high",
+        idempotency="keyed",
+        side_effects=("allocate:cluster-resource", "write:job-ledger"),
+        timeout_seconds=60.0,
         max_identical_calls=1,
     )
     policies["sandbox_create"] = ToolPolicy(

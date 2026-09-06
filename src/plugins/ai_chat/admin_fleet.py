@@ -24,6 +24,32 @@ class FleetDiagnosticRequest(BaseModel):
     subject: str = Field(default="", max_length=1000)
 
 
+class FleetOperationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    host_id: str
+    resource_ref: str
+    operation: str
+    arguments: dict[str, object] = Field(default_factory=dict)
+    expected_state: dict[str, object] = Field(default_factory=dict)
+    verification: dict[str, object] = Field(default_factory=dict)
+    compensation: dict[str, object] = Field(default_factory=dict)
+    idempotency_key: str
+
+
+class FleetApprovalRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    contract_hash: str = Field(pattern="^[a-f0-9]{64}$")
+    resource_version: int = Field(ge=1)
+
+
+class FleetJobRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    kind: str
+    payload: dict[str, object] = Field(default_factory=dict)
+    constraints: dict[str, object] = Field(default_factory=dict)
+    idempotency_key: str
+
+
 def _validate(value: str, pattern: re.Pattern[str], kind: str) -> str:
     if pattern.fullmatch(value) is None:
         raise HTTPException(status_code=422, detail=f"invalid {kind}")
@@ -59,6 +85,23 @@ async def _safe_call(
     return name, payload
 
 
+def _optional_call(
+    client: Any,
+    method_name: str,
+    fallback: dict[str, Any],
+    **kwargs: Any,
+) -> Callable[[], Awaitable[dict[str, Any]]]:
+    """Keep the console usable while bot and control plane roll independently."""
+
+    async def invoke() -> dict[str, Any]:
+        method = getattr(client, method_name, None)
+        if not callable(method):
+            return fallback
+        return await method(**kwargs)
+
+    return invoke
+
+
 def register_fleet_admin_routes(
     router: APIRouter,
     services: Any,
@@ -82,15 +125,27 @@ def register_fleet_admin_routes(
                     "observations": {"items": []},
                     "diagnostic_templates": {"items": []},
                     "diagnostics": {"items": []},
+                    "execution_capabilities": {},
+                    "operations": {"items": []},
+                    "workers": {"items": []},
+                    "jobs": {"items": []},
+                    "reservations": {"items": []},
+                    "previews": {"items": []},
                 },
             )
         results = await asyncio.gather(
-            _safe_call("fleet", client.fleet),
-            _safe_call("backends", client.backends),
-            _safe_call("capabilities", client.capabilities),
-            _safe_call("observations", lambda: client.observations(limit=50)),
-            _safe_call("diagnostic_templates", client.diagnostic_templates),
-            _safe_call("diagnostics", lambda: client.diagnostics(limit=30)),
+            _safe_call("fleet", _optional_call(client, "fleet", {"status": "unavailable", "inventory": []})),
+            _safe_call("backends", _optional_call(client, "backends", {"items": []})),
+            _safe_call("capabilities", _optional_call(client, "capabilities", {"capabilities": []})),
+            _safe_call("observations", _optional_call(client, "observations", {"items": []}, limit=50)),
+            _safe_call("diagnostic_templates", _optional_call(client, "diagnostic_templates", {"items": []})),
+            _safe_call("diagnostics", _optional_call(client, "diagnostics", {"items": []}, limit=30)),
+            _safe_call("execution_capabilities", _optional_call(client, "execution_capabilities", {})),
+            _safe_call("operations", _optional_call(client, "operations", {"items": []}, limit=50)),
+            _safe_call("workers", _optional_call(client, "workers", {"items": []})),
+            _safe_call("jobs", _optional_call(client, "jobs", {"items": []}, limit=50)),
+            _safe_call("reservations", _optional_call(client, "reservations", {"items": []})),
+            _safe_call("previews", _optional_call(client, "previews", {"items": []}, limit=50)),
         )
         return versioned("fleet", {"configured": True, **dict(results)})
 
@@ -176,6 +231,73 @@ def register_fleet_admin_routes(
                 target_id=request.target_id,
                 subject=request.subject,
                 requested_by=actor,
+            )
+        except FleetControlError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from None
+
+    @router.post("/api/fleet/operations")
+    async def prepare_fleet_operation(
+        request: FleetOperationRequest,
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
+        authorize(authorization)
+        try:
+            return await configured_client().prepare_operation(
+                request.model_dump(), actor="admin:kenneth", origin="admin-console"
+            )
+        except FleetControlError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from None
+
+    @router.post("/api/fleet/operations/{operation_id}/approve")
+    async def approve_fleet_operation(
+        operation_id: str,
+        request: FleetApprovalRequest,
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
+        authorize(authorization)
+        try:
+            return await configured_client().approve_operation(
+                operation_id, request.contract_hash, request.resource_version,
+                actor="admin:kenneth", origin="admin-console",
+            )
+        except FleetControlError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from None
+
+    @router.post("/api/fleet/operations/{operation_id}/cancel")
+    async def cancel_fleet_operation(
+        operation_id: str,
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
+        authorize(authorization)
+        try:
+            return await configured_client().cancel_operation(
+                operation_id, actor="admin:kenneth", origin="admin-console"
+            )
+        except FleetControlError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from None
+
+    @router.post("/api/fleet/jobs")
+    async def submit_fleet_job(
+        request: FleetJobRequest,
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
+        authorize(authorization)
+        try:
+            return await configured_client().submit_job(
+                request.model_dump(), actor="admin:kenneth", origin="admin-console"
+            )
+        except FleetControlError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from None
+
+    @router.post("/api/fleet/jobs/{job_id}/cancel")
+    async def cancel_fleet_job(
+        job_id: str,
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
+        authorize(authorization)
+        try:
+            return await configured_client().cancel_job(
+                job_id, actor="admin:kenneth", origin="admin-console"
             )
         except FleetControlError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from None

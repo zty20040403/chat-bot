@@ -8,6 +8,7 @@
   defaultPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
   inventoryHostIds = map (host: host.host_id) cfg.inventory;
   diagnosticTargetIds = map (target: target.target_id) cfg.diagnostics.targets;
+  workerIds = map (worker: worker.workerId) cfg.workers;
   inventoryHostType = lib.types.submodule {
     options = {
       host_id = lib.mkOption {
@@ -64,6 +65,11 @@
         default = [];
         description = "Exact systemd services Kennethbot may query on this host.";
       };
+      operable_units = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [];
+        description = "Exact service allowlist for a separately approved P3 write backend.";
+      };
     };
   };
   diagnosticTargetType = lib.types.submodule {
@@ -92,9 +98,16 @@
       };
     };
   };
+  workerIdentityType = lib.types.submodule {
+    options = {
+      workerId = lib.mkOption {type = lib.types.str;};
+      hostId = lib.mkOption {type = lib.types.str;};
+      tokenFile = lib.mkOption {type = lib.types.str;};
+    };
+  };
 in {
   options.services.kennethbot-cluster-control = {
-    enable = lib.mkEnableOption "Kennethbot's read-only cluster control service";
+    enable = lib.mkEnableOption "Kennethbot's authenticated cluster control service";
 
     package = lib.mkOption {
       type = lib.types.package;
@@ -182,6 +195,12 @@ in {
       description = "Fixed, trusted diagnostic endpoints. Arbitrary tool-call URLs are rejected.";
     };
 
+    workers = lib.mkOption {
+      type = lib.types.listOf workerIdentityType;
+      default = [];
+      description = "Worker identities bound to credentials and compute-enabled inventory hosts.";
+    };
+
     inventory = lib.mkOption {
       type = lib.types.listOf inventoryHostType;
       default = [];
@@ -227,6 +246,28 @@ in {
         message = "Kennethbot cluster inventory contains an invalid readable systemd unit";
       }
       {
+        assertion = lib.all (host: lib.all (unit: builtins.elem unit host.readable_units) host.operable_units) cfg.inventory;
+        message = "Kennethbot operable units must also be readable units";
+      }
+      {
+        assertion = lib.all (worker: builtins.elem worker.hostId inventoryHostIds) cfg.workers;
+        message = "Every Kennethbot worker host must exist in inventory";
+      }
+      {
+        assertion = builtins.length workerIds == builtins.length (lib.unique workerIds);
+        message = "Kennethbot worker identities must be unique";
+      }
+      {
+        assertion = lib.all (worker: builtins.match "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$" worker.workerId != null) cfg.workers;
+        message = "Kennethbot worker identity is invalid";
+      }
+      {
+        assertion = lib.all (worker:
+          lib.any (host: host.host_id == worker.hostId && host.compute) cfg.inventory
+        ) cfg.workers;
+        message = "Every Kennethbot worker host must be compute-enabled in inventory";
+      }
+      {
         assertion = builtins.length diagnosticTargetIds == builtins.length (lib.unique diagnosticTargetIds);
         message = "Kennethbot diagnostics contains duplicate target_id values";
       }
@@ -243,7 +284,7 @@ in {
     networking.firewall.allowedTCPPorts = lib.optionals cfg.openFirewall [cfg.port];
 
     systemd.services.kennethbot-cluster-control = {
-      description = "Kennethbot read-only cluster control service";
+      description = "Kennethbot authenticated cluster control service";
       wantedBy = ["multi-user.target"];
       wants = ["network-online.target"];
       after = ["network-online.target"];
@@ -259,6 +300,12 @@ in {
         KC_CACHE_SECONDS = toString cfg.cacheSeconds;
         KC_INVENTORY_JSON = builtins.toJSON cfg.inventory;
         KC_DIAGNOSTIC_TARGETS_JSON = builtins.toJSON cfg.diagnostics.targets;
+        KC_WORKER_IDENTITIES_JSON = builtins.toJSON (map (worker: {
+          worker_id = worker.workerId;
+          host_id = worker.hostId;
+          token_file = "%d/worker-${worker.workerId}";
+        }) cfg.workers);
+        KC_ARTIFACT_DIR = "/var/lib/kennethbot-cluster-control/artifacts";
         PYTHONUNBUFFERED = "1";
       } // cfg.environment;
       serviceConfig =
@@ -269,7 +316,8 @@ in {
           WorkingDirectory = "${cfg.package}/share/qq-deepseek-bot";
           LoadCredential =
             lib.optional (cfg.apiTokenFile != null) "api-token:${cfg.apiTokenFile}"
-            ++ lib.optional (cfg.maxops.enable && cfg.maxops.tokenFile != null) "maxops-token:${cfg.maxops.tokenFile}";
+            ++ lib.optional (cfg.maxops.enable && cfg.maxops.tokenFile != null) "maxops-token:${cfg.maxops.tokenFile}"
+            ++ map (worker: "worker-${worker.workerId}:${worker.tokenFile}") cfg.workers;
           # The bot starts after this service, so the control plane owns the
           # idempotent schema upgrade and avoids a startup dependency cycle.
           ExecStartPre = "${cfg.package}/bin/qq-deepseek-bot-db upgrade";

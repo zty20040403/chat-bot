@@ -56,6 +56,7 @@ def _inventory(raw: str) -> tuple[dict[str, object], ...]:
             raise ValueError(f"Duplicate inventory host_id: {host_id}")
         roles = item.get("roles", [])
         readable_units = item.get("readable_units", [])
+        operable_units = item.get("operable_units", [])
         for flag in ("observe", "operate", "compute"):
             if flag in item and not isinstance(item[flag], bool):
                 raise ValueError(f"Invalid {flag} flag for inventory host {host_id}")
@@ -69,6 +70,16 @@ def _inventory(raw: str) -> tuple[dict[str, object], ...]:
             for unit in readable_units
         ):
             raise ValueError(f"Invalid readable_units for inventory host {host_id}")
+        if not isinstance(operable_units, list) or not all(
+            isinstance(unit, str)
+            and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.@:-]{0,119}\.service", unit)
+            for unit in operable_units
+        ):
+            raise ValueError(f"Invalid operable_units for inventory host {host_id}")
+        if any(unit not in readable_units for unit in operable_units):
+            raise ValueError(
+                f"operable_units must be a subset of readable_units for {host_id}"
+            )
         seen.add(host_id)
         result.append(
             {
@@ -85,7 +96,38 @@ def _inventory(raw: str) -> tuple[dict[str, object], ...]:
                 "operate": bool(item.get("operate", False)),
                 "compute": bool(item.get("compute", False)),
                 "readable_units": list(dict.fromkeys(readable_units)),
+                "operable_units": list(dict.fromkeys(operable_units)),
             }
+        )
+    return tuple(result)
+
+
+def _worker_identities(raw: str) -> tuple[dict[str, str], ...]:
+    if not raw.strip():
+        return ()
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("KC_WORKER_IDENTITIES_JSON must be valid JSON") from exc
+    if not isinstance(value, list):
+        raise ValueError("KC_WORKER_IDENTITIES_JSON must be a JSON array")
+    result: list[dict[str, str]] = []
+    worker_ids: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError("Every worker identity must be an object")
+        worker_id = str(item.get("worker_id") or "").strip()
+        host_id = str(item.get("host_id") or "").strip()
+        token_file = str(item.get("token_file") or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", worker_id):
+            raise ValueError("Invalid worker_id")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", host_id):
+            raise ValueError("Invalid worker host_id")
+        if worker_id in worker_ids or not token_file:
+            raise ValueError("Duplicate worker_id or missing worker token file")
+        worker_ids.add(worker_id)
+        result.append(
+            {"worker_id": worker_id, "host_id": host_id, "token_file": token_file}
         )
     return tuple(result)
 
@@ -146,6 +188,8 @@ class ClusterControlSettings:
     cache_seconds: int
     inventory: tuple[dict[str, object], ...]
     diagnostic_targets: tuple[dict[str, str], ...]
+    worker_identities: tuple[dict[str, str], ...]
+    artifact_dir: str
     postgres_dsn: str
     postgres_schema: str
     postgres_pool_min_size: int
@@ -178,6 +222,12 @@ class ClusterControlSettings:
             diagnostic_targets=_diagnostic_targets(
                 os.getenv("KC_DIAGNOSTIC_TARGETS_JSON", "")
             ),
+            worker_identities=_worker_identities(
+                os.getenv("KC_WORKER_IDENTITIES_JSON", "")
+            ),
+            artifact_dir=os.getenv(
+                "KC_ARTIFACT_DIR", "/var/lib/kennethbot-cluster-control/artifacts"
+            ).strip(),
             postgres_dsn=os.getenv("AI_POSTGRES_DSN", "").strip(),
             postgres_schema=schema,
             postgres_pool_min_size=min_size,
@@ -203,3 +253,12 @@ class ClusterControlSettings:
             str(item.get("host_id") or "") for item in self.inventory
         }:
             raise ValueError("KC_LOCAL_HOST_ID must exist in KC_INVENTORY_JSON")
+        inventory = {str(item.get("host_id") or ""): item for item in self.inventory}
+        for worker in self.worker_identities:
+            host = inventory.get(worker["host_id"])
+            if host is None or not host.get("compute"):
+                raise ValueError(
+                    f"Worker {worker['worker_id']} requires a compute-enabled inventory host"
+                )
+        if not self.artifact_dir:
+            raise ValueError("KC_ARTIFACT_DIR is required")

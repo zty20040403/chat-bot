@@ -301,6 +301,7 @@ dd { margin: 0; font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
 .fleet-log-lines p { display: grid; grid-template-columns: 150px 36px minmax(0, 1fr); gap: 10px; margin: 0; padding: 7px 0; border-top: 1px solid var(--border); font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .fleet-log-lines p time, .fleet-log-lines p code { color: var(--muted); }
 .fleet-log-lines p span { min-width: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.cluster-result { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @media (max-width: 720px) { .fleet-log-lines p { grid-template-columns: 1fr; gap: 2px; } }
 .detail-toolbar { min-height: 48px; display: flex; align-items: center; gap: 12px; padding-bottom: 13px; border-bottom: 1px solid var(--border); }
 .back-button { min-height: 32px; display: inline-flex; align-items: center; gap: 7px; padding: 0 9px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: #52525b; font-size: 11px; }

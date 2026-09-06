@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uvicorn
+from pathlib import Path
 
 from src.bot_storage import PostgresDatabase
 from src.bot_storage.schema import HEAD_REVISION
@@ -11,6 +12,8 @@ from .diagnostics import DiagnosticStore, IncidentDiagnosticService
 from .adapters.maxops import MaxOpsClient
 from .service import FleetControlService
 from .storage import FleetProjectionStore
+from .execution_service import ClusterExecutionService, WorkerAuthenticator
+from .execution_storage import ClusterExecutionStore
 
 
 def main() -> None:
@@ -46,10 +49,25 @@ def main() -> None:
         settings.diagnostic_targets,
         local_host_id=settings.local_host_id,
     )
+    execution_store = ClusterExecutionStore(database, Path(settings.artifact_dir))
+    worker_hosts = {
+        item["worker_id"]: item["host_id"] for item in settings.worker_identities
+    }
+    execution = ClusterExecutionService(
+        execution_store,
+        inventory=settings.inventory,
+        diagnostic_targets=settings.diagnostic_targets,
+        worker_hosts=worker_hosts,
+    )
+    worker_authenticator = WorkerAuthenticator(
+        {item["worker_id"]: item["token_file"] for item in settings.worker_identities}
+    )
     app = create_app(
         service,
         api_token_file=settings.api_token_file,
         diagnostics=diagnostics,
+        execution=execution,
+        worker_authenticator=worker_authenticator,
     )
     uvicorn.run(app, host=settings.host, port=settings.port, log_level="info")
 
