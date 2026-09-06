@@ -49,6 +49,27 @@ def _grant() -> dict:
 
 
 class SchedulingPolicyTests(unittest.TestCase):
+    def test_resource_request_rejects_ambiguous_boolean_values(self) -> None:
+        with self.assertRaisesRegex(ValueError, "safe_rerun must be a boolean"):
+            ResourceRequest.parse({"safe_rerun": "false"})
+        with self.assertRaisesRegex(ValueError, "priority must be an integer"):
+            ResourceRequest.parse({"priority": True})
+        self.assertFalse(ResourceRequest.parse({"safe_rerun": False}).safe_rerun)
+
+    def test_missing_owner_policy_fails_closed(self) -> None:
+        self.assertEqual(
+            eligibility_reason(
+                ResourceRequest.parse({}),
+                worker=_worker(),
+                host={"gpu_compute": False},
+                policy=None,
+                grant=None,
+                job_kind="media.inspect",
+                now=200,
+            ),
+            "owner_policy_missing",
+        )
+
     def test_gpu_needs_host_and_owner_authorization(self) -> None:
         request = ResourceRequest.parse(
             {

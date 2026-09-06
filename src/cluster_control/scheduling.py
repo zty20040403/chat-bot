@@ -10,6 +10,8 @@ PRIORITIES = {"background": 20, "normal": 50, "interactive": 80}
 def bounded_int(
     value: Any, *, default: int, minimum: int, maximum: int, field: str
 ) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be an integer")
     try:
         parsed = int(value if value is not None else default)
     except (TypeError, ValueError) as exc:
@@ -17,6 +19,14 @@ def bounded_int(
     if not minimum <= parsed <= maximum:
         raise ValueError(f"{field} must be between {minimum} and {maximum}")
     return parsed
+
+
+def strict_bool(value: Any, *, default: bool, field: str) -> bool:
+    if value is None:
+        return default
+    if not isinstance(value, bool):
+        raise ValueError(f"{field} must be a boolean")
+    return value
 
 
 @dataclass(frozen=True)
@@ -85,9 +95,15 @@ class ResourceRequest:
             architecture=str(raw.get("architecture") or "").strip().lower(),
             system=str(raw.get("system") or "").strip().lower(),
             site=str(raw.get("site") or "").strip().lower(),
-            borrow_required=bool(raw.get("borrow_required", False)),
-            safe_rerun=bool(raw.get("safe_rerun", True)),
-            checkpointable=bool(raw.get("checkpointable", True)),
+            borrow_required=strict_bool(
+                raw.get("borrow_required"), default=False, field="borrow_required"
+            ),
+            safe_rerun=strict_bool(
+                raw.get("safe_rerun"), default=True, field="safe_rerun"
+            ),
+            checkpointable=strict_bool(
+                raw.get("checkpointable"), default=True, field="checkpointable"
+            ),
             checkpoint_format=checkpoint_format,
             executor_version=executor_version,
             expected_cost_microunits=expected_cost,
@@ -134,7 +150,9 @@ def eligibility_reason(
 ) -> str:
     if worker.get("availability") != "available":
         return "worker_not_available"
-    if policy is not None and policy.get("desired_availability") != "available":
+    if policy is None:
+        return "owner_policy_missing"
+    if policy.get("desired_availability") != "available":
         return f"owner_{policy.get('desired_availability')}"
     if request.worker_id and request.worker_id != worker.get("worker_id"):
         return "worker_constraint"

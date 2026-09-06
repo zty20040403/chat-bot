@@ -36,8 +36,18 @@ class ResourcePolicyStore:
                     max(int(capacity.get("memory_bytes") or 0), 0), now,
                 ),
             )
+            policy = cursor.execute(
+                "SELECT * FROM fleet_worker_policies WHERE worker_id = ? FOR UPDATE",
+                (worker_id,),
+            ).fetchone()
+            if policy is None:
+                raise RuntimeError("worker policy was not created")
+            if str(policy["owner_actor_id"]) != owner_actor_id:
+                raise PermissionError(
+                    "worker owner identity conflicts with the persisted policy"
+                )
             connection.commit()
-            return self.worker_policy(worker_id) or {}
+            return self._policy(policy)
         except Exception:
             connection.rollback()
             raise
@@ -316,6 +326,16 @@ class ResourcePolicyStore:
                 raise ValueError("borrow grant changed; refresh before editing")
             if status == "available" and int(row["valid_until"]) <= now:
                 raise ValueError("expired borrow grant cannot be reopened")
+            if status == "available":
+                policy = cursor.execute(
+                    "SELECT desired_availability FROM fleet_worker_policies "
+                    "WHERE worker_id = ? FOR UPDATE",
+                    (row["worker_id"],),
+                ).fetchone()
+                if policy is None or policy["desired_availability"] != "available":
+                    raise ValueError(
+                        "borrow grant cannot reopen while its worker is unavailable"
+                    )
             cursor.execute(
                 """UPDATE fleet_borrow_grants SET status = ?,
                    resource_version = resource_version + 1, updated_at = ?
