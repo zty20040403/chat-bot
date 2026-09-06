@@ -10,6 +10,7 @@ QUERY_ALERTS_TOOL_NAME = "query_alerts"
 FLEET_OVERVIEW_TOOL_NAME = "fleet_overview"
 HOST_INSPECT_TOOL_NAME = "host_inspect"
 SERVICE_LOGS_TOOL_NAME = "service_logs"
+DIAGNOSE_INCIDENT_TOOL_NAME = "diagnose_incident"
 READ_IMAGE_TEXT_TOOL_NAME = "read_image_text"
 VIEW_IMAGE_TOOL_NAME = "view_image"
 VIEW_VIDEO_TOOL_NAME = "view_video"
@@ -200,6 +201,53 @@ SERVICE_LOGS_TOOL: ToolDefinition = {
                 },
             },
             "required": ["host_id", "unit"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+DIAGNOSE_INCIDENT_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": DIAGNOSE_INCIDENT_TOOL_NAME,
+        "description": (
+            "运行一次受限、可审计的集群排障流程。它会组合 MaxOps、Bot Trace、"
+            "Outbox、数据库和预先配置的固定探测，最多两层、六项检查，并返回可在"
+            "控制台查看的 diagnostic# 与 evidence#。服务器或 Bot 出问题时优先调用，"
+            "不要靠聊天记录猜，也不要自行拼接内网 URL 或 shell 命令。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "template": {
+                    "type": "string",
+                    "enum": [
+                        "model_connectivity",
+                        "admin_502",
+                        "qq_no_reply",
+                        "reply_latency",
+                        "host_unreachable",
+                        "storage_pressure",
+                    ],
+                    "description": "与故障现象最接近的固定排障模板。",
+                },
+                "host_id": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+                    "description": "要检查的已登记主机，未明确时通常为 h610。",
+                },
+                "target_id": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9_-]{0,63}$",
+                    "description": "可选的固定探测目标标识，不是 URL。",
+                },
+                "subject": {
+                    "type": "string",
+                    "maxLength": 1000,
+                    "description": "用户描述的具体现象，只作为审计说明，不作为命令。",
+                },
+            },
+            "required": ["template", "host_id"],
             "additionalProperties": False,
         },
     },
@@ -1448,7 +1496,9 @@ def available_tools(
     if include_alert_tools:
         tools.append(QUERY_ALERTS_TOOL)
     if include_fleet_tools:
-        tools.extend([FLEET_OVERVIEW_TOOL, HOST_INSPECT_TOOL])
+        tools.extend(
+            [FLEET_OVERVIEW_TOOL, HOST_INSPECT_TOOL, DIAGNOSE_INCIDENT_TOOL]
+        )
         if include_fleet_logs:
             tools.append(SERVICE_LOGS_TOOL)
     if include_image_ocr:

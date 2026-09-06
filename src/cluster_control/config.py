@@ -90,10 +90,54 @@ def _inventory(raw: str) -> tuple[dict[str, object], ...]:
     return tuple(result)
 
 
+def _diagnostic_targets(raw: str) -> tuple[dict[str, str], ...]:
+    if not raw.strip():
+        return ()
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("KC_DIAGNOSTIC_TARGETS_JSON must be valid JSON") from exc
+    if not isinstance(value, list):
+        raise ValueError("KC_DIAGNOSTIC_TARGETS_JSON must be a JSON array")
+    result: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError("Every diagnostic target must be an object")
+        target_id = str(item.get("target_id") or "").strip()
+        if not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", target_id):
+            raise ValueError(f"Invalid diagnostic target_id: {target_id!r}")
+        if target_id in seen:
+            raise ValueError(f"Duplicate diagnostic target_id: {target_id}")
+        kind = str(item.get("kind") or "http").strip().lower()
+        if kind not in {"model", "admin", "service"}:
+            raise ValueError(f"Invalid diagnostic target kind: {kind!r}")
+        url = _validate_url(str(item.get("url") or ""), "diagnostic target URL")
+        if not url:
+            raise ValueError(f"Diagnostic target {target_id!r} requires a URL")
+        observer_host = str(item.get("observer_host") or "h610").strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", observer_host):
+            raise ValueError(
+                f"Invalid diagnostic observer_host: {observer_host!r}"
+            )
+        seen.add(target_id)
+        result.append(
+            {
+                "target_id": target_id,
+                "label": str(item.get("label") or target_id).strip()[:80],
+                "kind": kind,
+                "url": url,
+                "observer_host": observer_host,
+            }
+        )
+    return tuple(result)
+
+
 @dataclass(frozen=True)
 class ClusterControlSettings:
     host: str
     port: int
+    local_host_id: str
     api_token_file: str
     maxops_enabled: bool
     maxops_base_url: str
@@ -101,6 +145,7 @@ class ClusterControlSettings:
     maxops_timeout_seconds: int
     cache_seconds: int
     inventory: tuple[dict[str, object], ...]
+    diagnostic_targets: tuple[dict[str, str], ...]
     postgres_dsn: str
     postgres_schema: str
     postgres_pool_min_size: int
@@ -114,9 +159,13 @@ class ClusterControlSettings:
             raise ValueError("AI_POSTGRES_SCHEMA is not a valid identifier")
         min_size = _int("AI_POSTGRES_POOL_MIN_SIZE", 1, 1, 20)
         max_size = _int("AI_POSTGRES_POOL_MAX_SIZE", 5, min_size, 100)
+        local_host_id = os.getenv("KC_LOCAL_HOST_ID", "h610").strip() or "h610"
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", local_host_id):
+            raise ValueError("KC_LOCAL_HOST_ID is not a valid host identifier")
         return cls(
             host=os.getenv("KC_HOST", "127.0.0.1").strip() or "127.0.0.1",
             port=_int("KC_PORT", 8091, 1, 65535),
+            local_host_id=local_host_id,
             api_token_file=os.getenv("KC_API_TOKEN_FILE", "").strip(),
             maxops_enabled=_bool("KC_MAXOPS_ENABLED", False),
             maxops_base_url=_validate_url(
@@ -126,6 +175,9 @@ class ClusterControlSettings:
             maxops_timeout_seconds=_int("KC_MAXOPS_TIMEOUT_SECONDS", 15, 1, 30),
             cache_seconds=_int("KC_CACHE_SECONDS", 20, 1, 300),
             inventory=_inventory(os.getenv("KC_INVENTORY_JSON", "")),
+            diagnostic_targets=_diagnostic_targets(
+                os.getenv("KC_DIAGNOSTIC_TARGETS_JSON", "")
+            ),
             postgres_dsn=os.getenv("AI_POSTGRES_DSN", "").strip(),
             postgres_schema=schema,
             postgres_pool_min_size=min_size,
@@ -147,3 +199,7 @@ class ClusterControlSettings:
                 "KC_MAXOPS_BASE_URL and KC_MAXOPS_TOKEN_FILE are required "
                 "when MaxOps is enabled"
             )
+        if self.inventory and self.local_host_id not in {
+            str(item.get("host_id") or "") for item in self.inventory
+        }:
+            raise ValueError("KC_LOCAL_HOST_ID must exist in KC_INVENTORY_JSON")

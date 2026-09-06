@@ -206,6 +206,13 @@ def _policy_registry() -> dict[str, ToolPolicy]:
         timeout_seconds=1900.0,
         max_identical_calls=1,
     )
+    policies["diagnose_incident"] = ToolPolicy(
+        risk="low",
+        idempotency="non-idempotent",
+        side_effects=("read:fleet", "probe:fixed-target", "write:diagnostic-ledger"),
+        timeout_seconds=180.0,
+        max_identical_calls=1,
+    )
     policies["sandbox_create"] = ToolPolicy(
         risk="medium",
         idempotency="non-idempotent",

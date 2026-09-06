@@ -240,6 +240,10 @@ class FleetControlService:
             if policy.get("observe", False) is True
         }
 
+    def inventory_policy(self, host_id: str) -> dict[str, object] | None:
+        policy = self._inventory_by_host.get(host_id)
+        return dict(policy) if policy is not None else None
+
     def _authorize_target(
         self,
         operation: str,

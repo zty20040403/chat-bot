@@ -6,12 +6,22 @@ from collections.abc import Awaitable, Callable
 from typing import Any, Optional
 
 from fastapi import APIRouter, Header, HTTPException, Query
+from pydantic import BaseModel, ConfigDict, Field
 
 from .fleet_client import FleetControlError
 
 
 _HOST_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 _UNIT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.@:-]{0,119}\.service")
+_TARGET_RE = re.compile(r"[a-z][a-z0-9_-]{0,63}")
+
+
+class FleetDiagnosticRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    template: str = Field(min_length=1, max_length=64)
+    host_id: str = Field(default="h610", min_length=1, max_length=64)
+    target_id: str = Field(default="", max_length=64)
+    subject: str = Field(default="", max_length=1000)
 
 
 def _validate(value: str, pattern: re.Pattern[str], kind: str) -> str:
@@ -70,6 +80,8 @@ def register_fleet_admin_routes(
                     "backends": {"items": []},
                     "capabilities": {"capabilities": []},
                     "observations": {"items": []},
+                    "diagnostic_templates": {"items": []},
+                    "diagnostics": {"items": []},
                 },
             )
         results = await asyncio.gather(
@@ -77,6 +89,8 @@ def register_fleet_admin_routes(
             _safe_call("backends", client.backends),
             _safe_call("capabilities", client.capabilities),
             _safe_call("observations", lambda: client.observations(limit=50)),
+            _safe_call("diagnostic_templates", client.diagnostic_templates),
+            _safe_call("diagnostics", lambda: client.diagnostics(limit=30)),
         )
         return versioned("fleet", {"configured": True, **dict(results)})
 
@@ -129,6 +143,39 @@ def register_fleet_admin_routes(
                 _validate(unit, _UNIT_RE, "unit"),
                 lines=lines,
                 since_seconds=since_seconds,
+            )
+        except FleetControlError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from None
+
+    @router.get("/api/fleet/diagnostics/{run_id}")
+    async def fleet_diagnostic_detail(
+        run_id: int,
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
+        authorize(authorization)
+        try:
+            return await configured_client().diagnostic(run_id)
+        except FleetControlError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from None
+
+    @router.post("/api/fleet/diagnostics")
+    async def run_fleet_diagnostic(
+        request: FleetDiagnosticRequest,
+        authorization: Optional[str] = Header(default=None),
+        admin_actor: Optional[str] = Header(default=None, alias="X-Admin-Actor"),
+    ) -> dict[str, object]:
+        authorize(authorization)
+        host_id = _validate(request.host_id, _HOST_RE, "host id")
+        if request.target_id and _TARGET_RE.fullmatch(request.target_id) is None:
+            raise HTTPException(status_code=422, detail="invalid target id")
+        actor = " ".join(str(admin_actor or "admin-console").split())[:160]
+        try:
+            return await configured_client().run_diagnostic(
+                template=request.template,
+                host_id=host_id,
+                target_id=request.target_id,
+                subject=request.subject,
+                requested_by=actor,
             )
         except FleetControlError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from None

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 import unittest
+from dataclasses import asdict
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -13,7 +14,11 @@ nonebot.init()
 
 from src.cluster_control.api import create_app
 from src.cluster_control.capabilities import capability_manifest
-from src.cluster_control.config import _inventory
+from src.cluster_control.config import _diagnostic_targets, _inventory
+from src.cluster_control.diagnostics import (
+    IncidentDiagnosticService,
+    _summarize_model_routes,
+)
 from src.cluster_control.adapters.maxops import (
     MaxOpsClient,
     MaxOpsError,
@@ -149,6 +154,69 @@ class FakeMaxOps:
 
     async def close(self) -> None:
         self.closed = True
+
+
+class HealthyMaxOps(FakeMaxOps):
+    async def execute(
+        self,
+        operation: str,
+        params: dict[str, object],
+    ) -> MaxOpsResponse:
+        if operation == "units.status":
+            self.execute_calls += 1
+            return MaxOpsResponse(
+                data={
+                    "host": params["host"],
+                    "unit": {
+                        "unit": params["unit"],
+                        "load_state": "loaded",
+                        "active_state": "active",
+                        "sub_state": "running",
+                    },
+                    "observed_at": 123,
+                },
+                elapsed_ms=1,
+            )
+        return await super().execute(operation, params)
+
+
+class FakeDiagnosticStore:
+    def __init__(self) -> None:
+        self.evidence: list[object] = []
+        self.finished: dict[str, object] = {}
+
+    def create_run(self, **_payload: object) -> int:
+        return 7
+
+    def add_evidence(self, _run_id: int, item: object) -> int:
+        self.evidence.append(item)
+        return len(self.evidence)
+
+    def finish_run(self, _run_id: int, **payload: object) -> None:
+        self.finished = payload
+
+    def get(self, _run_id: int) -> dict[str, object]:
+        return {
+            "run_id": 7,
+            "handle": "diagnostic#7",
+            "status": self.finished.get("status", "running"),
+            "confidence": self.finished.get("confidence", "unknown"),
+            "summary": self.finished.get("summary", ""),
+            "probe_count": self.finished.get("probe_count", 0),
+            "evidence": [
+                {**asdict(item), "evidence_id": index, "handle": f"evidence#{index}"}
+                for index, item in enumerate(self.evidence, 1)
+            ],
+        }
+
+    def recent(self, *, limit: int) -> list[dict[str, object]]:
+        return [self.get(7)][:limit]
+
+    def runtime_snapshot(self, kind: str) -> dict[str, object]:
+        return {"status": "passed", "facts": {"kind": kind}}
+
+    def database_snapshot(self) -> dict[str, object]:
+        return {"status": "passed", "facts": {"overall": "healthy"}}
 
 
 class MaxOpsClientTests(unittest.IsolatedAsyncioTestCase):
@@ -481,6 +549,178 @@ class FleetControlServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status.value, "stale")
         self.assertEqual(result.data, original.data)
         await restarted.close()
+
+
+class IncidentDiagnosticServiceTests(unittest.IsolatedAsyncioTestCase):
+    inventory = (
+        {
+            "host_id": "h610",
+            "observe": True,
+            "readable_units": [
+                "qq-deepseek-bot.service",
+                "docker-napcat.service",
+                "nginx.service",
+                "kennethbot-cluster-control.service",
+            ],
+        },
+    )
+
+    def test_model_route_summary_classifies_parameter_failures(self) -> None:
+        import zlib
+
+        payload = zlib.compress(
+            json.dumps(
+                {
+                    "model_routing": [
+                        {
+                            "fallback": True,
+                            "outcomes": [
+                                {
+                                    "status": "failed",
+                                    "reason_code": "invalid_request",
+                                },
+                                {
+                                    "status": "succeeded",
+                                    "reason_code": "direct",
+                                },
+                            ],
+                        }
+                    ]
+                }
+            ).encode("utf-8")
+        )
+        facts = _summarize_model_routes([{"payload": payload}])
+        self.assertEqual(facts["attempts"], 2)
+        self.assertEqual(facts["failed"], 1)
+        self.assertEqual(facts["fallbacks"], 1)
+        self.assertEqual(facts["parameter_incompatible"], 1)
+
+    async def test_qq_diagnostic_uses_bounded_independent_checks(self) -> None:
+        fleet = FleetControlService(HealthyMaxOps(), inventory=self.inventory)
+        store = FakeDiagnosticStore()
+        diagnostics = IncidentDiagnosticService(fleet, store)  # type: ignore[arg-type]
+        try:
+            result = await diagnostics.run(
+                template_key="qq_no_reply",
+                host_id="h610",
+                requested_by="test",
+            )
+            self.assertEqual(result["handle"], "diagnostic#7")
+            self.assertLessEqual(len(store.evidence), 6)
+            self.assertTrue(all(item.phase <= 2 for item in store.evidence))
+            self.assertEqual(store.finished["confidence"], "contradicted")
+        finally:
+            await diagnostics.close()
+            await fleet.close()
+
+    async def test_unconfigured_model_target_stays_unknown_and_adds_one_log_check(self) -> None:
+        fleet = FleetControlService(HealthyMaxOps(), inventory=self.inventory)
+        store = FakeDiagnosticStore()
+        diagnostics = IncidentDiagnosticService(fleet, store)  # type: ignore[arg-type]
+        try:
+            await diagnostics.run(
+                template_key="model_connectivity",
+                host_id="h610",
+            )
+            checks = [item.check_name for item in store.evidence]
+            self.assertIn("fixed_target", checks)
+            self.assertIn("service_log_signals", checks)
+            self.assertEqual(max(item.phase for item in store.evidence), 2)
+            self.assertEqual(store.finished["status"], "inconclusive")
+        finally:
+            await diagnostics.close()
+            await fleet.close()
+
+    async def test_fixed_probe_records_dns_and_http_without_accepting_a_url(self) -> None:
+        fleet = FleetControlService(HealthyMaxOps(), inventory=self.inventory)
+        store = FakeDiagnosticStore()
+        targets = _diagnostic_targets(
+            json.dumps(
+                [
+                    {
+                        "target_id": "qwen-local",
+                        "kind": "model",
+                        "url": "http://127.0.0.1:8000/v1/models",
+                        "observer_host": "h610",
+                    }
+                ]
+            )
+        )
+        diagnostics = IncidentDiagnosticService(
+            fleet,
+            store,  # type: ignore[arg-type]
+            targets,
+        )
+        await diagnostics._http.aclose()
+        diagnostics._http = httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda _request: httpx.Response(200, json={"data": [{"id": "qwen"}]})
+            )
+        )
+        try:
+            await diagnostics.run(
+                template_key="model_connectivity",
+                host_id="h610",
+                target_id="qwen-local",
+            )
+            by_check = {item.check_name: item for item in store.evidence}
+            self.assertEqual(by_check["dns_resolution"].status, "passed")
+            self.assertEqual(by_check["http_request"].facts["item_count"], 1)
+        finally:
+            await diagnostics.close()
+            await fleet.close()
+
+    async def test_diagnostic_rejects_hosts_outside_inventory(self) -> None:
+        fleet = FleetControlService(HealthyMaxOps(), inventory=self.inventory)
+        diagnostics = IncidentDiagnosticService(
+            fleet,
+            FakeDiagnosticStore(),  # type: ignore[arg-type]
+        )
+        try:
+            with self.assertRaises(PermissionError):
+                await diagnostics.run(
+                    template_key="host_unreachable",
+                    host_id="tank",
+                )
+        finally:
+            await diagnostics.close()
+            await fleet.close()
+
+    async def test_probe_does_not_claim_a_different_observer_host(self) -> None:
+        fleet = FleetControlService(HealthyMaxOps(), inventory=self.inventory)
+        store = FakeDiagnosticStore()
+        targets = _diagnostic_targets(
+            json.dumps(
+                [
+                    {
+                        "target_id": "remote-model",
+                        "kind": "model",
+                        "url": "http://127.0.0.1:8000/v1/models",
+                        "observer_host": "tank",
+                    }
+                ]
+            )
+        )
+        diagnostics = IncidentDiagnosticService(
+            fleet,
+            store,  # type: ignore[arg-type]
+            targets,
+            local_host_id="h610",
+        )
+        try:
+            await diagnostics.run(
+                template_key="model_connectivity",
+                host_id="h610",
+                target_id="remote-model",
+            )
+            fixed = next(
+                item for item in store.evidence if item.check_name == "fixed_target"
+            )
+            self.assertEqual(fixed.status, "unknown")
+            self.assertEqual(fixed.facts["actual_observer"], "h610")
+        finally:
+            await diagnostics.close()
+            await fleet.close()
 
 
 class ClusterControlApiTests(unittest.IsolatedAsyncioTestCase):

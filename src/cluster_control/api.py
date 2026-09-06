@@ -9,12 +9,24 @@ from typing import AsyncIterator
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from prometheus_client import make_asgi_app
+from pydantic import BaseModel, ConfigDict, Field
 
+from .diagnostics import IncidentDiagnosticService
 from .service import FleetControlService
 
 
 _HOST_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 _UNIT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.@:-]{0,119}\.service")
+_TARGET_RE = re.compile(r"[a-z][a-z0-9_-]{0,63}")
+
+
+class DiagnosticRunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    template: str = Field(min_length=1, max_length=64)
+    host_id: str = Field(default="h610", min_length=1, max_length=64)
+    target_id: str = Field(default="", max_length=64)
+    subject: str = Field(default="", max_length=1000)
+    requested_by: str = Field(default="kennethbot", min_length=1, max_length=200)
 
 
 def _read_api_token(path: Path) -> str:
@@ -36,12 +48,15 @@ def create_app(
     service: FleetControlService,
     *,
     api_token_file: str | Path,
+    diagnostics: IncidentDiagnosticService | None = None,
 ) -> FastAPI:
     token_path = Path(api_token_file)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         yield
+        if diagnostics is not None:
+            await diagnostics.close()
         await service.close()
 
     app = FastAPI(
@@ -121,5 +136,49 @@ def create_app(
     ) -> dict[str, object]:
         items = await asyncio.to_thread(service.recent_observations, limit=limit)
         return {"items": items}
+
+    @app.get("/v1/diagnostics/templates", dependencies=auth)
+    async def diagnostic_templates() -> dict[str, object]:
+        return {"items": diagnostics.templates() if diagnostics is not None else []}
+
+    @app.get("/v1/diagnostics", dependencies=auth)
+    async def diagnostic_runs(
+        limit: int = Query(default=30, ge=1, le=100),
+    ) -> dict[str, object]:
+        items = (
+            await asyncio.to_thread(diagnostics.recent, limit=limit)
+            if diagnostics is not None
+            else []
+        )
+        return {"items": items}
+
+    @app.get("/v1/diagnostics/{run_id}", dependencies=auth)
+    async def diagnostic_detail(run_id: int) -> dict[str, object]:
+        if diagnostics is None:
+            raise HTTPException(status_code=503, detail="Diagnostics unavailable")
+        result = await asyncio.to_thread(diagnostics.detail, run_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="Diagnostic run not found")
+        return result
+
+    @app.post("/v1/diagnostics", dependencies=auth)
+    async def run_diagnostic(request: DiagnosticRunRequest) -> dict[str, object]:
+        if diagnostics is None:
+            raise HTTPException(status_code=503, detail="Diagnostics unavailable")
+        host_id = valid_host(request.host_id)
+        if request.target_id and _TARGET_RE.fullmatch(request.target_id) is None:
+            raise HTTPException(status_code=422, detail="Invalid diagnostic target")
+        try:
+            return await diagnostics.run(
+                template_key=request.template,
+                host_id=host_id,
+                target_id=request.target_id,
+                subject=request.subject,
+                requested_by=request.requested_by,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from None
 
     return app

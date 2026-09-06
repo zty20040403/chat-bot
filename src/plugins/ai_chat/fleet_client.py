@@ -60,15 +60,24 @@ class FleetControlClient:
             )
         return token.decode("ascii")
 
-    async def _get(self, path: str) -> dict[str, Any]:
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         try:
+            request_kwargs: dict[str, Any] = {}
+            if payload is not None:
+                request_kwargs["json"] = payload
             async with self._client.stream(
-                "GET",
+                method,
                 f"{self.base_url}{path}",
                 headers={
                     "Authorization": f"Bearer {self._token()}",
                     "Accept": "application/json",
                 },
+                **request_kwargs,
             ) as response:
                 chunks: list[bytes] = []
                 size = 0
@@ -132,6 +141,12 @@ class FleetControlClient:
             )
         return payload
 
+    async def _get(self, path: str) -> dict[str, Any]:
+        return await self._request("GET", path)
+
+    async def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return await self._request("POST", path, payload)
+
     async def fleet(self) -> dict[str, Any]:
         return await self._get("/v1/fleet")
 
@@ -168,3 +183,32 @@ class FleetControlClient:
 
     async def alerts(self) -> dict[str, Any]:
         return await self._get("/v1/alerts")
+
+    async def diagnostic_templates(self) -> dict[str, Any]:
+        return await self._get("/v1/diagnostics/templates")
+
+    async def diagnostics(self, *, limit: int = 30) -> dict[str, Any]:
+        return await self._get(f"/v1/diagnostics?limit={min(max(limit, 1), 100)}")
+
+    async def diagnostic(self, run_id: int) -> dict[str, Any]:
+        return await self._get(f"/v1/diagnostics/{max(int(run_id), 1)}")
+
+    async def run_diagnostic(
+        self,
+        *,
+        template: str,
+        host_id: str,
+        target_id: str = "",
+        subject: str = "",
+        requested_by: str = "kennethbot",
+    ) -> dict[str, Any]:
+        return await self._post(
+            "/v1/diagnostics",
+            {
+                "template": template,
+                "host_id": host_id,
+                "target_id": target_id,
+                "subject": subject[:1000],
+                "requested_by": requested_by[:200] or "kennethbot",
+            },
+        )

@@ -558,6 +558,8 @@ export function FleetView({ plane }: { plane: Plane }) {
   const backend = rows(payload.backends?.items)[0] ?? {}
   const capabilities = rows(payload.capabilities?.capabilities)
   const observations = rows(payload.observations?.items)
+  const diagnosticTemplates = rows(payload.diagnostic_templates?.items)
+  const diagnosticRuns = rows(payload.diagnostics?.items)
   const observedHosts = rows(fleet.data?.hosts)
   const inventory = rows(fleet.inventory)
   const observedByHost = new Map(observedHosts.map((host) => [String(host.host), host]))
@@ -572,6 +574,12 @@ export function FleetView({ plane }: { plane: Plane }) {
   const [logDetail, setLogDetail] = useState<any>(null)
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailError, setDetailError] = useState('')
+  const [diagnosticTemplate, setDiagnosticTemplate] = useState('qq_no_reply')
+  const [diagnosticHost, setDiagnosticHost] = useState('h610')
+  const [diagnosticSubject, setDiagnosticSubject] = useState('')
+  const [diagnosticDetail, setDiagnosticDetail] = useState<any>(null)
+  const [diagnosticLoading, setDiagnosticLoading] = useState(false)
+  const [diagnosticError, setDiagnosticError] = useState('')
   const selectedHost = knownHosts.find((host) => String(host.host ?? host.host_id) === selectedHostId)
   const loadHost = async (hostId: string) => {
     setSelectedHostId(hostId)
@@ -605,6 +613,34 @@ export function FleetView({ plane }: { plane: Plane }) {
   }
   const availableCapabilities = capabilities.filter((item) => item.available)
   const status = payload.configured ? fleet.status ?? backend.state ?? 'unknown' : 'unconfigured'
+  const runDiagnostic = async () => {
+    if (!diagnosticTemplate || !diagnosticHost) return
+    setDiagnosticLoading(true)
+    try {
+      const result = await plane.mutate('fleet', '/fleet/diagnostics', 'POST', {
+        template: diagnosticTemplate,
+        host_id: diagnosticHost,
+        subject: diagnosticSubject,
+      }, ['fleet'])
+      setDiagnosticDetail(result)
+      setDiagnosticError('')
+    } catch (reason) {
+      setDiagnosticError(reason instanceof Error ? reason.message : '排障任务执行失败')
+    } finally {
+      setDiagnosticLoading(false)
+    }
+  }
+  const loadDiagnostic = async (runId: number) => {
+    setDiagnosticLoading(true)
+    try {
+      setDiagnosticDetail(await plane.query(`/fleet/diagnostics/${runId}`))
+      setDiagnosticError('')
+    } catch (reason) {
+      setDiagnosticError(reason instanceof Error ? reason.message : '排障证据读取失败')
+    } finally {
+      setDiagnosticLoading(false)
+    }
+  }
   return (
     <>
       <PageHeader title="服务器集群" description="MaxOps 只读观测、来源时间和 Kennethbot 可用能力" action={<RefreshButton loading={plane.loading.has('fleet')} onClick={() => void plane.refresh('fleet')} />} />
@@ -614,6 +650,21 @@ export function FleetView({ plane }: { plane: Plane }) {
         <Metric label="可用能力" value={`${availableCapabilities.length}/${capabilities.length}`} hint="新能力不会自动授权" />
         <Metric label="最后成功" value={fmtTime(backend.last_success_at ?? fleet.observed_at)} hint={fleet.cached ? '当前结果来自缓存' : '当前结果来自上游'} />
       </div>
+      <Section title="实验式排障" description="固定目标、最多两层六项检查；证据不足时保持未知">
+        <div className="diagnostic-controls">
+          <label><span>故障类型</span><select value={diagnosticTemplate} onChange={(event) => setDiagnosticTemplate(event.target.value)}>{diagnosticTemplates.map((item) => <option key={item.key} value={item.key}>{item.title}</option>)}</select></label>
+          <label><span>目标节点</span><select value={diagnosticHost} onChange={(event) => setDiagnosticHost(event.target.value)}>{knownHosts.map((host) => { const hostId = String(host.host ?? host.host_id); return <option key={hostId} value={hostId}>{host.label || hostId}</option> })}</select></label>
+          <label className="diagnostic-subject"><span>现象说明</span><input value={diagnosticSubject} maxLength={1000} placeholder="例如：千问返回空内容" onChange={(event) => setDiagnosticSubject(event.target.value)} /></label>
+          <button className="command-button" type="button" disabled={diagnosticLoading || !diagnosticTemplates.length} onClick={() => void runDiagnostic()}><Play size={15} />开始排障</button>
+        </div>
+        {diagnosticError && <div className="inline-error">{diagnosticError}</div>}
+        <DataTable><thead><tr><th>时间</th><th>调查</th><th>模板</th><th>节点</th><th>结论</th><th>可信度</th><th></th></tr></thead><tbody>{diagnosticRuns.slice(0, 5).map((run) => <tr key={run.run_id}><td>{fmtTime(run.started_at)}</td><td><code>{run.handle}</code></td><td>{diagnosticTemplates.find((item) => item.key === run.template)?.title ?? run.template}</td><td>{run.host_id}</td><td className="diagnostic-summary">{run.summary || '正在检查'}</td><td><StatusBadge value={run.confidence} /></td><td className="actions"><button className="icon-button" type="button" title="查看结构化证据" aria-label={`查看 ${run.handle} 证据`} onClick={() => void loadDiagnostic(run.run_id)}><Eye size={15} /></button></td></tr>)}</tbody></DataTable>
+        {!diagnosticRuns.length && <EmptyState>还没有排障记录</EmptyState>}
+        {diagnosticDetail && <div className="diagnostic-detail">
+          <div className="diagnostic-detail-head"><div><strong>{diagnosticDetail.handle} · {diagnosticDetail.summary}</strong><small>{diagnosticDetail.probe_count} 项检查 · {fmtTime(diagnosticDetail.finished_at ?? diagnosticDetail.started_at)}</small></div><StatusBadge value={diagnosticDetail.confidence} /></div>
+          <DataTable><thead><tr><th>证据</th><th>层级</th><th>检查</th><th>目标</th><th>状态</th><th>观测时间</th><th>事实</th></tr></thead><tbody>{rows(diagnosticDetail.evidence).map((item) => <tr key={item.evidence_id}><td><code>{item.handle}</code></td><td>{item.phase}</td><td><code>{item.check_name}</code></td><td className="diagnostic-target">{item.target_ref}</td><td><StatusBadge value={item.status} /></td><td>{fmtTime(item.observed_at ?? item.received_at)}</td><td><code className="diagnostic-facts">{JSON.stringify(item.facts)}</code></td></tr>)}</tbody></DataTable>
+        </div>}
+      </Section>
       <Section title="节点状态" description="unknown 只表示证据不足，不等于机器关机">
         {knownHosts.length ? <DataTable><thead><tr><th>节点</th><th>角色</th><th>Agent</th><th>Exporter</th><th>失败服务</th><th>观测状态</th><th></th></tr></thead><tbody>{knownHosts.map((host) => { const hostId = String(host.host ?? host.host_id); return <tr key={hostId}><td><strong>{host.label || hostId}</strong><small className="cell-sub">{hostId} · {host.site ?? host.architecture ?? '-'}</small></td><td>{host.role ?? host.roles?.join?.('、') ?? '-'}</td><td><StatusBadge value={host.agent?.state ?? 'unknown'} /></td><td><StatusBadge value={host.exporter?.state ?? 'unknown'} /></td><td>{host.agent?.failed_units == null ? '-' : fmtNumber(host.agent.failed_units)}</td><td><StatusBadge value={fleetHostState(host)} /></td><td className="actions"><button className="icon-button" title={`查看 ${hostId} 详情`} aria-label={`查看 ${hostId} 详情`} onClick={() => void loadHost(hostId)}><Eye size={15} /></button></td></tr>})}</tbody></DataTable> : <EmptyState>暂无登记节点；控制服务离线时不会猜测机器状态</EmptyState>}
       </Section>

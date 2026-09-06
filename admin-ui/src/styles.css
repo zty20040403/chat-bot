@@ -274,6 +274,22 @@ dd { margin: 0; font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
 .alert-row svg { color: var(--amber); }
 .detail-page { display: grid; gap: 14px; }
 .fleet-detail-toolbar, .fleet-service-controls { display: flex; align-items: end; gap: 10px; flex-wrap: wrap; }
+.diagnostic-controls { display: grid; grid-template-columns: minmax(160px, .8fr) minmax(130px, .6fr) minmax(220px, 1.8fr) auto; align-items: end; gap: 10px; margin-bottom: 12px; }
+.diagnostic-controls label { min-width: 0; display: grid; gap: 5px; }
+.diagnostic-controls label span { color: var(--muted); font-size: 10px; }
+.diagnostic-controls select, .diagnostic-controls input { width: 100%; min-width: 0; }
+.command-button { min-height: 34px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 0 12px; border: 1px solid #18181b; border-radius: 6px; background: #18181b; color: #fff; font-size: 11px; font-weight: 650; white-space: nowrap; }
+.command-button:hover { background: #27272a; }
+.diagnostic-summary { min-width: 220px; max-width: 420px; white-space: normal; overflow-wrap: anywhere; }
+.diagnostic-detail { display: grid; gap: 10px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
+.diagnostic-detail-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.diagnostic-detail-head > div { min-width: 0; display: grid; gap: 4px; }
+.diagnostic-detail-head strong { overflow-wrap: anywhere; }
+.diagnostic-detail-head small { color: var(--muted); }
+.diagnostic-target { min-width: 150px; overflow-wrap: anywhere; }
+.diagnostic-facts { display: block; min-width: 240px; max-width: 520px; white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 900px) { .diagnostic-controls { grid-template-columns: 1fr 1fr; } .diagnostic-subject { grid-column: 1 / -1; } }
+@media (max-width: 560px) { .diagnostic-controls { grid-template-columns: 1fr; } .diagnostic-subject { grid-column: auto; } }
 .fleet-detail-toolbar { justify-content: space-between; align-items: center; }
 .fleet-detail-toolbar > span { display: grid; gap: 3px; }
 .fleet-detail-toolbar small { color: var(--muted); }

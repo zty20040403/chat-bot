@@ -7,6 +7,7 @@
   cfg = config.services.kennethbot-cluster-control;
   defaultPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
   inventoryHostIds = map (host: host.host_id) cfg.inventory;
+  diagnosticTargetIds = map (target: target.target_id) cfg.diagnostics.targets;
   inventoryHostType = lib.types.submodule {
     options = {
       host_id = lib.mkOption {
@@ -65,6 +66,32 @@
       };
     };
   };
+  diagnosticTargetType = lib.types.submodule {
+    options = {
+      target_id = lib.mkOption {
+        type = lib.types.str;
+        description = "Stable identifier exposed to diagnostic templates.";
+      };
+      label = lib.mkOption {
+        type = lib.types.str;
+        default = "";
+        description = "Human-readable target label.";
+      };
+      kind = lib.mkOption {
+        type = lib.types.enum ["model" "admin" "service"];
+        description = "Diagnostic target kind used by fixed templates.";
+      };
+      url = lib.mkOption {
+        type = lib.types.str;
+        description = "Exact approved HTTP(S) URL. Models and users cannot replace it.";
+      };
+      observer_host = lib.mkOption {
+        type = lib.types.str;
+        default = "h610";
+        description = "Inventory host whose network path performs the probe.";
+      };
+    };
+  };
 in {
   options.services.kennethbot-cluster-control = {
     enable = lib.mkEnableOption "Kennethbot's read-only cluster control service";
@@ -86,6 +113,13 @@ in {
       type = lib.types.port;
       default = 8091;
       description = "Port for the internal control API.";
+    };
+
+    localHostId = lib.mkOption {
+      type = lib.types.str;
+      default = config.networking.hostName;
+      defaultText = lib.literalExpression "config.networking.hostName";
+      description = "Inventory identity of the machine that actually executes local diagnostic probes.";
     };
 
     openFirewall = lib.mkOption {
@@ -135,6 +169,19 @@ in {
       description = "Maximum age of a non-sensitive read-only query projection.";
     };
 
+    diagnostics.targets = lib.mkOption {
+      type = lib.types.listOf diagnosticTargetType;
+      default = [];
+      example = [{
+        target_id = "qwen-local";
+        label = "Qwen local API";
+        kind = "model";
+        url = "http://b650.inner.example:8000/v1/models";
+        observer_host = "h610";
+      }];
+      description = "Fixed, trusted diagnostic endpoints. Arbitrary tool-call URLs are rejected.";
+    };
+
     inventory = lib.mkOption {
       type = lib.types.listOf inventoryHostType;
       default = [];
@@ -179,6 +226,18 @@ in {
         assertion = lib.all (host: lib.all (unit: builtins.match "^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,119}\\.service$" unit != null) host.readable_units) cfg.inventory;
         message = "Kennethbot cluster inventory contains an invalid readable systemd unit";
       }
+      {
+        assertion = builtins.length diagnosticTargetIds == builtins.length (lib.unique diagnosticTargetIds);
+        message = "Kennethbot diagnostics contains duplicate target_id values";
+      }
+      {
+        assertion = lib.all (target: builtins.elem target.observer_host inventoryHostIds) cfg.diagnostics.targets;
+        message = "Every diagnostic observer_host must exist in the cluster inventory";
+      }
+      {
+        assertion = builtins.elem cfg.localHostId inventoryHostIds;
+        message = "The cluster-control localHostId must exist in the cluster inventory";
+      }
     ];
 
     networking.firewall.allowedTCPPorts = lib.optionals cfg.openFirewall [cfg.port];
@@ -191,6 +250,7 @@ in {
       environment = {
         KC_HOST = cfg.listenAddress;
         KC_PORT = toString cfg.port;
+        KC_LOCAL_HOST_ID = cfg.localHostId;
         KC_API_TOKEN_FILE = "%d/api-token";
         KC_MAXOPS_ENABLED = if cfg.maxops.enable then "true" else "false";
         KC_MAXOPS_BASE_URL = cfg.maxops.baseUrl;
@@ -198,6 +258,7 @@ in {
         KC_MAXOPS_TIMEOUT_SECONDS = toString cfg.maxops.timeoutSeconds;
         KC_CACHE_SECONDS = toString cfg.cacheSeconds;
         KC_INVENTORY_JSON = builtins.toJSON cfg.inventory;
+        KC_DIAGNOSTIC_TARGETS_JSON = builtins.toJSON cfg.diagnostics.targets;
         PYTHONUNBUFFERED = "1";
       } // cfg.environment;
       serviceConfig =

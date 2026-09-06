@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.12.0-22c55e?style=for-the-badge">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.13.0-22c55e?style=for-the-badge">
   <img alt="Python" src="https://img.shields.io/badge/Python-3.12-3776ab?style=for-the-badge&amp;logo=python&amp;logoColor=white">
   <img alt="NoneBot2" src="https://img.shields.io/badge/NoneBot2-OneBot_V11-ea5252?style=for-the-badge">
   <img alt="PostgreSQL" src="https://img.shields.io/badge/PostgreSQL-Durable-4169e1?style=for-the-badge&amp;logo=postgresql&amp;logoColor=white">
@@ -52,6 +52,10 @@ Kennethbot 通过 NapCatQQ 接收 OneBot V11 事件，使用 NoneBot2 处理消�
   <tr>
     <td><strong>集群只读控制面</strong><br>独立服务查询获准节点、systemd 状态与有限日志，保留来源、时间、过期状态和审计投影。</td>
     <td><strong>双层权限边界</strong><br>会话、主机与服务先由 Kennethbot 收窄，再由运维后端复核；模型不能提交地址、凭据或任意命令。</td>
+  </tr>
+  <tr>
+    <td><strong>实验式排障</strong><br>六类固定流程组合 DNS、HTTP、服务、Trace、Outbox 与数据库证据，最多两层六项检查。</td>
+    <td><strong>可追溯结论</strong><br>每次调查生成 diagnostic# 与 evidence#；失败、异常迹象和证据不足分开表达，控制台可逐项查看。</td>
   </tr>
 </table>
 

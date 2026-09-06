@@ -7,6 +7,7 @@ from src.bot_storage.schema import HEAD_REVISION
 
 from .api import create_app
 from .config import ClusterControlSettings
+from .diagnostics import DiagnosticStore, IncidentDiagnosticService
 from .adapters.maxops import MaxOpsClient
 from .service import FleetControlService
 from .storage import FleetProjectionStore
@@ -39,7 +40,17 @@ def main() -> None:
         inventory=settings.inventory,
         cache_seconds=settings.cache_seconds,
     )
-    app = create_app(service, api_token_file=settings.api_token_file)
+    diagnostics = IncidentDiagnosticService(
+        service,
+        DiagnosticStore(database),
+        settings.diagnostic_targets,
+        local_host_id=settings.local_host_id,
+    )
+    app = create_app(
+        service,
+        api_token_file=settings.api_token_file,
+        diagnostics=diagnostics,
+    )
     uvicorn.run(app, host=settings.host, port=settings.port, log_level="info")
 
 

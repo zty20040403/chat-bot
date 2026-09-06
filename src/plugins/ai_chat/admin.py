@@ -233,6 +233,8 @@ _DATABASE_RESOURCE_MAP: dict[str, tuple[str, ...]] = {
     "message_sources": ("sources",),
     "alert_events": ("alerts", "observability"),
     "alert_notifications": ("alerts", "observability"),
+    "diagnostic_runs": ("fleet", "observability"),
+    "diagnostic_evidence": ("fleet", "observability"),
     "subagent_tasks": ("subagents", "tasks", "overview"),
     "subagent_runs": ("subagents", "tasks", "overview"),
     "subagent_events": ("subagents", "tasks", "overview"),
