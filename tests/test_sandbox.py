@@ -116,6 +116,16 @@ class DockerSandboxCancellationTests(unittest.IsolatedAsyncioTestCase):
                 for call in calls
             )
         )
+        workspace_setup = next(
+            call
+            for call in calls
+            if call[:2] == ("docker", "run")
+            and call[-1].endswith("chown 1000:1000 /workspace")
+        )
+        self.assertEqual(
+            workspace_setup[-1],
+            "chmod 700 /workspace && chown 1000:1000 /workspace",
+        )
 
     async def test_nix_cache_initialization_allows_slow_first_copy(self) -> None:
         manager = DockerSandboxManager(image="kennethbot-sandbox:latest")

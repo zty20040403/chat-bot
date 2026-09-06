@@ -580,7 +580,7 @@ class DockerSandboxManager:
             image,
             "sh",
             "-lc",
-            "chown 1000:1000 /workspace && chmod 700 /workspace",
+            "chmod 700 /workspace && chown 1000:1000 /workspace",
             timeout=120,
         )
         if result.returncode != 0:
