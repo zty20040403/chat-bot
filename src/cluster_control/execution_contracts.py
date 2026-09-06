@@ -5,11 +5,11 @@ import json
 import re
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import PurePosixPath
 from typing import Any, Mapping
 
-from .job_kinds import WORKER_JOB_KINDS
+from .job_kinds import WORKER_JOB_CATALOG, WORKER_JOB_KINDS
 from .scheduling import ResourceRequest
 
 
@@ -112,8 +112,14 @@ class WorkerJobProposal:
         if deadline_at <= timestamp or deadline_at > timestamp + 86_400:
             raise ValueError("deadline must be within the next day")
         payload = bounded_object(raw.get("payload", {}), field="payload", max_bytes=64_000)
-        constraints = ResourceRequest.parse(
+        request = ResourceRequest.parse(
             bounded_object(raw.get("constraints", {}), field="constraints")
+        )
+        kind_policy = WORKER_JOB_CATALOG[kind]
+        constraints = replace(
+            request,
+            safe_rerun=kind_policy.safe_rerun,
+            checkpointable=kind_policy.checkpointable,
         ).as_dict()
         if kind in {"artifact.inspect", "document.verify", "media.inspect", "preview.static"}:
             artifact_id = str(payload.get("artifact_id") or "")

@@ -113,16 +113,23 @@ class ClusterWorker:
             self._renew_loop(job_id, fence, done, cancel_requested)
         )
         try:
+            constraints = (
+                job.get("constraints")
+                if isinstance(job.get("constraints"), dict)
+                else {}
+            )
+            checkpointable = constraints.get("checkpointable") is True
             checkpoint = job.get("resume_checkpoint")
             resumed = isinstance(checkpoint, dict) and checkpoint.get("phase") == "completed"
-            if not resumed:
+            if checkpointable and not resumed:
                 await self._save_checkpoint(
                     job_id, fence, "started", {"kind": str(job.get("kind") or "")}
                 )
             result = await self._execute(job)
-            await self._save_checkpoint(
-                job_id, fence, "completed", {"result": result}
-            )
+            if checkpointable:
+                await self._save_checkpoint(
+                    job_id, fence, "completed", {"result": result}
+                )
             receipt = {
                 "fence": fence,
                 "ok": not cancel_requested.is_set(),

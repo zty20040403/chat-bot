@@ -1,6 +1,20 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 
-WORKER_JOB_KINDS = frozenset(
-    {"probe.http", "artifact.inspect", "document.verify", "media.inspect", "preview.static"}
-)
+
+@dataclass(frozen=True)
+class WorkerJobKind:
+    safe_rerun: bool
+    checkpointable: bool
+
+
+WORKER_JOB_CATALOG = {
+    "probe.http": WorkerJobKind(safe_rerun=True, checkpointable=True),
+    "artifact.inspect": WorkerJobKind(safe_rerun=True, checkpointable=True),
+    "document.verify": WorkerJobKind(safe_rerun=True, checkpointable=True),
+    "media.inspect": WorkerJobKind(safe_rerun=True, checkpointable=True),
+    "preview.static": WorkerJobKind(safe_rerun=False, checkpointable=False),
+}
+
+WORKER_JOB_KINDS = frozenset(WORKER_JOB_CATALOG)

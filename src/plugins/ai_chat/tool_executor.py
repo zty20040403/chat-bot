@@ -1674,8 +1674,6 @@ class ToolExecutor(HandlerService):
                                     "gpu_slots": int(arguments.get("gpu_slots") or 0),
                                     "priority": str(arguments.get("priority") or "normal"),
                                     "borrow_required": bool(arguments.get("borrow_required", False)),
-                                    "safe_rerun": bool(arguments.get("safe_rerun", True)),
-                                    "checkpointable": True,
                                     "checkpoint_format": "kennethbot-result-v1",
                                     "executor_version": "worker-v2",
                                     "expected_cost_microunits": int(arguments.get("expected_cost_microunits") or 0),

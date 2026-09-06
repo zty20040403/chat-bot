@@ -40,8 +40,8 @@ class ResourceRequest:
     system: str = ""
     site: str = ""
     borrow_required: bool = False
-    safe_rerun: bool = True
-    checkpointable: bool = True
+    safe_rerun: bool = False
+    checkpointable: bool = False
     checkpoint_format: str = "kennethbot-result-v1"
     executor_version: str = "worker-v2"
     expected_cost_microunits: int = 0
@@ -99,10 +99,10 @@ class ResourceRequest:
                 raw.get("borrow_required"), default=False, field="borrow_required"
             ),
             safe_rerun=strict_bool(
-                raw.get("safe_rerun"), default=True, field="safe_rerun"
+                raw.get("safe_rerun"), default=False, field="safe_rerun"
             ),
             checkpointable=strict_bool(
-                raw.get("checkpointable"), default=True, field="checkpointable"
+                raw.get("checkpointable"), default=False, field="checkpointable"
             ),
             checkpoint_format=checkpoint_format,
             executor_version=executor_version,

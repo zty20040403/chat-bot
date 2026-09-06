@@ -379,7 +379,6 @@ CLUSTER_JOB_SUBMIT_TOOL: ToolDefinition = {
                 "gpu_slots": {"type": "integer", "minimum": 0, "maximum": 8},
                 "priority": {"type": "string", "enum": ["background", "normal", "interactive"]},
                 "borrow_required": {"type": "boolean"},
-                "safe_rerun": {"type": "boolean"},
                 "expected_cost_microunits": {"type": "integer", "minimum": 0},
                 "max_cost_microunits": {"type": "integer", "minimum": 0},
                 "idempotency_key": {"type": "string", "minLength": 8, "maxLength": 160},

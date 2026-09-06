@@ -16,6 +16,7 @@ from src.cluster_control.guardian import (
     resolve_guardian_target,
     validate_guardian_action,
 )
+from src.cluster_control.execution_contracts import WorkerJobProposal
 from src.cluster_control.reliability import ReliabilityStore
 from src.cluster_control.scheduling import ResourceRequest, eligibility_reason
 from src.cluster_worker.service import ClusterWorker
@@ -55,6 +56,33 @@ class SchedulingPolicyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "priority must be an integer"):
             ResourceRequest.parse({"priority": True})
         self.assertFalse(ResourceRequest.parse({"safe_rerun": False}).safe_rerun)
+
+    def test_job_kind_catalog_controls_rerun_and_checkpoint_policy(self) -> None:
+        common = {
+            "payload": {"artifact_id": "artifact_" + "a" * 32},
+            "idempotency_key": "job-policy-test",
+            "constraints": {"safe_rerun": False, "checkpointable": False},
+        }
+        inspection = WorkerJobProposal.parse(
+            {**common, "kind": "artifact.inspect"}, now=100
+        )
+        self.assertTrue(inspection.constraints["safe_rerun"])
+        self.assertTrue(inspection.constraints["checkpointable"])
+
+        preview = WorkerJobProposal.parse(
+            {
+                **common,
+                "kind": "preview.static",
+                "payload": {
+                    "artifact_id": "artifact_" + "a" * 32,
+                    "ttl_seconds": 3600,
+                },
+                "constraints": {"safe_rerun": True, "checkpointable": True},
+            },
+            now=100,
+        )
+        self.assertFalse(preview.constraints["safe_rerun"])
+        self.assertFalse(preview.constraints["checkpointable"])
 
     def test_missing_owner_policy_fails_closed(self) -> None:
         self.assertEqual(
