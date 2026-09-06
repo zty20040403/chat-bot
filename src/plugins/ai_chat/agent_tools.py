@@ -236,6 +236,10 @@ class AgentToolExecutor:
         return f"{self._owner}:{step}" if step else self._owner
 
     @property
+    def base_owner(self) -> str:
+        return self._owner
+
+    @property
     def canonical_messages_enabled(self) -> bool:
         return self.ledger is not None and self.scope is not None
 
@@ -965,23 +969,100 @@ class AgentToolExecutor:
                 "embedded_font": embedded_font,
                 "extractable_text": bool(extracted_text),
             }
+        upload_started_at = int(time.time())
         response = await self.bot.call_api(
             "upload_group_file",
             group_id=self.event.group_id,
             file="base64://" + base64.b64encode(content).decode("ascii"),
             name=filename,
         )
-        uploaded = bool(response is not False)
-        if uploaded:
+        accepted = bool(response is not False)
+        receipt = (
+            await self.confirm_group_file(
+                filename, len(content), not_before=upload_started_at
+            )
+            if accepted
+            else {"ok": False, "reconciled": False}
+        )
+        delivered = bool(receipt.get("ok"))
+        if delivered:
             self._mark_artifact_delivered(sandbox_id, path)
             await self._schedule_delivered_task_cleanup(sandbox_id)
         return _json_result(
-            ok=uploaded,
+            ok=delivered,
             filename=filename,
             size=len(content),
-            uploaded=uploaded,
+            upload_started_at=upload_started_at,
+            uploaded=accepted,
+            state="acknowledged" if delivered else "unknown",
+            receipt=receipt,
+            error=(
+                "QQ 已受理上传，但群文件列表尚未确认；产物和沙盒已保留，可稍后核对或重试。"
+                if accepted and not delivered
+                else "QQ 拒绝了文件上传。" if not accepted else ""
+            ),
             pdf_validation=pdf_validation,
         )
+
+    async def confirm_group_file(
+        self,
+        filename: str,
+        size: int,
+        *,
+        attempts: int = 6,
+        not_before: int | None = None,
+    ) -> dict[str, object]:
+        """Confirm that QQ committed an uploaded file before cleanup begins."""
+        expected_uploader = str(
+            getattr(
+                self.bot,
+                "self_id",
+                self.scope.bot_native_user_id if self.scope is not None else "",
+            )
+        )
+        last_error = ""
+        for attempt in range(min(max(int(attempts), 1), 10)):
+            if attempt:
+                await asyncio.sleep(min(0.5 * (2 ** (attempt - 1)), 3.0))
+            try:
+                response = await self.bot.call_api(
+                    "get_group_root_files", group_id=self.event.group_id
+                )
+            except Exception as exc:
+                last_error = type(exc).__name__
+                continue
+            files = response.get("files", []) if isinstance(response, dict) else []
+            match = next(
+                (
+                    item
+                    for item in files
+                    if item.get("file_name") == filename
+                    and int(item.get("file_size", -1)) == int(size)
+                    and (
+                        not_before is None
+                        or item.get("upload_time") is None
+                        or int(item.get("upload_time") or 0) >= not_before - 5
+                    )
+                    and (
+                        not expected_uploader
+                        or str(item.get("uploader")) == expected_uploader
+                    )
+                ),
+                None,
+            )
+            if match is not None:
+                return {
+                    "ok": True,
+                    "reconciled": True,
+                    "file_id": match.get("file_id"),
+                    "attempts": attempt + 1,
+                }
+        return {
+            "ok": False,
+            "reconciled": False,
+            "attempts": min(max(int(attempts), 1), 10),
+            "error": last_error,
+        }
 
     @staticmethod
     def _workspace_artifact_path(path: str) -> str:

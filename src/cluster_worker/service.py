@@ -24,6 +24,7 @@ from .config import WorkerSettings
 CAPABILITIES = (
     "probe.http", "artifact.inspect", "document.verify", "media.inspect", "preview.static"
 )
+EXECUTOR_VERSION = "worker-v2"
 logger = logging.getLogger("kennethbot.cluster_worker")
 
 
@@ -112,7 +113,16 @@ class ClusterWorker:
             self._renew_loop(job_id, fence, done, cancel_requested)
         )
         try:
+            checkpoint = job.get("resume_checkpoint")
+            resumed = isinstance(checkpoint, dict) and checkpoint.get("phase") == "completed"
+            if not resumed:
+                await self._save_checkpoint(
+                    job_id, fence, "started", {"kind": str(job.get("kind") or "")}
+                )
             result = await self._execute(job)
+            await self._save_checkpoint(
+                job_id, fence, "completed", {"result": result}
+            )
             receipt = {
                 "fence": fence,
                 "ok": not cancel_requested.is_set(),
@@ -139,6 +149,17 @@ class ClusterWorker:
             )
         await asyncio.to_thread(self._save_receipt, job_id, receipt)
         await self._send_receipt(job_id, receipt)
+
+    async def _save_checkpoint(
+        self, job_id: str, fence: int, phase: str, state: dict[str, Any]
+    ) -> None:
+        try:
+            await self.client.checkpoint(
+                job_id, fence=fence, phase=phase,
+                executor_version=EXECUTOR_VERSION, state=state,
+            )
+        except Exception as exc:
+            logger.warning("Worker checkpoint for %s was not persisted: %s", job_id, exc)
 
     def _save_receipt(self, job_id: str, receipt: dict[str, Any]) -> None:
         target = self.receipts / f"{job_id}.json"
@@ -190,6 +211,26 @@ class ClusterWorker:
         return target, media_type
 
     async def _execute(self, job: dict[str, Any]) -> dict[str, Any]:
+        checkpoint = job.get("resume_checkpoint")
+        if isinstance(checkpoint, dict) and checkpoint.get("phase") == "completed":
+            constraints = job.get("constraints") if isinstance(job.get("constraints"), dict) else {}
+            if (
+                int(checkpoint.get("format_version") or 0) != 1
+                or checkpoint.get("executor_version") != EXECUTOR_VERSION
+                or constraints.get("executor_version", EXECUTOR_VERSION) != EXECUTOR_VERSION
+                or constraints.get("checkpoint_format", "kennethbot-result-v1")
+                != "kennethbot-result-v1"
+            ):
+                raise ValueError("saved checkpoint is incompatible with this worker")
+            state = checkpoint.get("state")
+            if not isinstance(state, dict) or not isinstance(state.get("result"), dict):
+                raise ValueError("saved checkpoint does not contain a completed result")
+            encoded = json.dumps(
+                state, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+            ).encode("utf-8")
+            if hashlib.sha256(encoded).hexdigest() != checkpoint.get("state_hash"):
+                raise ValueError("saved checkpoint checksum mismatch")
+            return dict(state["result"])
         kind = str(job["kind"])
         payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
         workspace = self.workspaces / f"{job['job_id']}-{job['fence']}"

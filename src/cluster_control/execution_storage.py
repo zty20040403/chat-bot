@@ -12,6 +12,7 @@ from typing import Any
 from src.bot_storage import PostgresDatabase
 
 from .execution_contracts import canonical_json, new_handle, safe_artifact_name
+from .scheduling import ResourceRequest, eligibility_reason
 
 
 def _decode(value: Any, fallback: Any) -> Any:
@@ -340,12 +341,13 @@ class ClusterExecutionStore:
             cursor.execute(
                 """INSERT INTO fleet_worker_jobs
                    (job_id, actor_id, origin_scope, kind, payload_json, constraints_json,
-                    idempotency_key, status, deadline_at, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)""",
+                    idempotency_key, status, priority, deadline_at, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)""",
                 (
                     record["job_id"], record["actor_id"], record["origin_scope"],
                     record["kind"], canonical_json(record["payload"]),
                     canonical_json(record["constraints"]), record["idempotency_key"],
+                    int(record["constraints"].get("priority", 50)),
                     record["deadline_at"], record["created_at"], record["created_at"],
                 ),
             )
@@ -362,7 +364,10 @@ class ClusterExecutionStore:
             cursor.close()
             connection.close()
 
-    def claim_job(self, worker_id: str, *, lease_seconds: int = 60) -> dict[str, Any] | None:
+    def claim_job(
+        self, worker_id: str, *, host: dict[str, Any] | None = None,
+        lease_seconds: int = 60,
+    ) -> dict[str, Any] | None:
         now = int(time.time())
         connection = self.database.store_connection()
         cursor = connection.cursor()
@@ -391,16 +396,40 @@ class ClusterExecutionStore:
                     payload={"retryable": False}, created_at=now,
                 )
             expired = cursor.execute(
-                """SELECT job_id, kind, worker_id, fence FROM fleet_worker_jobs
+                """SELECT job_id, kind, worker_id, fence, constraints_json,
+                          grant_id, reserved_cost_microunits
+                   FROM fleet_worker_jobs
                    WHERE status IN ('running','verifying') AND lease_expires_at <= ?
                    FOR UPDATE""",
                 (now,),
             ).fetchall()
             for stale in expired:
-                if stale["kind"] == "preview.static":
+                constraints = ResourceRequest.parse(
+                    _decode(stale["constraints_json"], {})
+                )
+                checkpoint = cursor.execute(
+                    """SELECT checkpoint_id, phase FROM fleet_job_checkpoints
+                       WHERE job_id = ? ORDER BY sequence DESC LIMIT 1""",
+                    (stale["job_id"],),
+                ).fetchone()
+                can_resume = bool(checkpoint and checkpoint["phase"] == "completed")
+                can_retry = constraints.safe_rerun or can_resume
+                if stale["grant_id"] and int(stale["reserved_cost_microunits"] or 0):
+                    cursor.execute(
+                        """UPDATE fleet_borrow_grants SET budget_reserved_microunits =
+                           GREATEST(budget_reserved_microunits - ?, 0),
+                           resource_version = resource_version + 1, updated_at = ?
+                           WHERE grant_id = ?""",
+                        (
+                            int(stale["reserved_cost_microunits"]), now,
+                            stale["grant_id"],
+                        ),
+                    )
+                if stale["kind"] == "preview.static" or not can_retry:
                     cursor.execute(
                         """UPDATE fleet_worker_jobs SET status = 'failed',
                            error_code = 'outcome_unknown', lease_expires_at = NULL,
+                           grant_id = NULL, reserved_cost_microunits = 0,
                            updated_at = ? WHERE job_id = ?""",
                         (now, stale["job_id"]),
                     )
@@ -413,8 +442,14 @@ class ClusterExecutionStore:
                 else:
                     cursor.execute(
                         """UPDATE fleet_worker_jobs SET status = 'queued', worker_id = NULL,
-                           lease_expires_at = NULL, updated_at = ? WHERE job_id = ?""",
-                        (now, stale["job_id"]),
+                           lease_expires_at = NULL, grant_id = NULL,
+                           reserved_cost_microunits = 0, resume_checkpoint_id = ?,
+                           scheduler_reason = 'lease_expired_retry', updated_at = ?
+                           WHERE job_id = ?""",
+                        (
+                            checkpoint["checkpoint_id"] if can_resume else None,
+                            now, stale["job_id"],
+                        ),
                     )
                     expired_status = "queued"
                 cursor.execute(
@@ -426,7 +461,7 @@ class ClusterExecutionStore:
                     cursor, "fleet_job_events", "job_id", stale["job_id"],
                     event_type="lease_expired", status=expired_status,
                     worker_id=str(stale["worker_id"] or ""), fence=int(stale["fence"]),
-                    payload={"retryable": stale["kind"] != "preview.static"}, created_at=now,
+                    payload={"retryable": can_retry, "checkpoint": can_resume}, created_at=now,
                 )
             worker = cursor.execute(
                 "SELECT * FROM fleet_workers WHERE worker_id = ? FOR UPDATE", (worker_id,)
@@ -434,21 +469,68 @@ class ClusterExecutionStore:
             if worker is None or worker["availability"] != "available" or now - int(worker["last_seen_at"]) > 45:
                 connection.commit()
                 return None
+            policy = cursor.execute(
+                "SELECT * FROM fleet_worker_policies WHERE worker_id = ? FOR UPDATE",
+                (worker_id,),
+            ).fetchone()
+            if policy is not None and policy["desired_availability"] != "available":
+                connection.commit()
+                return None
             capabilities = set(_decode(worker["capabilities_json"], []))
             rows = cursor.execute(
                 """SELECT * FROM fleet_worker_jobs
                    WHERE status = 'queued' AND deadline_at > ?
-                   ORDER BY created_at, job_id FOR UPDATE SKIP LOCKED LIMIT 20""",
+                   ORDER BY priority DESC, deadline_at, created_at, job_id
+                   FOR UPDATE SKIP LOCKED LIMIT 50""",
                 (now,),
             ).fetchall()
-            chosen = next((row for row in rows if row["kind"] in capabilities), None)
+            chosen = None
+            chosen_request: ResourceRequest | None = None
+            chosen_grant = None
+            host_policy = host or {"site": "", "gpu_compute": False}
+            for row in rows:
+                if row["kind"] not in capabilities:
+                    continue
+                request = ResourceRequest.parse(_decode(row["constraints_json"], {}))
+                grant = None
+                grant_rows = cursor.execute(
+                    """SELECT * FROM fleet_borrow_grants
+                       WHERE worker_id = ? AND status = 'available'
+                         AND valid_from <= ? AND valid_until > ?
+                         AND (grantee_actor_id = ? OR grantee_actor_id = '*')
+                         AND (origin_scope = ? OR origin_scope = '*')
+                       ORDER BY valid_until, created_at FOR UPDATE""",
+                    (worker_id, now, now, row["actor_id"], row["origin_scope"]),
+                ).fetchall()
+                for candidate in grant_rows:
+                    reason = eligibility_reason(
+                        request, worker=worker, host=host_policy, policy=policy,
+                        grant=candidate, job_kind=str(row["kind"]), now=now,
+                    )
+                    if not reason:
+                        grant = candidate
+                        break
+                reason = eligibility_reason(
+                    request, worker=worker, host=host_policy, policy=policy,
+                    grant=grant, job_kind=str(row["kind"]), now=now,
+                )
+                if reason:
+                    cursor.execute(
+                        "UPDATE fleet_worker_jobs SET scheduler_reason = ?, updated_at = ? WHERE job_id = ?",
+                        (reason, now, row["job_id"]),
+                    )
+                    continue
+                chosen = row
+                chosen_request = request
+                chosen_grant = grant
+                break
             if chosen is None:
                 connection.commit()
                 return None
-            constraints = _decode(chosen["constraints_json"], {})
-            cpu = min(max(int(constraints.get("cpu_millis", 500)), 50), 8000)
-            memory = min(max(int(constraints.get("memory_bytes", 268_435_456)), 16_777_216), 8 * 1024**3)
-            gpu = min(max(int(constraints.get("gpu_slots", 0)), 0), 8)
+            assert chosen_request is not None
+            cpu = chosen_request.cpu_millis
+            memory = chosen_request.memory_bytes
+            gpu = chosen_request.gpu_slots
             capacity = _decode(worker["capacity_json"], {})
             active = cursor.execute(
                 """SELECT COALESCE(SUM(cpu_millis),0), COALESCE(SUM(memory_bytes),0),
@@ -463,13 +545,31 @@ class ClusterExecutionStore:
             ):
                 connection.commit()
                 return None
+            if policy is not None and (
+                int(active[0]) + cpu > int(policy["cpu_limit_millis"])
+                or int(active[1]) + memory > int(policy["memory_limit_bytes"])
+                or int(active[2]) + gpu > int(policy["gpu_limit_slots"])
+            ):
+                connection.commit()
+                return None
             fence = int(chosen["fence"]) + 1
             lease_at = min(now + min(max(lease_seconds, 15), 300), int(chosen["deadline_at"]))
+            grant_id = str(chosen_grant["grant_id"]) if chosen_grant else None
+            expected_cost = chosen_request.expected_cost_microunits
+            if chosen_grant is not None and expected_cost:
+                cursor.execute(
+                    """UPDATE fleet_borrow_grants
+                       SET budget_reserved_microunits = budget_reserved_microunits + ?,
+                           resource_version = resource_version + 1, updated_at = ?
+                       WHERE grant_id = ?""",
+                    (expected_cost, now, grant_id),
+                )
             cursor.execute(
                 """UPDATE fleet_worker_jobs SET status = 'running', worker_id = ?,
-                   attempt = attempt + 1, fence = ?, lease_expires_at = ?, updated_at = ?
+                   attempt = attempt + 1, fence = ?, lease_expires_at = ?, grant_id = ?,
+                   reserved_cost_microunits = ?, scheduler_reason = 'scheduled', updated_at = ?
                    WHERE job_id = ?""",
-                (worker_id, fence, lease_at, now, chosen["job_id"]),
+                (worker_id, fence, lease_at, grant_id, expected_cost, now, chosen["job_id"]),
             )
             cursor.execute(
                 """INSERT INTO fleet_reservations
@@ -491,7 +591,9 @@ class ClusterExecutionStore:
             self._event(
                 cursor, "fleet_job_events", "job_id", chosen["job_id"],
                 event_type="claimed", status="running", worker_id=worker_id,
-                fence=fence, payload={"lease_expires_at": lease_at}, created_at=now,
+                fence=fence,
+                payload={"lease_expires_at": lease_at, "grant_id": grant_id},
+                created_at=now,
             )
             connection.commit()
             return self.get_job(chosen["job_id"])
@@ -510,7 +612,8 @@ class ClusterExecutionStore:
         cursor = connection.cursor()
         try:
             row = cursor.execute(
-                "SELECT status, worker_id, fence, deadline_at FROM fleet_worker_jobs WHERE job_id = ? FOR UPDATE",
+                """SELECT status, worker_id, fence, deadline_at, lease_expires_at
+                   FROM fleet_worker_jobs WHERE job_id = ? FOR UPDATE""",
                 (job_id,),
             ).fetchone()
             if row is None:
@@ -567,10 +670,30 @@ class ClusterExecutionStore:
             status = "cancelled" if cancelled else ("succeeded" if ok else "failed")
             stored_result = {"cancelled": True} if cancelled else result
             stored_error = "cancelled" if cancelled else error_code[:80]
+            reserved_cost = int(row["reserved_cost_microunits"] or 0)
+            try:
+                reported_cost = int(result.get("cost_microunits") or 0)
+            except (TypeError, ValueError):
+                reported_cost = 0
+            settled_cost = min(max(reported_cost, 0), reserved_cost)
+            if row["grant_id"]:
+                cursor.execute(
+                    """UPDATE fleet_borrow_grants SET
+                       budget_reserved_microunits = GREATEST(budget_reserved_microunits - ?, 0),
+                       budget_spent_microunits = budget_spent_microunits + ?,
+                       resource_version = resource_version + 1, updated_at = ?
+                       WHERE grant_id = ?""",
+                    (reserved_cost, settled_cost, now, row["grant_id"]),
+                )
             cursor.execute(
                 """UPDATE fleet_worker_jobs SET status = ?, result_json = ?, error_code = ?,
-                   lease_expires_at = NULL, updated_at = ? WHERE job_id = ?""",
-                (status, canonical_json(stored_result), stored_error, now, job_id),
+                   lease_expires_at = NULL, reserved_cost_microunits = 0,
+                   settled_cost_microunits = settled_cost_microunits + ?,
+                   updated_at = ? WHERE job_id = ?""",
+                (
+                    status, canonical_json(stored_result), stored_error,
+                    settled_cost, now, job_id,
+                ),
             )
             cursor.execute(
                 """UPDATE fleet_reservations SET status = 'released', released_at = ?
@@ -607,6 +730,20 @@ class ClusterExecutionStore:
             decoded = dict(event)
             decoded["payload"] = _decode(decoded.pop("payload_json", "{}"), {})
             item["events"].append(decoded)
+        checkpoint = cursor.execute(
+            """SELECT checkpoint_id, sequence, worker_id, fence, phase,
+                      format_version, executor_version, state_json, state_hash, created_at
+               FROM fleet_job_checkpoints WHERE job_id = ?
+               ORDER BY sequence DESC LIMIT 1""",
+            (item["job_id"],),
+        ).fetchone()
+        item["resume_checkpoint"] = None
+        if checkpoint is not None:
+            decoded_checkpoint = dict(checkpoint)
+            decoded_checkpoint["state"] = _decode(
+                decoded_checkpoint.pop("state_json", "{}"), {}
+            )
+            item["resume_checkpoint"] = decoded_checkpoint
         return item
 
     def get_job(self, job_id: str) -> dict[str, Any] | None:
@@ -654,9 +791,22 @@ class ClusterExecutionStore:
                 (status, now, job_id),
             )
             if status == "cancelled":
+                if row["grant_id"] and int(row["reserved_cost_microunits"] or 0):
+                    cursor.execute(
+                        """UPDATE fleet_borrow_grants SET budget_reserved_microunits =
+                           GREATEST(budget_reserved_microunits - ?, 0),
+                           resource_version = resource_version + 1, updated_at = ?
+                           WHERE grant_id = ?""",
+                        (int(row["reserved_cost_microunits"]), now, row["grant_id"]),
+                    )
                 cursor.execute(
                     "UPDATE fleet_reservations SET status = 'cancelled', released_at = ? WHERE job_id = ? AND status = 'active'",
                     (now, job_id),
+                )
+                cursor.execute(
+                    """UPDATE fleet_worker_jobs SET grant_id = NULL,
+                       reserved_cost_microunits = 0 WHERE job_id = ?""",
+                    (job_id,),
                 )
             if row["kind"] == "preview.static":
                 cursor.execute(
@@ -674,6 +824,117 @@ class ClusterExecutionStore:
         except Exception:
             connection.rollback()
             raise
+        finally:
+            cursor.close()
+            connection.close()
+
+    def save_checkpoint(
+        self, job_id: str, *, worker_id: str, fence: int, phase: str,
+        format_version: int, executor_version: str, state: dict[str, Any],
+    ) -> dict[str, Any]:
+        if phase not in {"started", "progress", "completed"}:
+            raise ValueError("invalid checkpoint phase")
+        encoded = canonical_json(state)
+        if len(encoded.encode("utf-8")) > 64_000:
+            raise ValueError("checkpoint state exceeds 64 KiB")
+        state_hash = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+        now = int(time.time())
+        connection = self.database.store_connection()
+        cursor = connection.cursor()
+        try:
+            row = cursor.execute(
+                """SELECT status, worker_id, fence, constraints_json
+                   FROM fleet_worker_jobs WHERE job_id = ? FOR UPDATE""",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                raise LookupError("job not found")
+            if (
+                row["status"] not in {"running", "verifying"}
+                or row["worker_id"] != worker_id
+                or int(row["fence"]) != int(fence)
+            ):
+                raise PermissionError("stale worker checkpoint")
+            request = ResourceRequest.parse(_decode(row["constraints_json"], {}))
+            if not request.checkpointable:
+                raise PermissionError("job does not permit checkpoints")
+            if format_version != 1 or executor_version != request.executor_version:
+                raise ValueError("checkpoint format or executor version is incompatible")
+            previous = cursor.execute(
+                """SELECT checkpoint_id, sequence, phase, state_hash
+                   FROM fleet_job_checkpoints WHERE job_id = ?
+                   ORDER BY sequence DESC LIMIT 1""",
+                (job_id,),
+            ).fetchone()
+            if previous and previous["phase"] == "completed":
+                if previous["state_hash"] != state_hash:
+                    raise ValueError("completed checkpoint is immutable")
+                connection.commit()
+                return self.checkpoint(str(previous["checkpoint_id"])) or {}
+            checkpoint_id = new_handle("checkpoint")
+            sequence = int(previous["sequence"]) + 1 if previous else 1
+            cursor.execute(
+                """INSERT INTO fleet_job_checkpoints
+                   (checkpoint_id, job_id, sequence, worker_id, fence, phase,
+                    format_version, executor_version, state_json, state_hash, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    checkpoint_id, job_id, sequence, worker_id, fence, phase,
+                    format_version, executor_version, encoded, state_hash, now,
+                ),
+            )
+            cursor.execute(
+                "UPDATE fleet_worker_jobs SET resume_checkpoint_id = ?, updated_at = ? WHERE job_id = ?",
+                (checkpoint_id, now, job_id),
+            )
+            self._event(
+                cursor, "fleet_job_events", "job_id", job_id,
+                event_type="checkpoint_saved", status=str(row["status"]),
+                worker_id=worker_id, fence=fence,
+                payload={"checkpoint_id": checkpoint_id, "phase": phase},
+                created_at=now,
+            )
+            connection.commit()
+            return self.checkpoint(checkpoint_id) or {}
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            cursor.close()
+            connection.close()
+
+    def checkpoint(self, checkpoint_id: str) -> dict[str, Any] | None:
+        connection = self.database.store_connection()
+        cursor = connection.cursor()
+        try:
+            row = cursor.execute(
+                "SELECT * FROM fleet_job_checkpoints WHERE checkpoint_id = ?",
+                (checkpoint_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            item = dict(row)
+            item["state"] = _decode(item.pop("state_json", "{}"), {})
+            return item
+        finally:
+            cursor.close()
+            connection.close()
+
+    def checkpoints(self, job_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
+        connection = self.database.store_connection()
+        cursor = connection.cursor()
+        try:
+            rows = cursor.execute(
+                """SELECT * FROM fleet_job_checkpoints WHERE job_id = ?
+                   ORDER BY sequence DESC LIMIT ?""",
+                (job_id, min(max(limit, 1), 200)),
+            ).fetchall()
+            items = []
+            for row in rows:
+                item = dict(row)
+                item["state"] = _decode(item.pop("state_json", "{}"), {})
+                items.append(item)
+            return items
         finally:
             cursor.close()
             connection.close()

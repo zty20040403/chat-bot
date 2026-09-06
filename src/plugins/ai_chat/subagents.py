@@ -1285,11 +1285,73 @@ class SubAgentCoordinator:
 
     async def _cleanup_finished_task(self, task_id, hooks):
         task = self.store.get(task_id)
-        if hooks and hooks.workspaces and task and task.status in {"completed", "partial", "failed", "cancelled"}:
-            try:
-                await hooks.workspaces.cleanup_task(task_id, self.store.runs(task_id))
-            except Exception as exc:
-                self.logger.warning("Task workspace cleanup failed for task#%s: %s", task_id, type(exc).__name__)
+        if not (
+            hooks
+            and hooks.workspaces
+            and task
+            and task.status in {"completed", "partial", "failed", "cancelled"}
+        ):
+            return
+        cleanup_ready, artifact_digests = self._artifact_cleanup_state(task)
+        if not cleanup_ready:
+            self.store.append_event(
+                task_id,
+                "task.workspace_retained",
+                {"reason": "artifact_delivery_not_acknowledged"},
+            )
+            return
+        try:
+            await hooks.workspaces.cleanup_task(
+                task_id,
+                self.store.runs(task_id),
+                artifact_digests=artifact_digests,
+            )
+        except Exception as exc:
+            self.logger.warning(
+                "Task workspace cleanup failed for task#%s: %s",
+                task_id,
+                type(exc).__name__,
+            )
+
+    def _artifact_cleanup_ready(self, task: TaskRecord) -> bool:
+        return self._artifact_cleanup_state(task)[0]
+
+    def _artifact_cleanup_state(
+        self,
+        task: TaskRecord,
+    ) -> tuple[bool, tuple[str, ...]]:
+        contract = task.plan.get("contract")
+        delivery_required = (
+            bool(contract.get("delivery_required"))
+            if isinstance(contract, Mapping)
+            else bool(_DELIVERY_REQUEST_PATTERN.search(task.objective))
+        )
+        if not delivery_required:
+            return (True, ())
+        expected: set[str] = set()
+        snapshots: set[str] = set()
+        for run in self.store.runs(task.task_id):
+            artifacts = run.result.get("artifacts")
+            if not isinstance(artifacts, list):
+                continue
+            for artifact in artifacts:
+                if not isinstance(artifact, Mapping):
+                    continue
+                key = str(artifact.get("snapshot") or artifact.get("handle") or "")
+                if key:
+                    expected.add(key)
+                snapshot = str(artifact.get("snapshot") or "")
+                if re.fullmatch(r"[a-f0-9]{64}", snapshot):
+                    snapshots.add(snapshot)
+        if not expected:
+            return (True, ())
+        acknowledged = {
+            str(delivery.get("key") or "")
+            for delivery in self.store.deliveries(task.task_id)
+            if delivery.get("state") == "acknowledged"
+        }
+        ready = expected.issubset(acknowledged)
+        return (ready, tuple(sorted(snapshots)) if ready else ())
 
     async def _supervisor_json(self, *args, profile, **kwargs):
         with model_scope_for_role("supervisor", profile, self.model_catalog, self.profile_overrides):

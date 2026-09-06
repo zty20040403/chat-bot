@@ -57,7 +57,7 @@ def _inventory(raw: str) -> tuple[dict[str, object], ...]:
         roles = item.get("roles", [])
         readable_units = item.get("readable_units", [])
         operable_units = item.get("operable_units", [])
-        for flag in ("observe", "operate", "compute"):
+        for flag in ("observe", "operate", "compute", "gpu_compute"):
             if flag in item and not isinstance(item[flag], bool):
                 raise ValueError(f"Invalid {flag} flag for inventory host {host_id}")
         if not isinstance(roles, list) or not all(
@@ -95,6 +95,7 @@ def _inventory(raw: str) -> tuple[dict[str, object], ...]:
                 "observe": bool(item.get("observe", False)),
                 "operate": bool(item.get("operate", False)),
                 "compute": bool(item.get("compute", False)),
+                "gpu_compute": bool(item.get("gpu_compute", False)),
                 "readable_units": list(dict.fromkeys(readable_units)),
                 "operable_units": list(dict.fromkeys(operable_units)),
             }
@@ -119,15 +120,26 @@ def _worker_identities(raw: str) -> tuple[dict[str, str], ...]:
         worker_id = str(item.get("worker_id") or "").strip()
         host_id = str(item.get("host_id") or "").strip()
         token_file = str(item.get("token_file") or "").strip()
+        owner_actor_id = str(item.get("owner_actor_id") or "admin:kenneth").strip()
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", worker_id):
             raise ValueError("Invalid worker_id")
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", host_id):
             raise ValueError("Invalid worker host_id")
-        if worker_id in worker_ids or not token_file:
+        if (
+            worker_id in worker_ids
+            or not token_file
+            or not owner_actor_id.startswith("admin:")
+            or len(owner_actor_id) > 200
+        ):
             raise ValueError("Duplicate worker_id or missing worker token file")
         worker_ids.add(worker_id)
         result.append(
-            {"worker_id": worker_id, "host_id": host_id, "token_file": token_file}
+            {
+                "worker_id": worker_id,
+                "host_id": host_id,
+                "token_file": token_file,
+                "owner_actor_id": owner_actor_id,
+            }
         )
     return tuple(result)
 

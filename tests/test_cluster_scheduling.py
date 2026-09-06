@@ -1,0 +1,336 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import unittest
+
+import httpx
+import nonebot
+
+nonebot.init()
+
+from src.cluster_control.reliability import GuardianService, ReliabilityStore
+from src.cluster_control.scheduling import ResourceRequest, eligibility_reason
+from src.cluster_worker.service import ClusterWorker
+from src.plugins.ai_chat.fleet_case_recall import semantic_runbook_scores
+from src.plugins.ai_chat.semantic_recall import SemanticHit
+
+
+def _worker() -> dict:
+    return {
+        "worker_id": "b650-worker",
+        "availability": "available",
+        "runtime_json": json.dumps({"system": "linux", "machine": "x86_64"}),
+    }
+
+
+def _grant() -> dict:
+    return {
+        "grant_id": "grant_" + "a" * 32,
+        "status": "available",
+        "valid_from": 100,
+        "valid_until": 1000,
+        "allowed_kinds_json": json.dumps(["media.inspect"]),
+        "max_priority": 80,
+        "cpu_limit_millis": 4000,
+        "memory_limit_bytes": 4 * 1024**3,
+        "gpu_limit_slots": 1,
+        "budget_limit_microunits": 1000,
+        "budget_reserved_microunits": 0,
+        "budget_spent_microunits": 0,
+    }
+
+
+class SchedulingPolicyTests(unittest.TestCase):
+    def test_gpu_needs_host_and_owner_authorization(self) -> None:
+        request = ResourceRequest.parse(
+            {
+                "gpu_slots": 1,
+                "borrow_required": True,
+                "expected_cost_microunits": 100,
+                "max_cost_microunits": 100,
+            }
+        )
+        policy = {
+            "desired_availability": "available",
+            "allow_gpu": True,
+        }
+        self.assertEqual(
+            eligibility_reason(
+                request, worker=_worker(), host={"site": "home", "gpu_compute": False},
+                policy=policy, grant=_grant(), job_kind="media.inspect", now=200,
+            ),
+            "gpu_not_authorized",
+        )
+        self.assertEqual(
+            eligibility_reason(
+                request, worker=_worker(), host={"site": "home", "gpu_compute": True},
+                policy=policy, grant=_grant(), job_kind="media.inspect", now=200,
+            ),
+            "",
+        )
+
+    def test_draining_owner_state_stops_new_claims(self) -> None:
+        self.assertEqual(
+            eligibility_reason(
+                ResourceRequest.parse({}), worker=_worker(),
+                host={"gpu_compute": False},
+                policy={"desired_availability": "draining"}, grant=None,
+                job_kind="probe.http", now=200,
+            ),
+            "owner_draining",
+        )
+
+    def test_cost_reservation_cannot_exceed_grant(self) -> None:
+        grant = _grant()
+        grant["budget_reserved_microunits"] = 950
+        request = ResourceRequest.parse(
+            {
+                "borrow_required": True,
+                "expected_cost_microunits": 100,
+                "max_cost_microunits": 100,
+            }
+        )
+        self.assertEqual(
+            eligibility_reason(
+                request, worker=_worker(), host={"gpu_compute": True},
+                policy={"desired_availability": "available"}, grant=grant,
+                job_kind="media.inspect", now=200,
+            ),
+            "cost_budget_exhausted",
+        )
+
+    def test_case_applicability_is_revalidated(self) -> None:
+        ok, reasons = ReliabilityStore.validate_applicability(
+            {"runtime.system_closure": "/nix/store/new"},
+            {"runtime": {"system_closure": "/nix/store/old"}},
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reasons, ["runtime.system_closure changed"])
+
+
+class _GuardianStore:
+    def __init__(self, guardian: dict) -> None:
+        self.items = [guardian]
+        self.finished: list[dict] = []
+        self.incidents: list[dict] = []
+
+    def claim_due_guardians(self, **_kwargs: object) -> list[dict]:
+        items, self.items = self.items, []
+        return items
+
+    def finish_guardian_check(self, _guardian_id: str, **kwargs: object) -> dict:
+        self.finished.append(dict(kwargs))
+        return {}
+
+    def observe_incident(self, **kwargs: object) -> dict:
+        self.incidents.append(dict(kwargs))
+        return {"incident_id": "incident_" + "b" * 32}
+
+
+class GuardianRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_healthy_check_does_not_request_model_or_action(self) -> None:
+        store = _GuardianStore(
+            {
+                "guardian_id": "guardian_" + "a" * 32,
+                "target_id": "admin",
+                "host_id": "h610",
+                "service_ref": "",
+                "mode": "observe",
+                "consecutive_failures": 0,
+                "failure_threshold": 3,
+                "actions_used": 0,
+                "max_actions": 0,
+                "authorized_action": {},
+                "actor_id": "admin:kenneth",
+                "origin_scope": "admin-console",
+            }
+        )
+        actions: list[dict] = []
+        service = GuardianService(
+            store,  # type: ignore[arg-type]
+            ({"target_id": "admin", "url": "http://admin.test/health"},),
+            operation_factory=lambda payload, _actor, _scope: actions.append(payload) or {},
+        )
+        await service._client.aclose()
+        service._client = httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda _request: httpx.Response(200)),
+            trust_env=False,
+        )
+        try:
+            self.assertEqual(await service.tick(), 1)
+        finally:
+            await service.close()
+        self.assertEqual(actions, [])
+        self.assertEqual(store.incidents, [])
+        self.assertEqual(store.finished[0]["outcome"], "passed")
+
+    async def test_action_limit_prevents_more_remediation(self) -> None:
+        store = _GuardianStore(
+            {
+                "guardian_id": "guardian_" + "c" * 32,
+                "target_id": "admin",
+                "host_id": "h610",
+                "service_ref": "nginx.service",
+                "mode": "remediate",
+                "consecutive_failures": 2,
+                "failure_threshold": 3,
+                "actions_used": 1,
+                "max_actions": 1,
+                "authorized_action": {"operation": "service.restart"},
+                "actor_id": "admin:kenneth",
+                "origin_scope": "admin-console",
+            }
+        )
+        actions: list[dict] = []
+        service = GuardianService(
+            store,  # type: ignore[arg-type]
+            ({"target_id": "admin", "url": "http://admin.test/health"},),
+            operation_factory=lambda payload, _actor, _scope: actions.append(payload) or {},
+        )
+        await service._client.aclose()
+        service._client = httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda _request: httpx.Response(503)),
+            trust_env=False,
+        )
+        try:
+            await service.tick()
+        finally:
+            await service.close()
+        self.assertEqual(actions, [])
+        self.assertEqual(len(store.incidents), 1)
+        self.assertFalse(store.finished[0]["action_used"])
+
+    async def test_waiting_approval_does_not_consume_action_budget(self) -> None:
+        store = _GuardianStore(
+            {
+                "guardian_id": "guardian_" + "d" * 32,
+                "target_id": "admin",
+                "host_id": "h610",
+                "service_ref": "nginx.service",
+                "mode": "remediate",
+                "consecutive_failures": 0,
+                "failure_threshold": 1,
+                "actions_used": 0,
+                "max_actions": 1,
+                "authorized_action": {"operation": "service.restart"},
+                "actor_id": "admin:kenneth",
+                "origin_scope": "admin-console",
+            }
+        )
+        service = GuardianService(
+            store,  # type: ignore[arg-type]
+            ({"target_id": "admin", "url": "http://admin.test/health"},),
+            operation_factory=lambda _payload, _actor, _scope: {
+                "operation_id": "op_" + "e" * 32,
+                "status": "awaiting_approval",
+                "executable": True,
+            },
+        )
+        await service._client.aclose()
+        service._client = httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda _request: httpx.Response(503)),
+            trust_env=False,
+        )
+        try:
+            await service.tick()
+        finally:
+            await service.close()
+        self.assertFalse(store.finished[0]["action_used"])
+        self.assertTrue(store.finished[0]["requires_attention"])
+
+
+class CheckpointResumeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_completed_checkpoint_is_returned_without_rerunning_job(self) -> None:
+        state = {"result": {"valid": True, "sha256": "abc"}}
+        encoded = json.dumps(
+            state, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+        ).encode("utf-8")
+        worker = object.__new__(ClusterWorker)
+        result = await worker._execute(
+            {
+                "job_id": "job_" + "a" * 32,
+                "fence": 2,
+                "kind": "document.verify",
+                "constraints": {
+                    "checkpoint_format": "kennethbot-result-v1",
+                    "executor_version": "worker-v2",
+                },
+                "resume_checkpoint": {
+                    "phase": "completed",
+                    "format_version": 1,
+                    "executor_version": "worker-v2",
+                    "state": state,
+                    "state_hash": hashlib.sha256(encoded).hexdigest(),
+                },
+            }
+        )
+        self.assertEqual(result, state["result"])
+
+
+class _IndexState:
+    def __init__(self) -> None:
+        self.marked = []
+
+    def changed(self, documents: list) -> list:
+        return documents
+
+    def mark(self, documents: list) -> None:
+        self.marked.extend(documents)
+
+
+class _Recall:
+    def __init__(self) -> None:
+        self.indexed = []
+
+    async def index(self, documents: list) -> int:
+        self.indexed.extend(documents)
+        return len(documents)
+
+    async def search(self, scope_keys: list[str], _query: str, *, limit: int) -> list[SemanticHit]:
+        self.scope_keys = scope_keys
+        self.limit = limit
+        return [
+            SemanticHit(
+                scope_key="fleet:runbooks",
+                source_type="fleet_runbook_case",
+                source_handle="case_" + "a" * 32,
+                content="PostgreSQL 复制延迟",
+                score=0.91,
+                metadata={},
+            )
+        ]
+
+
+class RunbookSemanticRecallTests(unittest.IsolatedAsyncioTestCase):
+    async def test_only_verified_cases_enter_semantic_index(self) -> None:
+        recall = _Recall()
+        state = _IndexState()
+        cases = [
+            {
+                "case_id": "case_" + "a" * 32,
+                "status": "verified",
+                "title": "PostgreSQL 复制延迟",
+                "symptoms": "备用库落后",
+                "confirmed_cause": "网络抖动",
+                "resolution": ["恢复链路"],
+            },
+            {
+                "case_id": "case_" + "b" * 32,
+                "status": "draft",
+                "title": "未经验证的做法",
+                "symptoms": "未知",
+                "confirmed_cause": "猜测",
+                "resolution": ["重启全部服务"],
+            },
+        ]
+        scores = await semantic_runbook_scores(  # type: ignore[arg-type]
+            recall, state, cases, "数据库为什么变慢"
+        )
+        self.assertEqual(scores, {"case_" + "a" * 32: 0.91})
+        self.assertEqual(len(recall.indexed), 1)
+        self.assertEqual(recall.indexed[0].source_type, "fleet_runbook_case")
+
+
+if __name__ == "__main__":
+    unittest.main()

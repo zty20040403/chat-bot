@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import asyncio
 import time
+from types import SimpleNamespace
 from nonebot import get_bot
 from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message, MessageSegment
 
 from .control import JobFence, LeaseLost, active_job_fence
+from .workspaces import StepWorkspaces, prune_acknowledged_artifacts
 from ..onebot_codec import scope_from_event, decode_onebot_message
 from ..deepseek import DeepSeekTrace
 from ..workers.durable_jobs import DurableJobWorker
@@ -55,6 +57,7 @@ class SubAgentDispatcher:
 
     async def run_forever(self):
         async def reconcile_queue():
+            next_artifact_prune = 0.0
             while True:
                 for task_id in await asyncio.to_thread(self.store.dispatchable_tasks):
                     await asyncio.to_thread(self.enqueue, task_id)
@@ -63,6 +66,23 @@ class SubAgentDispatcher:
                         await self.reconcile(task_id)
                     except Exception as exc:
                         self.context.logger.warning("Sub-Agent delivery reconciliation failed for task#%s: %s", task_id, type(exc).__name__)
+                now = time.time()
+                if now >= next_artifact_prune:
+                    deleted, invalid = await asyncio.to_thread(
+                        prune_acknowledged_artifacts,
+                        self.context.state_dir / "subagent_artifacts",
+                    )
+                    if deleted:
+                        self.context.logger.info(
+                            "Pruned %s acknowledged Sub-Agent artifact snapshot(s).",
+                            deleted,
+                        )
+                    if invalid:
+                        self.context.logger.warning(
+                            "Skipped %s invalid Sub-Agent artifact retention marker(s).",
+                            invalid,
+                        )
+                    next_artifact_prune = now + 3600
                 await asyncio.sleep(10)
         async with asyncio.TaskGroup() as group:
             group.create_task(reconcile_queue())
@@ -85,15 +105,43 @@ class SubAgentDispatcher:
             if delivery["state"] not in {"sending", "unknown"}:
                 continue
             payload = delivery["payload"]
+            not_before = int(payload.get("upload_started_at") or 0)
             found = next((f for f in files if f.get("file_name") == payload.get("filename")
                 and int(f.get("file_size", -1)) == int(payload.get("size", -2))
-                and str(f.get("uploader")) == str(bot.self_id)), None)
+                and str(f.get("uploader")) == str(bot.self_id)
+                and (not not_before or not f.get("upload_time")
+                     or int(f.get("upload_time") or 0) >= not_before - 5)), None)
             updated = {**payload, "ok": bool(found), "reconciled": bool(found)}
             if found:
                 updated["file_id"] = found.get("file_id")
                 matched += 1
             self.store.finish_delivery(task_id, delivery["key"], "acknowledged" if found else "unknown", updated,
                                        revision=delivery["revision"])
+        if matched:
+            task = self.store.get(task_id)
+            if task is not None:
+                cleanup_executor = SimpleNamespace(
+                    owner=task.conversation_id,
+                    base_owner=task.conversation_id,
+                    sandbox_manager=self.context.sandbox_manager,
+                )
+                workspaces = StepWorkspaces(
+                    self.context.state_dir,
+                    cleanup_executor,
+                    retention_days=self.context.settings.subagent_artifact_retention_days,
+                )
+                cleanup_ready, artifact_digests = self.coordinator._artifact_cleanup_state(task)
+                if cleanup_ready:
+                    await workspaces.cleanup_task(
+                        task_id,
+                        self.store.runs(task_id),
+                        artifact_digests=artifact_digests,
+                    )
+                    self.store.append_event(
+                        task_id,
+                        "task.workspace_cleaned",
+                        {"reason": "artifact_delivery_reconciled"},
+                    )
         return {"matched": matched}
 
     async def execute(self, job):

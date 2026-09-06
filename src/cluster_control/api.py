@@ -16,6 +16,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .diagnostics import IncidentDiagnosticService
 from .execution_service import ClusterExecutionService, WorkerAuthenticator
+from .reliability import GuardianService, ReliabilityStore
+from .scheduling import ResourcePolicyStore
 from .service import FleetControlService
 
 
@@ -78,6 +80,15 @@ class WorkerLeaseRequest(BaseModel):
     fence: int = Field(ge=1)
 
 
+class WorkerCheckpointRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    fence: int = Field(ge=1)
+    phase: str
+    format_version: int = Field(default=1, ge=1, le=10)
+    executor_version: str = Field(min_length=1, max_length=80)
+    state: dict[str, object] = Field(default_factory=dict)
+
+
 class WorkerJobRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     kind: str
@@ -92,6 +103,89 @@ class ArtifactUploadRequest(BaseModel):
     name: str
     media_type: str = Field(default="application/octet-stream", max_length=120)
     content_base64: str
+
+
+class WorkerAvailabilityRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    desired_availability: str
+    reason: str = Field(default="", max_length=500)
+    resource_version: int = Field(ge=1)
+
+
+class WorkerCapacityRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    allow_gpu: bool = False
+    cpu_limit_millis: int = Field(ge=0, le=128_000)
+    memory_limit_bytes: int = Field(ge=0, le=128 * 1024**3)
+    gpu_limit_slots: int = Field(default=0, ge=0, le=16)
+    resource_version: int = Field(ge=1)
+
+
+class BorrowGrantRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    worker_id: str
+    grantee_actor_id: str
+    origin_scope: str
+    allowed_kinds: list[str]
+    valid_from: int | None = None
+    valid_until: int
+    cpu_millis: int = Field(default=500, ge=50, le=8000)
+    memory_bytes: int = Field(default=256 * 1024**2, ge=16 * 1024**2, le=8 * 1024**3)
+    gpu_slots: int = Field(default=0, ge=0, le=8)
+    priority: str = "normal"
+    max_cost_microunits: int = Field(default=0, ge=0, le=10**12)
+
+
+class ResourceStatusRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    status: str
+    resource_version: int = Field(ge=1)
+
+
+class IncidentResolveRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    summary: str = Field(min_length=1, max_length=2000)
+    evidence: dict[str, object] = Field(default_factory=dict)
+    resource_version: int = Field(ge=1)
+
+
+class RunbookCaseRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: str = Field(min_length=1, max_length=240)
+    host_id: str = Field(default="", max_length=64)
+    service_ref: str = Field(default="", max_length=160)
+    symptoms: str = Field(min_length=1, max_length=4000)
+    confirmed_cause: str = Field(min_length=1, max_length=4000)
+    resolution: list[dict[str, object] | str]
+    applicability: dict[str, object]
+    evidence_refs: list[str]
+    status: str = "draft"
+    confidence: str = "unknown"
+
+
+class GuardianRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    target_id: str
+    host_id: str
+    service_ref: str = ""
+    mode: str = "observe"
+    starts_at: int | None = None
+    expires_at: int
+    interval_seconds: int = Field(default=60, ge=15, le=86_400)
+    failure_threshold: int = Field(default=3, ge=1, le=20)
+    max_actions: int = Field(default=0, ge=0, le=20)
+    probe_policy: dict[str, object] = Field(default_factory=dict)
+    authorized_action: dict[str, object] = Field(default_factory=dict)
+
+
+class CaseSearchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    query: str = Field(min_length=1, max_length=2000)
+    host_id: str = Field(default="", max_length=64)
+    service_ref: str = Field(default="", max_length=160)
+    current_facts: dict[str, object] = Field(default_factory=dict)
+    candidate_case_ids: list[str] = Field(default_factory=list, max_length=50)
+    limit: int = Field(default=10, ge=1, le=50)
 
 
 def _read_api_token(path: Path) -> str:
@@ -116,15 +210,26 @@ def create_app(
     diagnostics: IncidentDiagnosticService | None = None,
     execution: ClusterExecutionService | None = None,
     worker_authenticator: WorkerAuthenticator | None = None,
+    resource_policies: ResourcePolicyStore | None = None,
+    reliability: ReliabilityStore | None = None,
+    guardian: GuardianService | None = None,
 ) -> FastAPI:
     token_path = Path(api_token_file)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-        yield
-        if diagnostics is not None:
-            await diagnostics.close()
-        await service.close()
+        guardian_task = asyncio.create_task(guardian.run()) if guardian is not None else None
+        try:
+            yield
+        finally:
+            if guardian is not None:
+                await guardian.close()
+            if guardian_task is not None:
+                guardian_task.cancel()
+                await asyncio.gather(guardian_task, return_exceptions=True)
+            if diagnostics is not None:
+                await diagnostics.close()
+            await service.close()
 
     app = FastAPI(
         title="Kennethbot Cluster Control",
@@ -277,13 +382,27 @@ def create_app(
         if request.target_id and _TARGET_RE.fullmatch(request.target_id) is None:
             raise HTTPException(status_code=422, detail="Invalid diagnostic target")
         try:
-            return await diagnostics.run(
+            result = await diagnostics.run(
                 template_key=request.template,
                 host_id=host_id,
                 target_id=request.target_id,
                 subject=request.subject,
                 requested_by=request.requested_by,
             )
+            conclusion = result.get("conclusion") if isinstance(result.get("conclusion"), dict) else {}
+            counts = conclusion.get("counts") if isinstance(conclusion.get("counts"), dict) else {}
+            if reliability is not None and int(counts.get("failed") or 0) > 0:
+                await asyncio.to_thread(
+                    reliability.observe_incident,
+                    incident_key=f"diagnostic:{host_id}:{request.template}",
+                    host_id=host_id, service_ref="",
+                    severity="warning", summary=str(result.get("summary") or "排障发现失败证据"),
+                    event_type="diagnostic_failed",
+                    source_ref=str(result.get("handle") or f"diagnostic#{result.get('run_id') or ''}"),
+                    confidence=str(result.get("confidence") or "unknown"),
+                    payload={"failed_checks": conclusion.get("failed_checks", [])},
+                )
+            return result
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from None
         except PermissionError as exc:
@@ -293,6 +412,16 @@ def create_app(
         if execution is None:
             raise HTTPException(status_code=503, detail="Execution control unavailable")
         return execution
+
+    def policy_store() -> ResourcePolicyStore:
+        if resource_policies is None:
+            raise HTTPException(status_code=503, detail="Resource scheduling unavailable")
+        return resource_policies
+
+    def reliability_store() -> ReliabilityStore:
+        if reliability is None:
+            raise HTTPException(status_code=503, detail="Reliability service unavailable")
+        return reliability
 
     @app.get("/v1/execution/capabilities", dependencies=auth)
     async def execution_capabilities() -> dict[str, object]:
@@ -371,6 +500,94 @@ def create_app(
     async def workers() -> dict[str, object]:
         return {"items": await asyncio.to_thread(execution_service().store.workers)}
 
+    @app.get("/v1/resource-policies", dependencies=auth)
+    async def resource_policy_list() -> dict[str, object]:
+        return {"items": await asyncio.to_thread(policy_store().policies)}
+
+    @app.post("/v1/resource-policies/{worker_id}/availability")
+    async def resource_policy_availability(
+        worker_id: str,
+        body: WorkerAvailabilityRequest,
+        principal: tuple[str, str] = Depends(signed_principal),
+    ) -> dict[str, object]:
+        try:
+            return await asyncio.to_thread(
+                policy_store().set_worker_availability,
+                worker_id, actor_id=principal[0],
+                desired=body.desired_availability, reason=body.reason,
+                expected_version=body.resource_version,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+
+    @app.post("/v1/resource-policies/{worker_id}/capacity")
+    async def resource_policy_capacity(
+        worker_id: str,
+        body: WorkerCapacityRequest,
+        principal: tuple[str, str] = Depends(signed_principal),
+    ) -> dict[str, object]:
+        try:
+            return await asyncio.to_thread(
+                policy_store().configure_worker_capacity,
+                worker_id, actor_id=principal[0], allow_gpu=body.allow_gpu,
+                cpu_limit_millis=body.cpu_limit_millis,
+                memory_limit_bytes=body.memory_limit_bytes,
+                gpu_limit_slots=body.gpu_limit_slots,
+                expected_version=body.resource_version,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+
+    @app.get("/v1/borrow-grants", dependencies=auth)
+    async def borrow_grant_list(
+        limit: int = Query(default=100, ge=1, le=200),
+    ) -> dict[str, object]:
+        return {"items": await asyncio.to_thread(policy_store().grants, limit=limit)}
+
+    @app.post("/v1/borrow-grants")
+    async def borrow_grant_create(
+        body: BorrowGrantRequest,
+        principal: tuple[str, str] = Depends(signed_principal),
+    ) -> dict[str, object]:
+        try:
+            return await asyncio.to_thread(
+                policy_store().create_grant,
+                body.model_dump(exclude_none=True), actor_id=principal[0],
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+
+    @app.post("/v1/borrow-grants/{grant_id}/status")
+    async def borrow_grant_status(
+        grant_id: str,
+        body: ResourceStatusRequest,
+        principal: tuple[str, str] = Depends(signed_principal),
+    ) -> dict[str, object]:
+        try:
+            return await asyncio.to_thread(
+                policy_store().set_grant_status,
+                grant_id, actor_id=principal[0], status=body.status,
+                expected_version=body.resource_version,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+
     @app.post("/v1/worker/heartbeat")
     async def worker_heartbeat(
         body: WorkerHeartbeatRequest,
@@ -387,7 +604,7 @@ def create_app(
 
     @app.post("/v1/worker/claim")
     async def worker_claim(worker_id: str = Depends(worker_principal)) -> dict[str, object]:
-        item = await asyncio.to_thread(execution_service().store.claim_job, worker_id)
+        item = await asyncio.to_thread(execution_service().claim_job, worker_id)
         return {"job": item}
 
     @app.post("/v1/worker/jobs/{job_id}/complete")
@@ -422,6 +639,26 @@ def create_app(
             raise HTTPException(status_code=404, detail=str(exc)) from None
         except (PermissionError, ValueError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from None
+
+    @app.post("/v1/worker/jobs/{job_id}/checkpoints")
+    async def worker_checkpoint(
+        job_id: str,
+        body: WorkerCheckpointRequest,
+        worker_id: str = Depends(worker_principal),
+    ) -> dict[str, object]:
+        try:
+            return await asyncio.to_thread(
+                execution_service().save_checkpoint,
+                job_id, worker_id=worker_id, fence=body.fence, phase=body.phase,
+                format_version=body.format_version,
+                executor_version=body.executor_version, state=body.state,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except PermissionError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
 
     @app.get("/v1/worker/artifacts/{artifact_id}")
     async def worker_artifact(
@@ -528,5 +765,123 @@ def create_app(
     @app.get("/v1/previews", dependencies=auth)
     async def previews(limit: int = Query(default=50, ge=1, le=200)) -> dict[str, object]:
         return {"items": await asyncio.to_thread(execution_service().store.previews, limit)}
+
+    @app.get("/v1/incidents", dependencies=auth)
+    async def incidents(
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> dict[str, object]:
+        return {"items": await asyncio.to_thread(reliability_store().incidents, limit=limit)}
+
+    @app.get("/v1/incidents/{incident_id}", dependencies=auth)
+    async def incident(incident_id: str) -> dict[str, object]:
+        item = await asyncio.to_thread(reliability_store().incident, incident_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail="Incident not found")
+        return item
+
+    @app.post("/v1/incidents/{incident_id}/resolve")
+    async def incident_resolve(
+        incident_id: str,
+        body: IncidentResolveRequest,
+        principal: tuple[str, str] = Depends(signed_principal),
+    ) -> dict[str, object]:
+        try:
+            return await asyncio.to_thread(
+                reliability_store().resolve_incident,
+                incident_id, actor_id=principal[0], summary=body.summary,
+                evidence=body.evidence, expected_version=body.resource_version,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+
+    @app.get("/v1/runbook-cases", dependencies=auth)
+    async def runbook_cases(
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> dict[str, object]:
+        return {"items": await asyncio.to_thread(reliability_store().cases, limit=limit)}
+
+    @app.post("/v1/runbook-cases")
+    async def runbook_case_create(
+        body: RunbookCaseRequest,
+        principal: tuple[str, str] = Depends(signed_principal),
+    ) -> dict[str, object]:
+        try:
+            return await asyncio.to_thread(
+                reliability_store().create_case,
+                body.model_dump(), actor_id=principal[0],
+            )
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    @app.post("/v1/runbook-cases/search", dependencies=auth)
+    async def runbook_case_search(body: CaseSearchRequest) -> dict[str, object]:
+        return {
+            "items": await asyncio.to_thread(
+                reliability_store().search_cases,
+                body.query, host_id=body.host_id, service_ref=body.service_ref,
+                current_facts=body.current_facts,
+                candidate_case_ids=body.candidate_case_ids, limit=body.limit,
+            )
+        }
+
+    @app.get("/v1/guardians", dependencies=auth)
+    async def guardians(
+        limit: int = Query(default=100, ge=1, le=200),
+    ) -> dict[str, object]:
+        return {"items": await asyncio.to_thread(reliability_store().guardians, limit=limit)}
+
+    @app.get("/v1/guardians/{guardian_id}")
+    async def guardian_detail(
+        guardian_id: str,
+        principal: tuple[str, str] = Depends(signed_principal),
+    ) -> dict[str, object]:
+        item = await asyncio.to_thread(reliability_store().guardian, guardian_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail="Guardian not found")
+        if item.get("actor_id") != principal[0]:
+            raise HTTPException(status_code=403, detail="Guardian belongs to another administrator")
+        return item
+
+    @app.post("/v1/guardians")
+    async def guardian_create(
+        body: GuardianRequest,
+        principal: tuple[str, str] = Depends(signed_principal),
+    ) -> dict[str, object]:
+        try:
+            return await asyncio.to_thread(
+                reliability_store().create_guardian,
+                body.model_dump(exclude_none=True), actor_id=principal[0],
+                origin_scope=principal[1],
+                known_targets=set(execution_service().diagnostic_targets),
+            )
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    @app.post("/v1/guardians/{guardian_id}/status")
+    async def guardian_status(
+        guardian_id: str,
+        body: ResourceStatusRequest,
+        principal: tuple[str, str] = Depends(signed_principal),
+    ) -> dict[str, object]:
+        try:
+            return await asyncio.to_thread(
+                reliability_store().set_guardian_status,
+                guardian_id, actor_id=principal[0], status=body.status,
+                expected_version=body.resource_version,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
 
     return app

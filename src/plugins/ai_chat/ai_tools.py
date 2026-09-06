@@ -19,6 +19,9 @@ OPERATION_CANCEL_TOOL_NAME = "operation_cancel"
 CLUSTER_ARTIFACT_UPLOAD_TOOL_NAME = "cluster_artifact_upload"
 CLUSTER_JOB_SUBMIT_TOOL_NAME = "cluster_job_submit"
 CLUSTER_JOB_STATUS_TOOL_NAME = "cluster_job_status"
+CLUSTER_CASE_SEARCH_TOOL_NAME = "cluster_case_search"
+CLUSTER_GUARDIAN_CREATE_TOOL_NAME = "cluster_guardian_create"
+CLUSTER_GUARDIAN_STATUS_TOOL_NAME = "cluster_guardian_status"
 READ_IMAGE_TEXT_TOOL_NAME = "read_image_text"
 VIEW_IMAGE_TOOL_NAME = "view_image"
 VIEW_VIDEO_TOOL_NAME = "view_video"
@@ -375,6 +378,11 @@ CLUSTER_JOB_SUBMIT_TOOL: ToolDefinition = {
                 "cpu_millis": {"type": "integer", "minimum": 50, "maximum": 8000},
                 "memory_bytes": {"type": "integer", "minimum": 16777216, "maximum": 8589934592},
                 "gpu_slots": {"type": "integer", "minimum": 0, "maximum": 8},
+                "priority": {"type": "string", "enum": ["background", "normal", "interactive"]},
+                "borrow_required": {"type": "boolean"},
+                "safe_rerun": {"type": "boolean"},
+                "expected_cost_microunits": {"type": "integer", "minimum": 0},
+                "max_cost_microunits": {"type": "integer", "minimum": 0},
                 "idempotency_key": {"type": "string", "minLength": 8, "maxLength": 160},
             },
             "required": ["kind", "idempotency_key"],
@@ -391,6 +399,64 @@ CLUSTER_JOB_STATUS_TOOL: ToolDefinition = {
             "type": "object", "additionalProperties": False,
             "properties": {"job_id": {"type": "string", "pattern": "^job_[a-f0-9]{32}$"}},
             "required": ["job_id"],
+        },
+    },
+}
+
+CLUSTER_CASE_SEARCH_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": CLUSTER_CASE_SEARCH_TOOL_NAME,
+        "description": (
+            "搜索已经验证的集群故障案例。返回的旧方案只是线索；applicable=false 时"
+            "必须先用当前主机、服务和错误证据重新验证，不能直接照搬修复步骤。"
+        ),
+        "parameters": {
+            "type": "object", "additionalProperties": False,
+            "properties": {
+                "query": {"type": "string", "minLength": 1, "maxLength": 2000},
+                "host_id": {"type": "string"},
+                "service_ref": {"type": "string"},
+            },
+            "required": ["query"],
+        },
+    },
+}
+
+CLUSTER_GUARDIAN_CREATE_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": CLUSTER_GUARDIAN_CREATE_TOOL_NAME,
+        "description": (
+            "为已登记探测目标创建有开始、结束时间和次数上限的守护合同。仅管理员可用；"
+            "默认只观察，不能把任意 URL、命令或未批准动作塞进守护。"
+        ),
+        "parameters": {
+            "type": "object", "additionalProperties": False,
+            "properties": {
+                "target_id": {"type": "string"},
+                "host_id": {"type": "string"},
+                "service_ref": {"type": "string"},
+                "expires_at": {"type": "integer"},
+                "interval_seconds": {"type": "integer", "minimum": 15, "maximum": 86400},
+                "failure_threshold": {"type": "integer", "minimum": 1, "maximum": 20},
+            },
+            "required": ["target_id", "host_id", "expires_at"],
+        },
+    },
+}
+
+CLUSTER_GUARDIAN_STATUS_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": CLUSTER_GUARDIAN_STATUS_TOOL_NAME,
+        "description": "查看一个目标守护的期限、探测结果、连续失败数和处理次数。",
+        "parameters": {
+            "type": "object", "additionalProperties": False,
+            "properties": {
+                "guardian_id": {"type": "string", "pattern": "^guardian_[a-f0-9]{32}$"},
+            },
+            "required": ["guardian_id"],
         },
     },
 }
@@ -1678,7 +1744,8 @@ def available_tools(
             [FLEET_OVERVIEW_TOOL, HOST_INSPECT_TOOL, SERVICE_INSPECT_TOOL, MODEL_STATUS_TOOL,
              DIAGNOSE_INCIDENT_TOOL, OPERATION_PREPARE_TOOL, OPERATION_STATUS_TOOL,
              OPERATION_CANCEL_TOOL, CLUSTER_ARTIFACT_UPLOAD_TOOL, CLUSTER_JOB_SUBMIT_TOOL,
-             CLUSTER_JOB_STATUS_TOOL]
+             CLUSTER_JOB_STATUS_TOOL, CLUSTER_CASE_SEARCH_TOOL,
+             CLUSTER_GUARDIAN_CREATE_TOOL, CLUSTER_GUARDIAN_STATUS_TOOL]
         )
         if include_fleet_logs:
             tools.append(SERVICE_LOGS_TOOL)

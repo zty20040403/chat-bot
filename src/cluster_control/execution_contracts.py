@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any, Mapping
 
+from .scheduling import ResourceRequest
+
 
 HOST_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 UNIT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.@:-]{0,119}\.service")
@@ -114,7 +116,9 @@ class WorkerJobProposal:
         if deadline_at <= timestamp or deadline_at > timestamp + 86_400:
             raise ValueError("deadline must be within the next day")
         payload = bounded_object(raw.get("payload", {}), field="payload", max_bytes=64_000)
-        constraints = bounded_object(raw.get("constraints", {}), field="constraints")
+        constraints = ResourceRequest.parse(
+            bounded_object(raw.get("constraints", {}), field="constraints")
+        ).as_dict()
         if kind in {"artifact.inspect", "document.verify", "media.inspect", "preview.static"}:
             artifact_id = str(payload.get("artifact_id") or "")
             if not re.fullmatch(r"artifact_[a-f0-9]{32}", artifact_id):

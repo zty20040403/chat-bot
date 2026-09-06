@@ -214,6 +214,7 @@ class Settings:
     subagent_max_parallelism: int
     subagent_max_tool_rounds: int
     subagent_timeout_seconds: int
+    subagent_artifact_retention_days: int
     subagent_profiles_json: str
     quota_enabled: bool
     quota_daily_calls: int
@@ -681,6 +682,10 @@ class Settings:
             subagent_timeout_seconds=min(
                 max(_get_int("AI_SUBAGENT_TIMEOUT_SECONDS", 600), 30),
                 3600,
+            ),
+            subagent_artifact_retention_days=min(
+                max(_get_int("AI_SUBAGENT_ARTIFACT_RETENTION_DAYS", 7), 1),
+                90,
             ),
             subagent_profiles_json=os.getenv(
                 "AI_SUBAGENT_PROFILES_JSON", "{}"

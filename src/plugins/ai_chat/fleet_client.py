@@ -299,6 +299,43 @@ class FleetControlClient:
     async def workers(self) -> dict[str, Any]:
         return await self._get("/v1/workers")
 
+    async def resource_policies(self) -> dict[str, Any]:
+        return await self._get("/v1/resource-policies")
+
+    async def set_worker_availability(
+        self, worker_id: str, payload: dict[str, Any], *, actor: str, origin: str
+    ) -> dict[str, Any]:
+        return await self._signed_post(
+            f"/v1/resource-policies/{quote(worker_id, safe='')}/availability",
+            payload, actor=actor, origin=origin,
+        )
+
+    async def configure_worker_capacity(
+        self, worker_id: str, payload: dict[str, Any], *, actor: str, origin: str
+    ) -> dict[str, Any]:
+        return await self._signed_post(
+            f"/v1/resource-policies/{quote(worker_id, safe='')}/capacity",
+            payload, actor=actor, origin=origin,
+        )
+
+    async def borrow_grants(self, *, limit: int = 100) -> dict[str, Any]:
+        return await self._get(f"/v1/borrow-grants?limit={min(max(limit, 1), 200)}")
+
+    async def create_borrow_grant(
+        self, payload: dict[str, Any], *, actor: str, origin: str
+    ) -> dict[str, Any]:
+        return await self._signed_post(
+            "/v1/borrow-grants", payload, actor=actor, origin=origin
+        )
+
+    async def set_borrow_grant_status(
+        self, grant_id: str, payload: dict[str, Any], *, actor: str, origin: str
+    ) -> dict[str, Any]:
+        return await self._signed_post(
+            f"/v1/borrow-grants/{quote(grant_id, safe='')}/status",
+            payload, actor=actor, origin=origin,
+        )
+
     async def jobs(self, *, limit: int = 50) -> dict[str, Any]:
         return await self._get(f"/v1/jobs?limit={min(max(limit, 1), 200)}")
 
@@ -324,6 +361,52 @@ class FleetControlClient:
 
     async def previews(self, *, limit: int = 50) -> dict[str, Any]:
         return await self._get(f"/v1/previews?limit={min(max(limit, 1), 200)}")
+
+    async def incidents(self, *, limit: int = 100) -> dict[str, Any]:
+        return await self._get(f"/v1/incidents?limit={min(max(limit, 1), 500)}")
+
+    async def runbook_cases(self, *, limit: int = 100) -> dict[str, Any]:
+        return await self._get(f"/v1/runbook-cases?limit={min(max(limit, 1), 500)}")
+
+    async def search_runbook_cases(
+        self, payload: dict[str, Any], *, actor: str, origin: str
+    ) -> dict[str, Any]:
+        return await self._signed_post(
+            "/v1/runbook-cases/search", payload, actor=actor, origin=origin
+        )
+
+    async def create_runbook_case(
+        self, payload: dict[str, Any], *, actor: str, origin: str
+    ) -> dict[str, Any]:
+        return await self._signed_post(
+            "/v1/runbook-cases", payload, actor=actor, origin=origin
+        )
+
+    async def guardians(self, *, limit: int = 100) -> dict[str, Any]:
+        return await self._get(f"/v1/guardians?limit={min(max(limit, 1), 200)}")
+
+    async def guardian(
+        self, guardian_id: str, *, actor: str, origin: str
+    ) -> dict[str, Any]:
+        return await self._signed_get(
+            f"/v1/guardians/{quote(guardian_id, safe='')}",
+            actor=actor, origin=origin,
+        )
+
+    async def create_guardian(
+        self, payload: dict[str, Any], *, actor: str, origin: str
+    ) -> dict[str, Any]:
+        return await self._signed_post(
+            "/v1/guardians", payload, actor=actor, origin=origin
+        )
+
+    async def set_guardian_status(
+        self, guardian_id: str, payload: dict[str, Any], *, actor: str, origin: str
+    ) -> dict[str, Any]:
+        return await self._signed_post(
+            f"/v1/guardians/{quote(guardian_id, safe='')}/status",
+            payload, actor=actor, origin=origin,
+        )
 
     async def upload_artifact(
         self, *, name: str, media_type: str, content: bytes,

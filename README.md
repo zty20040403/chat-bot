@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.15.0-22c55e?style=for-the-badge">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.16.0-22c55e?style=for-the-badge">
   <img alt="Python" src="https://img.shields.io/badge/Python-3.12-3776ab?style=for-the-badge&amp;logo=python&amp;logoColor=white">
   <img alt="NoneBot2" src="https://img.shields.io/badge/NoneBot2-OneBot_V11-ea5252?style=for-the-badge">
   <img alt="PostgreSQL" src="https://img.shields.io/badge/PostgreSQL-Durable-4169e1?style=for-the-badge&amp;logo=postgresql&amp;logoColor=white">
@@ -61,6 +61,14 @@ Kennethbot 通过 NapCatQQ 接收 OneBot V11 事件，使用 NoneBot2 处理消�
     <td><strong>受控操作合同</strong><br>操作目标、操作者、期限、预期状态和验收方式写入不可变合同；写后端未获批准时明确保持不可执行。</td>
     <td><strong>隔离集群 Worker</strong><br>固定任务模板、独立凭据、资源预留、租约与 fencing；支持产物校验、PDF/媒体检查和限时静态预览。</td>
   </tr>
+  <tr>
+    <td><strong>借用调度与恢复</strong><br>资源所有者可随时让路；限时授权约束用户、会话、CPU、内存、GPU 与预算，完成检查点可在租约失效后安全接续。</td>
+    <td><strong>故障记忆与守护</strong><br>事故串联探测和证据，BGE-M3 检索已验证案例并复核适用条件；固定探针健康路径不调用模型。</td>
+  </tr>
+  <tr>
+    <td><strong>可靠文件交付</strong><br>QQ 群文件真实可见后才确认成功并清理沙盒；回执不明时保留工作区与不可变产物快照供核对和补发。</td>
+    <td><strong>实时资源控制</strong><br>控制台统一管理 Worker 状态、资源上限、借用授权、守护合同、故障事件和运行手册案例。</td>
+  </tr>
 </table>
 
 ## 系统结构
@@ -90,6 +98,7 @@ flowchart LR
     TOOLS --> CC[Cluster Control]
     CC --> OPS[Read-only Operations API]
     CC --> QUEUE[(Operation / Job Ledger)]
+    CC --> MEMORY[Incident / Runbook / Guardian]
     CW[Isolated Cluster Worker] -->|Heartbeat / Lease / Receipt| CC
     CC -->|Assigned artifact| CW
     CW --> PREVIEW[Expiring Preview Origin]
@@ -98,7 +107,7 @@ flowchart LR
     classDef service fill:#27272a,stroke:#71717a,color:#fafafa;
     classDef data fill:#172554,stroke:#60a5fa,color:#eff6ff;
     class AGENT,LLM core;
-    class NC,NB,IR,CTX,TOOLS,MEDIA,BOX,OUT,CC,OPS,CW,PREVIEW service;
+    class NC,NB,IR,CTX,TOOLS,MEDIA,BOX,OUT,CC,OPS,CW,PREVIEW,MEMORY service;
     class PG,QUEUE data;
 ```
 

@@ -14,6 +14,8 @@ from .service import FleetControlService
 from .storage import FleetProjectionStore
 from .execution_service import ClusterExecutionService, WorkerAuthenticator
 from .execution_storage import ClusterExecutionStore
+from .reliability import GuardianService, ReliabilityStore
+from .scheduling import ResourcePolicyStore
 
 
 def main() -> None:
@@ -50,14 +52,28 @@ def main() -> None:
         local_host_id=settings.local_host_id,
     )
     execution_store = ClusterExecutionStore(database, Path(settings.artifact_dir))
+    resource_policies = ResourcePolicyStore(database)
+    reliability = ReliabilityStore(database)
     worker_hosts = {
         item["worker_id"]: item["host_id"] for item in settings.worker_identities
+    }
+    worker_owners = {
+        item["worker_id"]: item["owner_actor_id"] for item in settings.worker_identities
     }
     execution = ClusterExecutionService(
         execution_store,
         inventory=settings.inventory,
         diagnostic_targets=settings.diagnostic_targets,
         worker_hosts=worker_hosts,
+        worker_owners=worker_owners,
+        resource_policies=resource_policies,
+    )
+    guardian = GuardianService(
+        reliability,
+        settings.diagnostic_targets,
+        operation_factory=lambda raw, actor, origin: execution.prepare_operation(
+            raw, actor_id=actor, origin_scope=origin
+        ),
     )
     worker_authenticator = WorkerAuthenticator(
         {item["worker_id"]: item["token_file"] for item in settings.worker_identities}
@@ -68,6 +84,9 @@ def main() -> None:
         diagnostics=diagnostics,
         execution=execution,
         worker_authenticator=worker_authenticator,
+        resource_policies=resource_policies,
+        reliability=reliability,
+        guardian=guardian,
     )
     uvicorn.run(app, host=settings.host, port=settings.port, log_level="info")
 

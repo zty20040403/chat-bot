@@ -7,11 +7,11 @@ import json
 import os
 import re
 import shlex
+import time
 import tempfile
 from pathlib import Path, PurePosixPath
 
 from .control import assert_job_owned
-from .execution import active_agent_step
 
 
 IMPORT_AGENT_ARTIFACT = {"type": "function", "function": {
@@ -29,8 +29,9 @@ class ArtifactCaptureError(ValueError):
 
 
 class StepWorkspaces:
-    def __init__(self, root: Path, executor):
+    def __init__(self, root: Path, executor, *, retention_days: int = 7):
         self.root = root / "subagent_artifacts"
+        self.retention_seconds = max(int(retention_days), 1) * 86400
         self.executor = executor
         self.manager = executor.sandbox_manager
 
@@ -67,6 +68,7 @@ class StepWorkspaces:
                 if not content:
                     raise ValueError("Artifact is empty")
                 digest = await asyncio.to_thread(self._persist, task_id, content)
+                await asyncio.to_thread(self._clear_retention_marker, task_id, digest)
                 filename = PurePosixPath(str(item.get("name") or path)).name
                 if directory and not filename.lower().endswith(".zip"):
                     filename += ".zip"
@@ -147,12 +149,8 @@ class StepWorkspaces:
             await self.manager.destroy(self.executor.owner, sid)
 
     async def reconcile(self, filename: str, size: int) -> dict:
-        response = await self.executor.bot.call_api("get_group_root_files", group_id=self.executor.event.group_id)
-        files = response.get("files", []) if isinstance(response, dict) else []
-        match = next((f for f in files if f.get("file_name") == filename and int(f.get("file_size", -1)) == size
-                      and str(f.get("uploader")) == str(self.executor.bot.self_id)), None)
-        return {"ok": bool(match), "filename": filename, "size": size,
-                "file_id": match.get("file_id") if match else None, "reconciled": bool(match)}
+        result = await self.executor.confirm_group_file(filename, size, attempts=1)
+        return {**result, "filename": filename, "size": size}
 
     async def cleanup_step(self):
         for sandbox in await self.manager.list(self.executor.owner):
@@ -164,10 +162,116 @@ class StepWorkspaces:
             if sandbox.get("purpose", "task") == "task":
                 await self.manager.start_owned(self.executor.owner, sandbox["sandbox_id"])
 
-    async def cleanup_task(self, task_id: int, runs):
+    async def cleanup_task(
+        self,
+        task_id: int,
+        runs,
+        *,
+        artifact_digests: tuple[str, ...] = (),
+    ):
+        base_owner = getattr(self.executor, "base_owner", None)
+        if not isinstance(base_owner, str) or not base_owner:
+            base_owner = str(self.executor.owner)
         for run in runs:
-            token = active_agent_step.set(f"task#{task_id}/{run.step_key}")
+            owner = f"{base_owner}:task#{task_id}/{run.step_key}"
+            for sandbox in await self.manager.list(owner):
+                if sandbox.get("purpose", "task") == "task":
+                    await self.manager.destroy(owner, sandbox["sandbox_id"])
+        acknowledged_at = int(time.time())
+        for digest in artifact_digests:
+            await asyncio.to_thread(
+                self._mark_for_retention,
+                task_id,
+                digest,
+                acknowledged_at,
+            )
+        await asyncio.to_thread(prune_acknowledged_artifacts, self.root)
+
+    def _retention_marker(self, task_id: int, digest: str) -> Path:
+        if not re.fullmatch(r"[a-f0-9]{64}", digest):
+            raise ValueError("Invalid artifact digest")
+        return self.root / ".retention" / str(int(task_id)) / f"{digest}.json"
+
+    def _clear_retention_marker(self, task_id: int, digest: str) -> None:
+        self._retention_marker(task_id, digest).unlink(missing_ok=True)
+
+    def _mark_for_retention(
+        self,
+        task_id: int,
+        digest: str,
+        acknowledged_at: int,
+    ) -> None:
+        marker = self._retention_marker(task_id, digest)
+        if not self._path(task_id, digest).is_file():
+            return
+        marker.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        payload = json.dumps(
+            {
+                "task_id": int(task_id),
+                "sha256": digest,
+                "acknowledged_at": int(acknowledged_at),
+                "delete_after": int(acknowledged_at) + self.retention_seconds,
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        with tempfile.NamedTemporaryFile(dir=marker.parent, delete=False) as output:
+            output.write(payload)
+            name = output.name
+        os.chmod(name, 0o400)
+        os.replace(name, marker)
+
+
+def prune_acknowledged_artifacts(root: Path, *, now: int | None = None) -> tuple[int, int]:
+    """Delete only snapshots whose confirmed-delivery retention period expired."""
+
+    retention_root = root / ".retention"
+    if not retention_root.is_dir():
+        return (0, 0)
+    current = int(time.time() if now is None else now)
+    deleted = 0
+    invalid = 0
+    for task_dir in retention_root.iterdir():
+        if task_dir.is_symlink() or not task_dir.is_dir() or not task_dir.name.isdigit():
+            invalid += 1
+            continue
+        for marker in task_dir.iterdir():
+            digest = marker.stem
+            if (
+                marker.is_symlink()
+                or not marker.is_file()
+                or marker.suffix != ".json"
+                or not re.fullmatch(r"[a-f0-9]{64}", digest)
+            ):
+                invalid += 1
+                continue
             try:
-                await self.cleanup_step()
-            finally:
-                active_agent_step.reset(token)
+                payload = json.loads(marker.read_text(encoding="utf-8"))
+                if (
+                    int(payload.get("task_id")) != int(task_dir.name)
+                    or payload.get("sha256") != digest
+                    or int(payload.get("delete_after")) > current
+                ):
+                    continue
+                artifact = root / task_dir.name / digest
+                if artifact.is_symlink():
+                    invalid += 1
+                    continue
+                artifact.unlink(missing_ok=True)
+                marker.unlink(missing_ok=True)
+                deleted += 1
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                invalid += 1
+        try:
+            task_dir.rmdir()
+        except OSError:
+            pass
+        artifact_dir = root / task_dir.name
+        try:
+            artifact_dir.rmdir()
+        except OSError:
+            pass
+    try:
+        retention_root.rmdir()
+    except OSError:
+        pass
+    return (deleted, invalid)

@@ -17,6 +17,7 @@ from .execution_contracts import (
     bounded_object,
 )
 from .execution_storage import ClusterExecutionStore
+from .scheduling import ResourcePolicyStore
 
 
 @dataclass(frozen=True)
@@ -64,6 +65,8 @@ class ClusterExecutionService:
         inventory: tuple[dict[str, object], ...],
         diagnostic_targets: tuple[dict[str, str], ...],
         worker_hosts: Mapping[str, str],
+        worker_owners: Mapping[str, str] | None = None,
+        resource_policies: ResourcePolicyStore | None = None,
         write_backend: WriteBackendBinding | None = None,
     ) -> None:
         self.store = store
@@ -72,6 +75,8 @@ class ClusterExecutionService:
             str(item["target_id"]): dict(item) for item in diagnostic_targets
         }
         self.worker_hosts = dict(worker_hosts)
+        self.worker_owners = dict(worker_owners or {})
+        self.resource_policies = resource_policies
         self.write_backend = write_backend or WriteBackendBinding()
 
     def capabilities(self) -> dict[str, Any]:
@@ -93,6 +98,14 @@ class ClusterExecutionService:
                     "probe.http", "artifact.inspect", "document.verify",
                     "media.inspect", "preview.static",
                 ],
+                "borrow_scheduling": self.resource_policies is not None,
+                "checkpoint_format": "kennethbot-result-v1",
+            },
+            "guardians": {
+                "available": bool(self.diagnostic_targets),
+                "targets": sorted(self.diagnostic_targets),
+                "minimum_interval_seconds": 15,
+                "normal_checks_use_llm": False,
             },
         }
 
@@ -242,6 +255,11 @@ class ClusterExecutionService:
             job["preview_id"] = str(job.get("payload", {}).get("preview_id") or "")
         return job
 
+    def claim_job(self, worker_id: str) -> dict[str, Any] | None:
+        host_id = self.worker_hosts.get(worker_id)
+        host = self.inventory.get(str(host_id or ""), {})
+        return self.store.claim_job(worker_id, host=dict(host))
+
     def heartbeat(self, worker_id: str, raw: Mapping[str, Any]) -> dict[str, Any]:
         configured_host = self.worker_hosts.get(worker_id)
         if configured_host is None:
@@ -274,7 +292,7 @@ class ClusterExecutionService:
             parsed = urlsplit(public_base_url)
             if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.query or parsed.fragment:
                 raise ValueError("invalid public_base_url")
-        return self.store.upsert_worker(
+        worker = self.store.upsert_worker(
             worker_id,
             {
                 "boot_id": boot_id,
@@ -286,6 +304,24 @@ class ClusterExecutionService:
                 "public_base_url": public_base_url,
             },
             host_id=configured_host,
+        )
+        if self.resource_policies is not None:
+            worker["owner_policy"] = self.resource_policies.ensure_worker_policy(
+                worker_id,
+                owner_actor_id=self.worker_owners.get(worker_id, "admin:kenneth"),
+                capacity=capacity,
+            )
+        return worker
+
+    def save_checkpoint(
+        self, job_id: str, *, worker_id: str, fence: int, phase: str,
+        format_version: int, executor_version: str, state: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        checked = bounded_object(state, field="checkpoint state", max_bytes=64_000)
+        return self.store.save_checkpoint(
+            job_id, worker_id=worker_id, fence=fence, phase=phase,
+            format_version=format_version, executor_version=executor_version,
+            state=checked,
         )
 
     def complete_job(

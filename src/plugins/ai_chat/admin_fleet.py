@@ -50,6 +50,70 @@ class FleetJobRequest(BaseModel):
     idempotency_key: str
 
 
+class FleetWorkerAvailabilityRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    desired_availability: str
+    reason: str = Field(default="", max_length=500)
+    resource_version: int = Field(ge=1)
+
+
+class FleetWorkerCapacityRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    allow_gpu: bool = False
+    cpu_limit_millis: int = Field(ge=0, le=128_000)
+    memory_limit_bytes: int = Field(ge=0, le=128 * 1024**3)
+    gpu_limit_slots: int = Field(default=0, ge=0, le=16)
+    resource_version: int = Field(ge=1)
+
+
+class FleetGrantRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    worker_id: str
+    grantee_actor_id: str
+    origin_scope: str
+    allowed_kinds: list[str]
+    valid_until: int
+    cpu_millis: int
+    memory_bytes: int
+    gpu_slots: int = 0
+    priority: str = "normal"
+    max_cost_microunits: int = 0
+
+
+class FleetStatusRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    status: str
+    resource_version: int = Field(ge=1)
+
+
+class FleetGuardianRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    target_id: str
+    host_id: str
+    service_ref: str = ""
+    mode: str = "observe"
+    expires_at: int
+    interval_seconds: int = 60
+    failure_threshold: int = 3
+    max_actions: int = 0
+    probe_policy: dict[str, object] = Field(default_factory=dict)
+    authorized_action: dict[str, object] = Field(default_factory=dict)
+
+
+class FleetRunbookCaseRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: str = Field(min_length=1, max_length=240)
+    host_id: str = Field(default="", max_length=64)
+    service_ref: str = Field(default="", max_length=160)
+    symptoms: str = Field(min_length=1, max_length=4000)
+    confirmed_cause: str = Field(min_length=1, max_length=4000)
+    resolution: list[str | dict[str, object]] = Field(min_length=1)
+    applicability: dict[str, object] = Field(default_factory=dict)
+    evidence_refs: list[str] = Field(min_length=1)
+    status: str = "verified"
+    confidence: str = "confirmed"
+
+
 def _validate(value: str, pattern: re.Pattern[str], kind: str) -> str:
     if pattern.fullmatch(value) is None:
         raise HTTPException(status_code=422, detail=f"invalid {kind}")
@@ -131,6 +195,11 @@ def register_fleet_admin_routes(
                     "jobs": {"items": []},
                     "reservations": {"items": []},
                     "previews": {"items": []},
+                    "resource_policies": {"items": []},
+                    "borrow_grants": {"items": []},
+                    "incidents": {"items": []},
+                    "runbook_cases": {"items": []},
+                    "guardians": {"items": []},
                 },
             )
         results = await asyncio.gather(
@@ -146,6 +215,11 @@ def register_fleet_admin_routes(
             _safe_call("jobs", _optional_call(client, "jobs", {"items": []}, limit=50)),
             _safe_call("reservations", _optional_call(client, "reservations", {"items": []})),
             _safe_call("previews", _optional_call(client, "previews", {"items": []}, limit=50)),
+            _safe_call("resource_policies", _optional_call(client, "resource_policies", {"items": []})),
+            _safe_call("borrow_grants", _optional_call(client, "borrow_grants", {"items": []}, limit=100)),
+            _safe_call("incidents", _optional_call(client, "incidents", {"items": []}, limit=100)),
+            _safe_call("runbook_cases", _optional_call(client, "runbook_cases", {"items": []}, limit=100)),
+            _safe_call("guardians", _optional_call(client, "guardians", {"items": []}, limit=100)),
         )
         return versioned("fleet", {"configured": True, **dict(results)})
 
@@ -298,6 +372,105 @@ def register_fleet_admin_routes(
         try:
             return await configured_client().cancel_job(
                 job_id, actor="admin:kenneth", origin="admin-console"
+            )
+        except FleetControlError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from None
+
+    @router.post("/api/fleet/workers/{worker_id}/availability")
+    async def set_fleet_worker_availability(
+        worker_id: str,
+        request: FleetWorkerAvailabilityRequest,
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
+        authorize(authorization)
+        try:
+            return await configured_client().set_worker_availability(
+                _validate(worker_id, _HOST_RE, "worker id"), request.model_dump(),
+                actor="admin:kenneth", origin="admin-console",
+            )
+        except FleetControlError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from None
+
+    @router.post("/api/fleet/workers/{worker_id}/capacity")
+    async def configure_fleet_worker_capacity(
+        worker_id: str,
+        request: FleetWorkerCapacityRequest,
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
+        authorize(authorization)
+        try:
+            return await configured_client().configure_worker_capacity(
+                _validate(worker_id, _HOST_RE, "worker id"), request.model_dump(),
+                actor="admin:kenneth", origin="admin-console",
+            )
+        except FleetControlError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from None
+
+    @router.post("/api/fleet/borrow-grants")
+    async def create_fleet_borrow_grant(
+        request: FleetGrantRequest,
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
+        authorize(authorization)
+        try:
+            return await configured_client().create_borrow_grant(
+                request.model_dump(), actor="admin:kenneth", origin="admin-console"
+            )
+        except FleetControlError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from None
+
+    @router.post("/api/fleet/borrow-grants/{grant_id}/status")
+    async def set_fleet_borrow_grant_status(
+        grant_id: str,
+        request: FleetStatusRequest,
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
+        authorize(authorization)
+        try:
+            return await configured_client().set_borrow_grant_status(
+                grant_id, request.model_dump(),
+                actor="admin:kenneth", origin="admin-console",
+            )
+        except FleetControlError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from None
+
+    @router.post("/api/fleet/guardians")
+    async def create_fleet_guardian(
+        request: FleetGuardianRequest,
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
+        authorize(authorization)
+        try:
+            return await configured_client().create_guardian(
+                request.model_dump(), actor="admin:kenneth", origin="admin-console"
+            )
+        except FleetControlError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from None
+
+    @router.post("/api/fleet/runbook-cases")
+    async def create_fleet_runbook_case(
+        request: FleetRunbookCaseRequest,
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
+        authorize(authorization)
+        try:
+            return await configured_client().create_runbook_case(
+                request.model_dump(), actor="admin:kenneth", origin="admin-console"
+            )
+        except FleetControlError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from None
+
+    @router.post("/api/fleet/guardians/{guardian_id}/status")
+    async def set_fleet_guardian_status(
+        guardian_id: str,
+        request: FleetStatusRequest,
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
+        authorize(authorization)
+        try:
+            return await configured_client().set_guardian_status(
+                guardian_id, request.model_dump(),
+                actor="admin:kenneth", origin="admin-console",
             )
         except FleetControlError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from None

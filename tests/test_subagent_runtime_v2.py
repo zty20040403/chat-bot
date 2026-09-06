@@ -15,7 +15,11 @@ from src.plugins.ai_chat.agent.control import JobFence, LeaseLost, active_job_fe
 from src.plugins.ai_chat.agent.execution import EntryDecision, active_agent_step
 from src.plugins.ai_chat.agent.model_routing import choose_agent_profile, model_scope_for_role, validate_model_policy
 from src.plugins.ai_chat.agent.scheduling import SpecialistScheduler
-from src.plugins.ai_chat.agent.workspaces import ArtifactCaptureError, StepWorkspaces
+from src.plugins.ai_chat.agent.workspaces import (
+    ArtifactCaptureError,
+    StepWorkspaces,
+    prune_acknowledged_artifacts,
+)
 from src.plugins.ai_chat.agent_tools import AgentToolExecutor
 from src.plugins.ai_chat.llm_gateway import LLMGateway
 from src.plugins.ai_chat.model_catalog import ModelCatalog
@@ -170,6 +174,192 @@ class RuntimeV2Tests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(execute.await_count, 1)
         self.assertEqual(self.store.deliveries(task.task_id)[0]["state"], "unknown")
 
+    async def test_delayed_group_receipt_cleans_workspace_without_reupload(self):
+        from src.plugins.ai_chat.agent.background import SubAgentDispatcher
+        from nonebot.adapters.onebot.v11 import GroupMessageEvent
+        from src.plugins.ai_chat.onebot_codec import scope_from_event
+
+        event = GroupMessageEvent(
+            time=100,
+            self_id=123,
+            post_type="message",
+            message_type="group",
+            sub_type="normal",
+            message_id=42,
+            group_id=1,
+            user_id=2,
+            message=[{"type": "text", "data": {"text": "生成 PDF"}}],
+            raw_message="生成 PDF",
+            font=0,
+            sender={"user_id": 2, "nickname": "Test", "role": "member"},
+        )
+        scope_key = scope_from_event(event).key
+        packet = ContextPacket(
+            scope_key,
+            f"{scope_key}:user:2",
+            2,
+            3,
+            "生成 PDF",
+        )
+        task = self.coordinator.submit(
+            packet=packet,
+            decision=EntryDecision.parse(decision("workflow")),
+            dispatch={
+                "bot_id": "123",
+                "event": event.model_dump(mode="json"),
+                "profile": "qwen-local",
+            },
+        )
+        self.store.set_task_state(
+            task.task_id,
+            "running",
+            plan={"contract": {"delivery_required": True}},
+        )
+        step = TaskStep("files", "document", "write", "pdf")
+        run = self.store.create_run(
+            task.task_id,
+            step,
+            allowed_tools=[],
+            model_profile="qwen-local",
+        )
+        snapshot = "b" * 64
+        self.store.finish_run(
+            run.run_id,
+            "succeeded",
+            result={
+                "status": "success",
+                "artifacts": [
+                    {
+                        "handle": "s123abc:/workspace/out.pdf",
+                        "name": "out.pdf",
+                        "snapshot": snapshot,
+                    }
+                ],
+            },
+        )
+        self.store.begin_delivery(task.task_id, snapshot, {"filename": "out.pdf"})
+        self.store.finish_delivery(
+            task.task_id,
+            snapshot,
+            "unknown",
+            {
+                "filename": "out.pdf",
+                "size": 4,
+                "upload_started_at": 100,
+                "ok": False,
+            },
+        )
+        self.store.set_task_state(task.task_id, "partial")
+        artifact_path = Path(self.tmp.name) / "subagent_artifacts" / str(task.task_id) / snapshot
+        artifact_path.parent.mkdir(parents=True)
+        artifact_path.write_bytes(b"%PDF")
+
+        manager = Mock()
+        manager.list = AsyncMock(
+            return_value=[{"sandbox_id": "s123abc", "purpose": "task"}]
+        )
+        manager.destroy = AsyncMock()
+        jobs = DurableJobStore(Path(self.tmp.name) / "receipt-jobs.sqlite3")
+        bot = Mock(self_id=123)
+        bot.call_api = AsyncMock(
+            return_value={
+                "files": [
+                    {
+                        "file_name": "out.pdf",
+                        "file_size": 4,
+                        "uploader": 123,
+                        "upload_time": 101,
+                        "file_id": "qq-file-1",
+                    }
+                ]
+            }
+        )
+        services = SimpleNamespace(
+            context=SimpleNamespace(
+                subagent_store=self.store,
+                job_store=jobs,
+                subagent_coordinator=self.coordinator,
+                logger=Mock(),
+                state_dir=Path(self.tmp.name),
+                sandbox_manager=manager,
+                settings=SimpleNamespace(subagent_artifact_retention_days=7),
+            )
+        )
+        try:
+            dispatcher = SubAgentDispatcher(services)
+            with patch(
+                "src.plugins.ai_chat.agent.background.get_bot",
+                return_value=bot,
+            ):
+                result = await dispatcher.reconcile(task.task_id)
+            self.assertEqual(result["matched"], 1)
+            self.assertEqual(
+                self.store.deliveries(task.task_id)[0]["state"],
+                "acknowledged",
+            )
+            manager.destroy.assert_awaited_once_with(
+                f"{packet.conversation_id}:task#{task.task_id}/files",
+                "s123abc",
+            )
+            self.assertTrue(artifact_path.exists())
+        finally:
+            jobs.close()
+
+    async def test_unacknowledged_artifact_retains_step_workspace(self):
+        task = self.submit()
+        self.store.set_task_state(
+            task.task_id,
+            "running",
+            plan={"contract": {"delivery_required": True}},
+        )
+        step = TaskStep("files", "document", "write", "pdf")
+        run = self.store.create_run(
+            task.task_id,
+            step,
+            allowed_tools=[],
+            model_profile="qwen-local",
+        )
+        snapshot = "a" * 64
+        self.store.finish_run(
+            run.run_id,
+            "succeeded",
+            result={
+                "status": "success",
+                "artifacts": [
+                    {
+                        "handle": "s123abc:/workspace/out.pdf",
+                        "name": "out.pdf",
+                        "snapshot": snapshot,
+                    }
+                ],
+            },
+        )
+        self.store.begin_delivery(task.task_id, snapshot, {"filename": "out.pdf"})
+        self.store.finish_delivery(
+            task.task_id,
+            snapshot,
+            "unknown",
+            {"filename": "out.pdf", "ok": False},
+        )
+        self.store.set_task_state(task.task_id, "partial")
+        workspaces = Mock(cleanup_task=AsyncMock())
+
+        await self.coordinator._cleanup_finished_task(
+            task.task_id, AgentExecutionHooks(workspaces=workspaces)
+        )
+        workspaces.cleanup_task.assert_not_awaited()
+
+        self.store.finish_delivery(
+            task.task_id,
+            snapshot,
+            "acknowledged",
+            {"filename": "out.pdf", "ok": True},
+        )
+        await self.coordinator._cleanup_finished_task(
+            task.task_id, AgentExecutionHooks(workspaces=workspaces)
+        )
+        workspaces.cleanup_task.assert_awaited_once()
+
     async def test_delivery_prefers_final_or_repair_artifact(self):
         task = self.submit()
         design_run = self.store.create_run(task.task_id, TaskStep("design", "analyst", "design", "plan"), allowed_tools=[], model_profile="qwen-local")
@@ -311,6 +501,52 @@ class RuntimeV2Tests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(artifact["name"], "source.zip")
         self.assertEqual(artifact["kind"], "file")
         self.assertEqual(artifact["source_kind"], "directory")
+
+    async def test_only_acknowledged_snapshots_expire_after_retention(self):
+        executor = Mock(owner="owner")
+        workspaces = StepWorkspaces(
+            Path(self.tmp.name),
+            executor,
+            retention_days=1,
+        )
+        acknowledged = workspaces._persist(1, b"acknowledged")
+        unconfirmed = workspaces._persist(2, b"unconfirmed")
+        await workspaces.cleanup_task(
+            1,
+            [],
+            artifact_digests=(acknowledged,),
+        )
+        self.assertTrue(workspaces._path(1, acknowledged).exists())
+        self.assertTrue(workspaces._path(2, unconfirmed).exists())
+
+        deleted, invalid = prune_acknowledged_artifacts(
+            workspaces.root,
+            now=int(time.time()) + 86401,
+        )
+        self.assertEqual((deleted, invalid), (1, 0))
+        self.assertFalse(workspaces._path(1, acknowledged).exists())
+        self.assertTrue(workspaces._path(2, unconfirmed).exists())
+
+    async def test_recaptured_snapshot_cancels_old_retention_marker(self):
+        executor = Mock(owner="owner")
+        executor.sandbox_manager.export_artifact = AsyncMock(
+            return_value=(b"same-artifact", False)
+        )
+        workspaces = StepWorkspaces(
+            Path(self.tmp.name),
+            executor,
+            retention_days=1,
+        )
+        digest = workspaces._persist(1, b"same-artifact")
+        workspaces._mark_for_retention(1, digest, int(time.time()) - 172800)
+
+        await workspaces.capture(
+            1,
+            [{"handle": "s123abc:/workspace/result.pdf", "name": "result.pdf"}],
+        )
+        deleted, invalid = prune_acknowledged_artifacts(workspaces.root)
+        self.assertEqual((deleted, invalid), (0, 0))
+        self.assertTrue(workspaces._path(1, digest).exists())
 
     async def test_capture_preserves_valid_artifacts_when_another_path_is_bad(self):
         executor = Mock(owner="owner")

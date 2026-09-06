@@ -50,6 +50,21 @@ class WorkerControlClient:
     async def complete(self, job_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         return await self._post(f"/v1/worker/jobs/{job_id}/complete", payload)
 
+    async def checkpoint(
+        self, job_id: str, *, fence: int, phase: str,
+        executor_version: str, state: dict[str, Any],
+    ) -> dict[str, Any]:
+        return await self._post(
+            f"/v1/worker/jobs/{job_id}/checkpoints",
+            {
+                "fence": fence,
+                "phase": phase,
+                "format_version": 1,
+                "executor_version": executor_version,
+                "state": state,
+            },
+        )
+
     async def artifact(
         self, artifact_id: str, *, job_id: str, fence: int
     ) -> tuple[bytes, str, str]:

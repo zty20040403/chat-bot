@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,6 +25,16 @@ class FakeBot:
     def __init__(self) -> None:
         self.sent_messages: list[Any] = []
         self.uploads: list[dict[str, Any]] = []
+        self.confirm_uploads = True
+        self.group_files: list[dict[str, Any]] = [
+            {
+                "file_id": "file-1",
+                "file_name": "input.txt",
+                "file_size": 5,
+                "upload_time": 123,
+                "uploader": 7,
+            }
+        ]
 
     async def get_msg(self, *, message_id: int) -> dict[str, Any]:
         if message_id == 99:
@@ -78,17 +89,7 @@ class FakeBot:
                 ]
             }
         if api == "get_group_root_files":
-            return {
-                "files": [
-                    {
-                        "file_id": "file-1",
-                        "file_name": "input.txt",
-                        "file_size": 5,
-                        "upload_time": 123,
-                        "uploader": 7,
-                    }
-                ]
-            }
+            return {"files": list(self.group_files)}
         if api == "get_forward_msg":
             return {
                 "messages": [
@@ -109,6 +110,17 @@ class FakeBot:
             return {}
         if api == "upload_group_file":
             self.uploads.append(data)
+            if self.confirm_uploads:
+                raw = base64.b64decode(str(data["file"]).removeprefix("base64://"))
+                self.group_files.append(
+                    {
+                        "file_id": "uploaded",
+                        "file_name": data["name"],
+                        "file_size": len(raw),
+                        "upload_time": int(time.time()),
+                        "uploader": 42,
+                    }
+                )
             return {"file_id": "uploaded"}
         raise AssertionError(f"unexpected API: {api}")
 
@@ -599,6 +611,31 @@ class AgentToolExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["ok"])
         self.assertIn("字体没有嵌入", result["error"])
         self.assertEqual(self.bot.uploads, [])
+
+    async def test_unconfirmed_upload_keeps_artifact_pending(self) -> None:
+        self.bot.confirm_uploads = False
+        self.executor._task_sandbox_ids.add("s123abc")
+        self.executor._pending_artifacts["s123abc"] = {"result.txt"}
+
+        with patch("src.plugins.ai_chat.agent_tools.asyncio.sleep", return_value=None):
+            result = json.loads(
+                await self.executor.execute(
+                    "send_file_from_sandbox",
+                    {
+                        "sandbox_id": "s123abc",
+                        "path": "result.txt",
+                        "filename": "result.txt",
+                    },
+                )
+                or "{}"
+            )
+        cleanup = await self.executor.cleanup_task_sandboxes()
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["uploaded"])
+        self.assertEqual(result["state"], "unknown")
+        self.assertEqual(cleanup["retained"], ("s123abc",))
+        self.assertEqual(self.sandbox.destroyed, [])
 
     async def test_task_sandboxes_are_destroyed_once_after_delivery(self) -> None:
         first = json.loads(
