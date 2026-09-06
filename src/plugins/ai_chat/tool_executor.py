@@ -45,6 +45,8 @@ from .ai_tools import (
     FLEET_OVERVIEW_TOOL_NAME,
     GROUP_MEMBERS_TOOL_NAME,
     HOST_INSPECT_TOOL_NAME,
+    SERVICE_INSPECT_TOOL_NAME,
+    MODEL_STATUS_TOOL_NAME,
     INSPECT_SOURCE_TOOL_NAME,
     MEMORY_ADD_TOOL_NAME,
     MEMORY_LIST_TOOL_NAME,
@@ -158,6 +160,7 @@ from .video_analysis import DeepVideoAnalysisError
 from .handler_services import HandlerService
 from .handler_constants import (TURN_PROMPT_VERSION)
 from .fleet_client import FleetControlError
+from .fleet_tools import inspect_host, model_status, requires_local_model_status, summarize_fleet
 
 
 class ToolExecutor(HandlerService):
@@ -332,6 +335,7 @@ class ToolExecutor(HandlerService):
             fleet_tools_enabled and self._fleet_logs_allowed(event)
         )
         alert_query_required = alert_tools_enabled and self._alert_query_required(user_text)
+        model_status_required = fleet_tools_enabled and requires_local_model_status(user_text)
         sandbox_tools_enabled = (
             isinstance(event, GroupMessageEvent)
             and self.context.settings.is_sandbox_user_allowed(event.user_id)
@@ -419,7 +423,7 @@ class ToolExecutor(HandlerService):
             and isinstance(event, GroupMessageEvent)
             and not task_mode
             and not any((force_search, force_ocr, force_voice_reply,
-                         force_voice_transcription, alert_query_required, video_analysis_required))
+                         force_voice_transcription, alert_query_required, video_analysis_required, model_status_required))
         )
 
         should_resolve_voice = (
@@ -450,6 +454,7 @@ class ToolExecutor(HandlerService):
                     force_voice_reply,
                     force_voice_transcription,
                     alert_query_required,
+                    model_status_required,
                     video_analysis_required,
                     private_vision_required,
                 )
@@ -1528,6 +1533,8 @@ class ToolExecutor(HandlerService):
             if name in {
                 FLEET_OVERVIEW_TOOL_NAME,
                 HOST_INSPECT_TOOL_NAME,
+                SERVICE_INSPECT_TOOL_NAME,
+                MODEL_STATUS_TOOL_NAME,
                 SERVICE_LOGS_TOOL_NAME,
                 DIAGNOSE_INCIDENT_TOOL_NAME,
             }:
@@ -1544,7 +1551,7 @@ class ToolExecutor(HandlerService):
                     )
                 host_id = str(arguments.get("host_id") or "").strip()
                 unit = str(arguments.get("unit") or "").strip()
-                if name not in {FLEET_OVERVIEW_TOOL_NAME} and not re.fullmatch(
+                if name not in {FLEET_OVERVIEW_TOOL_NAME, MODEL_STATUS_TOOL_NAME} and not re.fullmatch(
                     r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", host_id
                 ):
                     return json.dumps(
@@ -1560,7 +1567,9 @@ class ToolExecutor(HandlerService):
                     )
                 try:
                     if name == FLEET_OVERVIEW_TOOL_NAME:
-                        payload = await client.fleet()
+                        payload = summarize_fleet(await client.fleet())
+                    elif name == MODEL_STATUS_TOOL_NAME:
+                        payload = await model_status(self.context, str(arguments.get("profile") or ""))
                     elif name == DIAGNOSE_INCIDENT_TOOL_NAME:
                         template = str(arguments.get("template") or "").strip()
                         if template not in {
@@ -1594,11 +1603,11 @@ class ToolExecutor(HandlerService):
                             ),
                         )
                     elif name == HOST_INSPECT_TOOL_NAME:
-                        payload = (
-                            await client.unit(host_id, unit)
-                            if unit
-                            else await client.host(host_id)
-                        )
+                        payload = await inspect_host(client, host_id)
+                    elif name == SERVICE_INSPECT_TOOL_NAME:
+                        if not unit:
+                            return json.dumps({"ok": False, "error": "提供完整服务名；只查主机请用 host_inspect。"}, ensure_ascii=False)
+                        payload = await client.unit(host_id, unit)
                     else:
                         if not unit:
                             return json.dumps(
@@ -1967,6 +1976,8 @@ class ToolExecutor(HandlerService):
             tool_choice = force_tool(WEB_SEARCH_TOOL_NAME)
         elif alert_query_required:
             tool_choice = force_tool(QUERY_ALERTS_TOOL_NAME)
+        elif model_status_required:
+            tool_choice = force_tool(MODEL_STATUS_TOOL_NAME)
         elif video_analysis_required:
             tool_choice = force_tool(VIEW_VIDEO_TOOL_NAME)
         elif force_ocr or private_vision_required:
@@ -2031,7 +2042,12 @@ class ToolExecutor(HandlerService):
                 context_parts.append(
                     "[服务器集群数据]\n"
                     "涉及服务器当前状态、机器是否在线、systemd 服务或节点资源时，"
-                    "必须调用 fleet_overview 或 host_inspect；不要用群聊历史猜。"
+                    "单台机器用 host_inspect，只填 host_id；全集群用 fleet_overview；"
+                    "具体服务用 service_inspect。在线、监控正常、失败服务数已经明确时，"
+                    "直接说明结果，不要再说不清楚或要求用户重新提供主机名。"
+                    "参数失败只说明本次参数错误，不推翻另一项成功观测。"
+                    "问千问是否启动或能否使用时调用 model_status，它读取实际模型探测"
+                    "和请求成败；/models 在线、生成回复成功、宿主机在线是三项不同事实。"
                     "返回数据会标明来源、时间和 fresh/stale/unavailable。MaxOps 或控制"
                     "服务不可用不等于所有机器已关机。"
                     "遇到模型连不上、控制台 502、QQ 不回复、回复变慢、主机失联或"

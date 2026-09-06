@@ -9,6 +9,8 @@ WEB_SEARCH_TOOL_NAME = "web_search"
 QUERY_ALERTS_TOOL_NAME = "query_alerts"
 FLEET_OVERVIEW_TOOL_NAME = "fleet_overview"
 HOST_INSPECT_TOOL_NAME = "host_inspect"
+SERVICE_INSPECT_TOOL_NAME = "service_inspect"
+MODEL_STATUS_TOOL_NAME = "model_status"
 SERVICE_LOGS_TOOL_NAME = "service_logs"
 DIAGNOSE_INCIDENT_TOOL_NAME = "diagnose_incident"
 READ_IMAGE_TEXT_TOOL_NAME = "read_image_text"
@@ -147,23 +149,50 @@ HOST_INSPECT_TOOL: ToolDefinition = {
     "function": {
         "name": HOST_INSPECT_TOOL_NAME,
         "description": (
-            "查询一台已授权服务器的事实，或该机器上一个允许读取的 systemd 服务状态。"
-            "用于核实主机系统、资源和具体服务是否正常；不要猜测 host_id 或 unit。"
+            "查询一台服务器是否在线、监控、磁盘、失败服务和系统信息。"
+            "例如看 tank 状态，传入 {\"host_id\":\"tank\"} 即可，不能填写 unit。"
+            "查具体服务使用 service_inspect；查千问推理 API 使用 model_status。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "host_id": {
                     "type": "string",
-                    "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$",
-                },
-                "unit": {
-                    "type": "string",
-                    "pattern": "^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,127}$",
-                    "description": "可选的完整 systemd unit，例如 qq-deepseek-bot.service。",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+                    "description": "已登记主机名称，例如 tank、h610、h310。",
                 },
             },
             "required": ["host_id"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+SERVICE_INSPECT_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": SERVICE_INSPECT_TOOL_NAME,
+        "description": "读取一台已授权主机上具体服务的状态。unit 必须是完整服务名；只问主机状态时使用 host_inspect。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "host_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"},
+                "unit": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,119}\\.service$", "description": "已授权的完整服务名，例如 qq-deepseek-bot.service；systemd 不是服务名。"},
+            },
+            "required": ["host_id", "unit"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+MODEL_STATUS_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": MODEL_STATUS_TOOL_NAME,
+        "description": "查看千问或其他已配置模型的状态。千问会重新探测已配置的 /models，并结合实际请求成败和时间。问千问开了吗、能用吗、是不是挂了时调用，不要拿宿主机在线代替模型可用。",
+        "parameters": {
+            "type": "object",
+            "properties": {"profile": {"type": "string", "description": "模型配置名；千问用 qwen-local，或省略此字段。"}},
             "additionalProperties": False,
         },
     },
@@ -182,11 +211,11 @@ SERVICE_LOGS_TOOL: ToolDefinition = {
             "properties": {
                 "host_id": {
                     "type": "string",
-                    "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
                 },
                 "unit": {
                     "type": "string",
-                    "pattern": "^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,127}$",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,119}\\.service$",
                 },
                 "lines": {
                     "type": "integer",
@@ -1534,7 +1563,7 @@ def available_tools(
         tools.append(QUERY_ALERTS_TOOL)
     if include_fleet_tools:
         tools.extend(
-            [FLEET_OVERVIEW_TOOL, HOST_INSPECT_TOOL, DIAGNOSE_INCIDENT_TOOL]
+            [FLEET_OVERVIEW_TOOL, HOST_INSPECT_TOOL, SERVICE_INSPECT_TOOL, MODEL_STATUS_TOOL, DIAGNOSE_INCIDENT_TOOL]
         )
         if include_fleet_logs:
             tools.append(SERVICE_LOGS_TOOL)

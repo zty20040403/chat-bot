@@ -57,6 +57,8 @@ _READ_TOOLS = {
     "query_alerts",
     "fleet_overview",
     "host_inspect",
+    "service_inspect",
+    "model_status",
     "service_logs",
     "read_image_text",
     "view_image",

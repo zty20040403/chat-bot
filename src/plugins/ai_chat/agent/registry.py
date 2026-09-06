@@ -23,6 +23,8 @@ COMMON_READ_TOOLS = frozenset(
         "say",
         "fleet_overview",
         "host_inspect",
+        "service_inspect",
+        "model_status",
     }
 )
 SANDBOX_TOOLS = frozenset(
@@ -182,6 +184,8 @@ AGENT_SPECS: dict[SubAgentRole, AgentSpec] = {
                 "query_alerts",
                 "fleet_overview",
                 "host_inspect",
+                "service_inspect",
+                "model_status",
                 "service_logs",
                 "diagnose_incident",
                 "sandbox_list",
