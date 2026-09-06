@@ -30,6 +30,13 @@ def _tokens(text: str) -> set[str]:
     return {word for word in words if word.strip()}
 
 
+def _incident_key(value: str) -> str:
+    key = value.strip()
+    if not key or len(key) > 240:
+        raise ValueError("incident_key must contain 1 to 240 characters")
+    return key
+
+
 class ReliabilityStore:
     """Durable incident memory and time-bounded guardian contracts."""
 
@@ -62,6 +69,7 @@ class ReliabilityStore:
             raise ValueError("invalid incident severity")
         if confidence not in {"confirmed", "supported", "unknown", "contradicted"}:
             raise ValueError("invalid incident confidence")
+        incident_key = _incident_key(incident_key)
         now = int(time.time())
         observed_at = int(occurred_at or now)
         connection = self.database.store_connection()
@@ -81,7 +89,7 @@ class ReliabilityStore:
                         resource_version, created_at, updated_at)
                        VALUES (?, ?, ?, ?, ?, 'open', ?, 'admin', ?, ?, 1, ?, ?)""",
                     (
-                        incident_id, incident_key[:240], host_id[:64], service_ref[:160],
+                        incident_id, incident_key, host_id[:64], service_ref[:160],
                         severity, summary[:2000], observed_at, observed_at, now, now,
                     ),
                 )
@@ -130,6 +138,8 @@ class ReliabilityStore:
             ).fetchone()
             if row is None:
                 raise LookupError("incident not found")
+            if row["status"] == "resolved":
+                raise ValueError("incident is already resolved")
             if int(row["resource_version"]) != int(expected_version):
                 raise ValueError("incident changed; refresh before resolving")
             cursor.execute(
@@ -158,6 +168,7 @@ class ReliabilityStore:
         self, *, incident_key: str, source_ref: str, payload: Mapping[str, Any]
     ) -> dict[str, Any] | None:
         """Close the current incident after a deterministic recovery probe."""
+        incident_key = _incident_key(incident_key)
         now = int(time.time())
         connection = self.database.store_connection()
         cursor = connection.cursor()
@@ -234,6 +245,20 @@ class ReliabilityStore:
             raise ValueError("resolution must contain at least one step")
         if not isinstance(applicability, dict) or not isinstance(evidence_refs, list):
             raise ValueError("invalid applicability or evidence references")
+        title = str(raw.get("title") or "").strip()
+        symptoms = str(raw.get("symptoms") or "").strip()
+        confirmed_cause = str(raw.get("confirmed_cause") or "").strip()
+        if not title or not symptoms:
+            raise ValueError("runbook cases require a title and symptoms")
+        if status == "verified" and (
+            confidence == "unknown"
+            or not confirmed_cause
+            or not applicability
+            or not evidence_refs
+        ):
+            raise ValueError(
+                "verified runbook cases require a cause, applicability, evidence, and confidence"
+            )
         case_id = new_handle("case")
         now = int(time.time())
         connection = self.database.store_connection()
@@ -246,11 +271,10 @@ class ReliabilityStore:
                     confidence, revision, created_by, created_at, updated_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)""",
                 (
-                    case_id, str(raw.get("title") or "")[:240],
+                    case_id, title[:240],
                     str(raw.get("host_id") or "")[:64],
                     str(raw.get("service_ref") or "")[:160],
-                    str(raw.get("symptoms") or "")[:4000],
-                    str(raw.get("confirmed_cause") or "")[:4000],
+                    symptoms[:4000], confirmed_cause[:4000],
                     canonical_json(resolution), canonical_json(applicability),
                     canonical_json(evidence_refs), status, confidence, actor_id, now, now,
                 ),
@@ -582,7 +606,7 @@ class ReliabilityStore:
             ).fetchone()
             if row is None:
                 raise LookupError("guardian not found")
-            if row["check_lease_owner"] != owner or int(row["check_lease_until"] or 0) < now:
+            if row["check_lease_owner"] != owner or int(row["check_lease_until"] or 0) <= now:
                 raise PermissionError("guardian check lease is stale")
             failures = 0 if outcome == "passed" else int(row["consecutive_failures"])
             if outcome == "failed":

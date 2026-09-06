@@ -13,6 +13,7 @@ from src.cluster_control.guardian import (
     GuardianService,
     guardian_status_after_check,
     materialize_guardian_action,
+    require_guardian_mode_capability,
     resolve_guardian_target,
     validate_guardian_action,
 )
@@ -289,6 +290,46 @@ class SchedulingPolicyTests(unittest.TestCase):
             ),
             "completed",
         )
+
+    def test_remediation_requires_an_available_write_backend(self) -> None:
+        with self.assertRaises(PermissionError):
+            require_guardian_mode_capability(
+                "remediate", remediation_available=False
+            )
+        require_guardian_mode_capability("observe", remediation_available=False)
+        require_guardian_mode_capability("remediate", remediation_available=True)
+
+    def test_verified_runbook_requires_replay_evidence(self) -> None:
+        store = ReliabilityStore(object())  # type: ignore[arg-type]
+        with self.assertRaisesRegex(ValueError, "verified runbook cases require"):
+            store.create_case(
+                {
+                    "title": "service outage",
+                    "symptoms": "HTTP 503",
+                    "confirmed_cause": "",
+                    "resolution": ["restart the approved service"],
+                    "applicability": {},
+                    "evidence_refs": [],
+                    "status": "verified",
+                    "confidence": "confirmed",
+                },
+                actor_id="admin:kenneth",
+            )
+
+    def test_incident_key_rejects_silent_truncation(self) -> None:
+        store = ReliabilityStore(object())  # type: ignore[arg-type]
+        with self.assertRaisesRegex(ValueError, "incident_key"):
+            store.observe_incident(
+                incident_key="x" * 241,
+                host_id="h610",
+                service_ref="nginx.service",
+                severity="warning",
+                summary="failed",
+                event_type="probe_failed",
+                source_ref="probe",
+                confidence="confirmed",
+                payload={},
+            )
 
     def test_guardian_action_is_bound_and_materialized_at_execution_time(self) -> None:
         template = validate_guardian_action(

@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .api_resources import ResourceStatusRequest
 from .execution_service import ClusterExecutionService
+from .guardian import require_guardian_mode_capability
 from .reliability import ReliabilityStore
 
 
@@ -183,12 +184,17 @@ def build_reliability_router(
         principal: tuple[str, str] = Depends(signed_principal),
     ) -> dict[str, object]:
         try:
+            execution = execution_service()
+            require_guardian_mode_capability(
+                body.mode,
+                remediation_available=execution.write_backend.available,
+            )
             return await asyncio.to_thread(
                 reliability_store().create_guardian,
                 body.model_dump(exclude_none=True),
                 actor_id=principal[0],
                 origin_scope=principal[1],
-                known_targets=execution_service().diagnostic_targets,
+                known_targets=execution.diagnostic_targets,
             )
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from None

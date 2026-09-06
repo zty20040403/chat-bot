@@ -79,6 +79,15 @@ def guardian_status_after_check(
     return "active"
 
 
+def require_guardian_mode_capability(
+    mode: str, *, remediation_available: bool
+) -> None:
+    if mode == "remediate" and not remediation_available:
+        raise PermissionError(
+            "guardian remediation is unavailable until the approved write backend is active"
+        )
+
+
 def validate_guardian_action(
     raw: Any,
     *,
