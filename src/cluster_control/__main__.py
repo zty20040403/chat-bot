@@ -17,7 +17,8 @@ from .service import FleetControlService
 from .storage import FleetProjectionStore
 from .execution_service import ClusterExecutionService, WorkerAuthenticator
 from .execution_storage import ClusterExecutionStore
-from .reliability import GuardianService, ReliabilityStore
+from .guardian import GuardianService
+from .reliability import ReliabilityStore
 from .scheduling import ResourcePolicyStore
 
 

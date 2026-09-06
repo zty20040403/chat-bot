@@ -21,7 +21,8 @@ from .auth import CredentialFileAuthenticator
 from .deployment_service import DeploymentService
 from .diagnostics import IncidentDiagnosticService
 from .execution_service import ClusterExecutionService, WorkerAuthenticator
-from .reliability import GuardianService, ReliabilityStore
+from .guardian import GuardianService
+from .reliability import ReliabilityStore
 from .scheduling import ResourcePolicyStore
 from .service import FleetControlService
 
