@@ -29,6 +29,7 @@ SANDBOX_TOOLS = frozenset(
     {
         "sandbox_create",
         "sandbox_list",
+        "nix_search",
         "sandbox_exec",
         "sandbox_write_file",
         "sandbox_read_file",

@@ -302,6 +302,7 @@ class Settings:
     codesnap_cache_entries: int
     sandbox_enabled: bool
     sandbox_image: str
+    sandbox_nix_cache_volume: str
     sandbox_allowed_users: set[int]
     sandbox_max_per_user: int
     sandbox_max_total: int
@@ -913,6 +914,10 @@ class Settings:
             ),
             sandbox_enabled=_get_bool("AI_SANDBOX_ENABLED", False),
             sandbox_image=os.getenv("AI_SANDBOX_IMAGE", "").strip(),
+            sandbox_nix_cache_volume=(
+                os.getenv("AI_SANDBOX_NIX_CACHE_VOLUME", "kennethbot-nix-v2").strip()
+                or "kennethbot-nix-v2"
+            ),
             sandbox_allowed_users=_get_group_ids(
                 "AI_SANDBOX_ALLOWED_USERS"
             ),

@@ -91,7 +91,79 @@ class DockerSandboxCancellationTests(unittest.IsolatedAsyncioTestCase):
         command = manager._run.await_args.args
         self.assertIn("kennethbot-sandbox:latest", command)
         self.assertEqual(command[command.index("--user") + 1], "1000:1000")
+        self.assertIn("--read-only", command)
+        self.assertIn(
+            "type=volume,source=kennethbot-nix-v2,target=/nix,readonly",
+            command,
+        )
+        self.assertTrue(
+            any(
+                str(item).startswith("type=volume,source=kennethbot-work-s")
+                and str(item).endswith(",target=/workspace")
+                for item in command
+            )
+        )
         self.assertEqual(created["toolset"], "advanced")
+
+    async def test_destroy_removes_the_owned_workspace_volume(self) -> None:
+        manager = DockerSandboxManager(image="kennethbot-sandbox:latest")
+        manager._owned_container = AsyncMock(return_value="qqbot-sabc123")  # type: ignore[method-assign]
+        manager._run = AsyncMock(  # type: ignore[method-assign]
+            side_effect=[
+                SandboxResult("", "", 0),
+                SandboxResult("", "", 0),
+            ]
+        )
+
+        await manager.destroy("owner", "sabc123")
+
+        self.assertEqual(
+            manager._run.await_args_list[1].args,
+            ("docker", "volume", "rm", "-f", "kennethbot-work-sabc123"),
+        )
+
+    async def test_exec_prepares_and_wraps_requested_nix_packages(self) -> None:
+        manager = DockerSandboxManager(image="kennethbot-sandbox:latest")
+        manager._owned_container = AsyncMock(return_value="qqbot-sabc123")  # type: ignore[method-assign]
+        manager._prepare_packages = AsyncMock(  # type: ignore[method-assign]
+            return_value=("/nix/store/abc-ffmpeg",)
+        )
+        manager._run_bytes = AsyncMock(return_value=(b"ok", b"", 0))  # type: ignore[method-assign]
+        manager._run = AsyncMock(  # type: ignore[method-assign]
+            side_effect=[
+                SandboxResult("bridge\n", "", 0),
+                SandboxResult("", "", 0),
+                SandboxResult("", "", 0),
+                SandboxResult("", "", 0),
+                SandboxResult("", "", 0),
+            ]
+        )
+
+        await manager.exec(
+            "owner",
+            "sabc123",
+            "ffmpeg -version",
+            30,
+            packages=["ffmpeg"],
+        )
+
+        manager._prepare_packages.assert_awaited_once_with(
+            ["ffmpeg"], timeout_seconds=120
+        )
+        wrapped = manager._run_bytes.await_args.args[-1]
+        self.assertIn("/nix/store/abc-ffmpeg/bin", wrapped)
+        self.assertIn("ffmpeg -version", wrapped)
+
+    async def test_package_attributes_are_structured_and_reject_injection(self) -> None:
+        manager = DockerSandboxManager(image="kennethbot-sandbox:latest")
+        with self.assertRaises(SandboxError):
+            await manager._prepare_packages(["ffmpeg;id"], timeout_seconds=30)
+        expression = manager._package_expression(
+            ("ffmpeg", "python3Packages.pandas")
+        )
+        self.assertIn('builtins.getAttr "ffmpeg" pkgs', expression)
+        self.assertIn('builtins.getAttr "pandas" ps', expression)
+        self.assertIn("python3.withPackages", expression)
 
     async def test_zero_file_limit_allows_large_transfers(self) -> None:
         manager = DockerSandboxManager(max_file_bytes=0)

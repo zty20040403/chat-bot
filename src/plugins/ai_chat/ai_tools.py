@@ -25,6 +25,7 @@ SANDBOX_CREATE_TOOL_NAME = "sandbox_create"
 SANDBOX_LIST_TOOL_NAME = "sandbox_list"
 SANDBOX_DESTROY_TOOL_NAME = "sandbox_destroy"
 SANDBOX_EXEC_TOOL_NAME = "sandbox_exec"
+NIX_SEARCH_TOOL_NAME = "nix_search"
 SANDBOX_WRITE_FILE_TOOL_NAME = "sandbox_write_file"
 SANDBOX_READ_FILE_TOOL_NAME = "sandbox_read_file"
 JOB_STATUS_TOOL_NAME = "job_status"
@@ -510,9 +511,10 @@ SANDBOX_CREATE_TOOL: ToolDefinition = {
     "function": {
         "name": SANDBOX_CREATE_TOOL_NAME,
         "description": (
-            "创建隔离的高级 Docker 工作站沙盒。已预装常用 shell 工具、"
-            "Git、Python/Node/Go/Rust/Java、编译器、PDF/Office、图片、OCR、"
-            "音视频、数据分析和数据库客户端。需要写代码、处理文件、"
+            "创建隔离的 Nix 高级 Docker 工作站沙盒。已预装常用 shell 工具、"
+            "Git、Python、Node、GCC、SQLite 和可靠的中文 PDF 工具；"
+            "Go、Rust、Java、LibreOffice、ffmpeg、OCR、科学计算等大工具通过 "
+            "sandbox_exec.packages 按需加入。需要写代码、处理文件、"
             "构建或测试项目时先调用。"
             "工作目录固定为 /workspace。本次任务结束时宿主会自动销毁它，"
             "销毁前必须用发送工具交付需要保留的文件。"
@@ -566,10 +568,11 @@ SANDBOX_EXEC_TOOL: ToolDefinition = {
     "function": {
         "name": SANDBOX_EXEC_TOOL_NAME,
         "description": (
-            "在指定沙盒的 /workspace 中执行 shell 命令，适合安装依赖、构建、测试、"
-            "运行程序和打包文件。常用开发、PDF/Office、媒体、OCR 和数据"
-            "工具已预装；中文 PDF 使用 kennethbot-pdf，并用 pdffonts、pdftotext 验收。"
-            "先用 command -v 确认再考虑额外安装。不要用于读写宿主机。"
+            "在指定沙盒的 /workspace 中执行 shell 命令，适合构建、测试、运行程序"
+            "和打包文件。缺少工具时不要 apt/pip 全局安装：先用 nix_search 找到"
+            "属性名，再放进 packages；首次下载后会被所有 Kennethbot 沙盒缓存。"
+            "中文 PDF 使用 kennethbot-pdf，并用 pdffonts、pdftotext 验收。"
+            "不要用于读写宿主机。"
             "预计超过一次对话等待时间时，"
             "设置 background=true 交给可恢复的持久任务队列。"
         ),
@@ -578,6 +581,15 @@ SANDBOX_EXEC_TOOL: ToolDefinition = {
             "properties": {
                 "sandbox_id": {"type": "string"},
                 "command": {"type": "string", "description": "要执行的 shell 命令。"},
+                "packages": {
+                    "type": "array",
+                    "items": {"type": "string", "maxLength": 128},
+                    "maxItems": 16,
+                    "description": (
+                        "仅对本次命令生效的 nixpkgs 属性，如 ffmpeg、go、"
+                        "rustc、python3Packages.pandas。"
+                    ),
+                },
                 "timeout_seconds": {
                     "type": "integer",
                     "minimum": 1,
@@ -589,6 +601,30 @@ SANDBOX_EXEC_TOOL: ToolDefinition = {
                 },
             },
             "required": ["sandbox_id", "command"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+NIX_SEARCH_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": NIX_SEARCH_TOOL_NAME,
+        "description": (
+            "搜索高级沙盒锁定的 nixpkgs 软件包。缺少命令或 Python 库时先调用，"
+            "把返回的 attribute 原样传给 sandbox_exec.packages。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 80,
+                    "description": "软件名称或关键词，如 ffmpeg、opencv、pandoc。",
+                }
+            },
+            "required": ["query"],
             "additionalProperties": False,
         },
     },
@@ -1431,6 +1467,7 @@ SANDBOX_TOOLS = [
     SANDBOX_LIST_TOOL,
     SANDBOX_DESTROY_TOOL,
     SANDBOX_EXEC_TOOL,
+    NIX_SEARCH_TOOL,
     SANDBOX_WRITE_FILE_TOOL,
     SANDBOX_READ_FILE_TOOL,
     SEND_FILE_FROM_SANDBOX_TOOL,

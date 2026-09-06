@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.13.0-22c55e?style=for-the-badge">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.14.0-22c55e?style=for-the-badge">
   <img alt="Python" src="https://img.shields.io/badge/Python-3.12-3776ab?style=for-the-badge&amp;logo=python&amp;logoColor=white">
   <img alt="NoneBot2" src="https://img.shields.io/badge/NoneBot2-OneBot_V11-ea5252?style=for-the-badge">
   <img alt="PostgreSQL" src="https://img.shields.io/badge/PostgreSQL-Durable-4169e1?style=for-the-badge&amp;logo=postgresql&amp;logoColor=white">
@@ -326,6 +326,12 @@ NapCat 日志出现连接成功后，可以在 QQ 中测试：
 /shell python --version
 /shell echo hello > hello.txt
 ```
+
+Agent 使用同一套精简 Nix 沙盒。Python、Node、GCC、Git、SQLite、常用 shell
+命令和中文 PDF 工具开箱即用；Go、Rust、Java、ffmpeg、LibreOffice、OCR 与
+科学计算栈由 `nix_search` + `sandbox_exec.packages` 按任务加载并共享缓存，避免
+把低频工具永久塞进二十多 GB 的基础镜像。任务执行容器以非 root 用户运行，
+根文件系统和 Nix 缓存只读；任务结束后工作卷自动删除，按需包缓存定期回收。
 
 OpenAI/CLIProxy 模型可以按当前用户、当前会话覆盖推理强度：
 

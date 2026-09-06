@@ -183,8 +183,9 @@ class FakeSandboxManager:
         sandbox_id: str,
         command: str,
         timeout_seconds: int | None = None,
+        packages: list[str] | None = None,
     ) -> SimpleNamespace:
-        del owner, sandbox_id, timeout_seconds
+        del owner, sandbox_id, timeout_seconds, packages
         self.executed.append(command)
         if command.startswith("pdffonts "):
             return SimpleNamespace(
@@ -199,6 +200,15 @@ class FakeSandboxManager:
         if command.startswith("pdftotext "):
             return SimpleNamespace(returncode=0, stdout="中文报告\n", stderr="")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    async def search_nix_packages(self, query: str) -> list[dict[str, str]]:
+        return [
+            {
+                "attribute": query,
+                "package": f"{query}-1.0",
+                "description": "test package",
+            }
+        ]
 
 
 class FakeContentSource:
@@ -436,6 +446,7 @@ class AgentToolExecutorTests(unittest.IsolatedAsyncioTestCase):
                 {
                     "sandbox_id": "s123abc",
                     "command": "python -m unittest",
+                    "packages": ["python3Packages.pytest"],
                     "timeout_seconds": 120,
                     "background": True,
                 },
@@ -450,6 +461,9 @@ class AgentToolExecutorTests(unittest.IsolatedAsyncioTestCase):
         stored = store.get(1)
         self.assertEqual(stored.kind, "agent.sandbox_exec")  # type: ignore[union-attr]
         self.assertEqual(stored.max_attempts, 3)  # type: ignore[union-attr]
+        self.assertEqual(  # type: ignore[union-attr]
+            stored.payload["packages"], ["python3Packages.pytest"]
+        )
         status = json.loads(
             await self.executor.execute(
                 "job_status",
@@ -458,6 +472,15 @@ class AgentToolExecutorTests(unittest.IsolatedAsyncioTestCase):
             or "{}"
         )
         self.assertEqual(status["status"], "pending")
+
+    async def test_nix_search_returns_structured_package_matches(self) -> None:
+        result = json.loads(
+            await self.executor.execute("nix_search", {"query": "ffmpeg"})
+            or "{}"
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["packages"][0]["attribute"], "ffmpeg")
 
     async def test_message_tools_fail_closed_without_canonical_ledger(self) -> None:
         degraded = AgentToolExecutor(

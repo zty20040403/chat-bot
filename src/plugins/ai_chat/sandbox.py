@@ -11,6 +11,9 @@ from pathlib import PurePosixPath
 
 
 SANDBOX_ID_PATTERN = re.compile(r"^s[0-9a-f]{6}$")
+NIX_ATTRIBUTE_PATTERN = re.compile(
+    r"^[A-Za-z0-9_+\-]+(?:\.[A-Za-z0-9_+\-]+)*$"
+)
 RUNTIME_IMAGES = {
     "python": "python:3.12-slim",
     "node": "node:22-slim",
@@ -66,6 +69,8 @@ class DockerSandboxManager:
         default_timeout_seconds: int = 120,
         max_output_chars: int = 12000,
         max_file_bytes: int = 20 * 1024 * 1024,
+        nix_cache_volume: str = "kennethbot-nix-v2",
+        max_packages_per_exec: int = 16,
     ) -> None:
         self.image = image.strip()
         self.max_per_owner = max(1, max_per_owner)
@@ -73,10 +78,14 @@ class DockerSandboxManager:
         self.default_timeout_seconds = max(5, default_timeout_seconds)
         self.max_output_chars = max(1000, max_output_chars)
         self.max_file_bytes = max(0, int(max_file_bytes))
+        self.nix_cache_volume = nix_cache_volume.strip() or "kennethbot-nix-v2"
+        self.max_packages_per_exec = min(max(int(max_packages_per_exec), 1), 32)
         self._active_execs: dict[str, SandboxExecutionActivity] = {}
         self._last_execs: dict[str, SandboxExecutionActivity] = {}
         self._owner_create_locks: dict[str, asyncio.Lock] = {}
         self._exec_locks: dict[str, asyncio.Lock] = {}
+        self._nix_volume_lock = asyncio.Lock()
+        self._nix_volume_ready = False
 
     async def create(
         self,
@@ -102,6 +111,10 @@ class DockerSandboxManager:
 
         sandbox_id = "s" + secrets.token_hex(3)
         name = self._container_name(sandbox_id)
+        workspace_volume = self._workspace_volume_name(sandbox_id)
+        if self.image:
+            await self._ensure_nix_volume(image)
+            await self._prepare_workspace_volume(image, workspace_volume)
         command = [
             "docker",
             "run",
@@ -138,12 +151,22 @@ class DockerSandboxManager:
         if self.image:
             command.extend(
                 [
+                    "--read-only",
                     "--user",
                     "1000:1000",
                     "--env",
                     "HOME=/home/sandbox",
                     "--env",
                     "USER=sandbox",
+                    "--tmpfs",
+                    "/home/sandbox:rw,nosuid,nodev,size=256m,uid=1000,gid=1000,mode=700",
+                    "--mount",
+                    f"type=volume,source={workspace_volume},target=/workspace",
+                    "--mount",
+                    (
+                        "type=volume,source="
+                        f"{self.nix_cache_volume},target=/nix,readonly"
+                    ),
                 ]
             )
         command.extend(
@@ -156,6 +179,8 @@ class DockerSandboxManager:
         )
         result = await self._run(*command, timeout=300)
         if result.returncode != 0:
+            if self.image:
+                await self._remove_volume(workspace_volume)
             detail = result.stderr or result.stdout
             raise SandboxError(self._docker_error(detail))
         return {
@@ -303,6 +328,8 @@ class DockerSandboxManager:
         )
         if result.returncode != 0:
             raise SandboxError(self._docker_error(result.stderr))
+        if self.image:
+            await self._remove_volume(self._workspace_volume_name(sandbox_id))
         self._exec_locks.pop(sandbox_id, None)
 
     async def exec(
@@ -311,6 +338,7 @@ class DockerSandboxManager:
         sandbox_id: str,
         command: str,
         timeout_seconds: int | None = None,
+        packages: list[str] | tuple[str, ...] | None = None,
     ) -> SandboxResult:
         if not command.strip():
             raise SandboxError("命令不能为空。")
@@ -321,6 +349,11 @@ class DockerSandboxManager:
                 max(timeout_seconds or self.default_timeout_seconds, 1),
                 300,
             )
+            store_paths = await self._prepare_packages(
+                packages or (),
+                timeout_seconds=max(timeout, 120),
+            )
+            wrapped_command = self._wrap_packages(store_paths, command)
             activity_id = secrets.token_hex(8)
             activity = SandboxExecutionActivity(
                 activity_id=activity_id,
@@ -350,7 +383,7 @@ class DockerSandboxManager:
                     str(timeout),
                     "sh",
                     "-lc",
-                    command,
+                    wrapped_command,
                     timeout=timeout + 10,
                 )
                 duration_ms = max(int((time.monotonic() - started) * 1000), 0)
@@ -397,6 +430,275 @@ class DockerSandboxManager:
                 self._active_execs.pop(activity_id, None)
                 if marker_ready:
                     await self._remove_observation_marker(name, marker)
+
+    async def search_nix_packages(self, query: str) -> list[dict[str, str]]:
+        if not self.image:
+            raise SandboxError("当前不是 Nix 高级沙盒，无法搜索按需软件包。")
+        normalized = " ".join(query.split()).strip()
+        if not normalized or len(normalized) > 80:
+            raise SandboxError("软件包搜索词必须为 1 到 80 个字符。")
+        await self._ensure_nix_volume(self.image)
+        result = await self._run(
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--user",
+            "0:0",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--memory",
+            "2g",
+            "--memory-swap",
+            "2g",
+            "--mount",
+            f"type=volume,source={self.nix_cache_volume},target=/nix",
+            self.image,
+            "nix-env",
+            "-qaP",
+            "-f",
+            "<nixpkgs>",
+            "--description",
+            f".*{normalized}.*",
+            timeout=120,
+        )
+        if result.returncode != 0:
+            raise SandboxError(
+                "Nix 软件包搜索失败：" + self._docker_error(result.stderr)
+            )
+        matches: list[dict[str, str]] = []
+        for line in result.stdout.splitlines():
+            fields = line.split(None, 2)
+            if len(fields) < 2:
+                continue
+            matches.append(
+                {
+                    "attribute": fields[0],
+                    "package": fields[1],
+                    "description": fields[2] if len(fields) > 2 else "",
+                }
+            )
+            if len(matches) >= 30:
+                break
+        return matches
+
+    async def _ensure_nix_volume(self, image: str) -> None:
+        if self._nix_volume_ready:
+            return
+        async with self._nix_volume_lock:
+            if self._nix_volume_ready:
+                return
+            result = await self._run(
+                "docker",
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--user",
+                "0:0",
+                "--cap-drop",
+                "ALL",
+                "--security-opt",
+                "no-new-privileges",
+                "--memory",
+                "512m",
+                "--memory-swap",
+                "512m",
+                "--read-only",
+                "--tmpfs",
+                "/tmp:rw,nosuid,nodev,size=64m,mode=1777",
+                "--tmpfs",
+                "/root:rw,nosuid,nodev,size=32m,mode=700",
+                "--mount",
+                f"type=volume,source={self.nix_cache_volume},target=/nix",
+                image,
+                "sh",
+                "-lc",
+                "test -x \"$(command -v nix-store)\" && nix-store --version",
+                timeout=120,
+            )
+            if result.returncode != 0:
+                raise SandboxError(
+                    "Nix 共享缓存初始化失败："
+                    + self._docker_error(result.stderr or result.stdout)
+                )
+            self._nix_volume_ready = True
+
+    async def _prepare_workspace_volume(self, image: str, volume: str) -> None:
+        result = await self._run(
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--user",
+            "0:0",
+            "--cap-drop",
+            "ALL",
+            "--cap-add",
+            "CHOWN",
+            "--security-opt",
+            "no-new-privileges",
+            "--memory",
+            "256m",
+            "--memory-swap",
+            "256m",
+            "--read-only",
+            "--mount",
+            f"type=volume,source={volume},target=/workspace",
+            image,
+            "sh",
+            "-lc",
+            "chown 1000:1000 /workspace && chmod 700 /workspace",
+            timeout=120,
+        )
+        if result.returncode != 0:
+            try:
+                await self._remove_volume(volume)
+            except SandboxError:
+                pass
+            raise SandboxError(
+                "沙盒工作卷初始化失败："
+                + self._docker_error(result.stderr or result.stdout)
+            )
+
+    async def _remove_volume(self, volume: str) -> None:
+        result = await self._run(
+            "docker",
+            "volume",
+            "rm",
+            "-f",
+            volume,
+            timeout=30,
+        )
+        detail = result.stderr or result.stdout
+        if result.returncode != 0 and "no such volume" not in detail.lower():
+            raise SandboxError(self._docker_error(detail))
+
+    async def _prepare_packages(
+        self,
+        packages: list[str] | tuple[str, ...],
+        *,
+        timeout_seconds: int,
+    ) -> tuple[str, ...]:
+        unique = tuple(dict.fromkeys(str(item).strip() for item in packages))
+        if not unique:
+            return ()
+        if not self.image:
+            raise SandboxError("只有 Nix 高级沙盒支持按需软件包。")
+        if len(unique) > self.max_packages_per_exec:
+            raise SandboxError(
+                f"一次最多请求 {self.max_packages_per_exec} 个 Nix 软件包。"
+            )
+        invalid = [
+            item
+            for item in unique
+            if len(item) > 128 or NIX_ATTRIBUTE_PATTERN.fullmatch(item) is None
+        ]
+        if invalid:
+            raise SandboxError(f"Nix 软件包属性名无效：{invalid[0]}")
+
+        await self._ensure_nix_volume(self.image)
+        expression = self._package_expression(unique)
+        cache_key = hashlib.sha256("\0".join(unique).encode()).hexdigest()[:24]
+        root = f"/nix/var/nix/gcroots/kennethbot-packages/{cache_key}"
+        timeout = min(max(int(timeout_seconds), 30), 300)
+        script = (
+            "set -eu; root=$1; expr=$2; rm -rf -- \"$root\"; "
+            "mkdir -p -- \"$root\"; "
+            f"paths=$(timeout --signal=TERM --kill-after=5s {timeout}s "
+            "nix-build --no-out-link --expr \"$expr\"); "
+            "i=0; for path in $paths; do "
+            "case \"$path\" in /nix/store/*) ;; *) exit 71;; esac; "
+            "ln -s \"$path\" \"$root/$i\"; i=$((i+1)); done; "
+            "test \"$i\" -gt 0; touch \"$root\"; printf '%s\\n' \"$paths\""
+        )
+        result = await self._run(
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            "bridge",
+            "--user",
+            "0:0",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--memory",
+            "8g",
+            "--memory-swap",
+            "8g",
+            "--read-only",
+            "--tmpfs",
+            "/tmp:rw,nosuid,nodev,size=2g,mode=1777",
+            "--tmpfs",
+            "/root:rw,nosuid,nodev,size=128m,mode=700",
+            "--mount",
+            f"type=volume,source={self.nix_cache_volume},target=/nix",
+            self.image,
+            "sh",
+            "-lc",
+            script,
+            "kennethbot-package-helper",
+            root,
+            expression,
+            timeout=timeout + 20,
+        )
+        if result.returncode != 0:
+            raise SandboxError(
+                "Nix 按需软件包准备失败："
+                + self._docker_error(result.stderr or result.stdout)
+            )
+        paths = tuple(
+            line.strip()
+            for line in result.stdout.splitlines()
+            if line.strip().startswith("/nix/store/")
+            and "/" not in line.strip().removeprefix("/nix/store/")
+        )
+        if not paths:
+            raise SandboxError("Nix 没有返回可用的软件包路径。")
+        return paths
+
+    @classmethod
+    def _package_expression(cls, packages: tuple[str, ...]) -> str:
+        python: list[str] = []
+        ordinary: list[str] = []
+        for attribute in packages:
+            prefix = "python3Packages."
+            if attribute.startswith(prefix):
+                python.append(attribute.removeprefix(prefix))
+            else:
+                ordinary.append(attribute)
+        values = [cls._attribute_expression("pkgs", item) for item in ordinary]
+        if python:
+            python_values = " ".join(
+                cls._attribute_expression("ps", item) for item in python
+            )
+            values.append(
+                f"(pkgs.python3.withPackages (ps: [ {python_values} ]))"
+            )
+        return "let pkgs = import <nixpkgs> {}; in [ " + " ".join(values) + " ]"
+
+    @staticmethod
+    def _attribute_expression(root: str, attribute: str) -> str:
+        expression = root
+        for segment in attribute.split("."):
+            expression = f'(builtins.getAttr "{segment}" {expression})'
+        return expression
+
+    @staticmethod
+    def _wrap_packages(store_paths: tuple[str, ...], command: str) -> str:
+        if not store_paths:
+            return command
+        package_path = ":".join(f"{path}/bin" for path in store_paths)
+        return (
+            f"export PATH={shlex.quote(package_path)}:\"$PATH\"; "
+            f"exec sh -lc {shlex.quote(command)}"
+        )
 
     async def write_file(
         self,
@@ -914,6 +1216,10 @@ with tempfile.TemporaryFile() as output:
     @staticmethod
     def _container_name(sandbox_id: str) -> str:
         return f"qqbot-{sandbox_id}"
+
+    @staticmethod
+    def _workspace_volume_name(sandbox_id: str) -> str:
+        return f"kennethbot-work-{sandbox_id}"
 
     @staticmethod
     def _owner_ref(owner: str) -> str:

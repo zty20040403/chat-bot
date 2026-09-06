@@ -210,6 +210,18 @@ in {
       description = "Docker image name used when creating advanced sandboxes.";
     };
 
+    sandbox.nixCacheVolume = lib.mkOption {
+      type = lib.types.str;
+      default = "kennethbot-nix-v2";
+      description = "Docker volume shared by trusted Nix package helpers and mounted read-only in task sandboxes.";
+    };
+
+    sandbox.nixCacheRetentionDays = lib.mkOption {
+      type = lib.types.ints.between 1 90;
+      default = 14;
+      description = "Days to retain unused on-demand package roots before the dedicated sandbox cache GC removes them.";
+    };
+
     browser = {
       enable = lib.mkEnableOption "the bot's persistent Playwright browser and rich rendering";
 
@@ -412,6 +424,7 @@ in {
           AI_CACHE_DIR = cachePath;
           AI_SANDBOX_ENABLED = boolString cfg.sandbox.enable;
           AI_SANDBOX_IMAGE = cfg.sandbox.imageName;
+          AI_SANDBOX_NIX_CACHE_VOLUME = cfg.sandbox.nixCacheVolume;
           HOST = cfg.host;
           PORT = toString cfg.port;
           PYTHONUNBUFFERED = "1";
@@ -495,10 +508,55 @@ in {
       wantedBy = ["multi-user.target"];
       requires = ["docker.service"];
       after = ["docker.service"];
+      script = ''
+        ${pkgs.docker}/bin/docker load --input ${cfg.sandbox.imageArchive}
+        ${pkgs.docker}/bin/docker image ls --quiet \
+          --filter dangling=true \
+          --filter label=io.kennethbot.sandbox=advanced \
+          | ${pkgs.findutils}/bin/xargs --no-run-if-empty ${pkgs.docker}/bin/docker image rm || true
+      '';
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
-        ExecStart = "${pkgs.docker}/bin/docker load --input ${cfg.sandbox.imageArchive}";
+      };
+    };
+
+    systemd.services."${serviceName}-sandbox-nix-gc" = lib.mkIf cfg.sandbox.enable {
+      description = "Collect expired Kennethbot on-demand Nix packages";
+      requires = ["docker.service" "${serviceName}-sandbox-image.service"];
+      after = ["docker.service" "${serviceName}-sandbox-image.service"];
+      script = ''
+        ${pkgs.docker}/bin/docker run --rm \
+          --network none \
+          --user 0:0 \
+          --cap-drop ALL \
+          --security-opt no-new-privileges \
+          --memory 2g \
+          --memory-swap 2g \
+          --read-only \
+          --tmpfs /tmp:rw,nosuid,nodev,size=256m,mode=1777 \
+          --tmpfs /root:rw,nosuid,nodev,size=64m,mode=700 \
+          --mount type=volume,source=${lib.escapeShellArg cfg.sandbox.nixCacheVolume},target=/nix \
+          ${lib.escapeShellArg cfg.sandbox.imageName} \
+          sh -lc ${lib.escapeShellArg ''
+            set -eu
+            roots=/nix/var/nix/gcroots/kennethbot-packages
+            mkdir -p "$roots"
+            find "$roots" -mindepth 1 -maxdepth 1 -type d \
+              -mtime +${toString cfg.sandbox.nixCacheRetentionDays} -exec rm -rf -- {} +
+            nix-store --gc
+          ''}
+      '';
+      serviceConfig.Type = "oneshot";
+    };
+
+    systemd.timers."${serviceName}-sandbox-nix-gc" = lib.mkIf cfg.sandbox.enable {
+      description = "Schedule Kennethbot sandbox Nix cache collection";
+      wantedBy = ["timers.target"];
+      timerConfig = {
+        OnCalendar = "weekly";
+        Persistent = true;
+        RandomizedDelaySec = "2h";
       };
     };
 

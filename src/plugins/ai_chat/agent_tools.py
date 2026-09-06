@@ -35,6 +35,7 @@ from .ai_tools import (
     JOB_CANCEL_TOOL_NAME,
     JOB_STATUS_TOOL_NAME,
     LIST_RECENT_FILES_TOOL_NAME,
+    NIX_SEARCH_TOOL_NAME,
     SANDBOX_CREATE_TOOL_NAME,
     SANDBOX_DESTROY_TOOL_NAME,
     SANDBOX_EXEC_TOOL_NAME,
@@ -90,6 +91,10 @@ AGENT_TOOL_PROMPT = (
     "长任务开始和每个关键阶段都要用 say 发简短进度；"
     "有新的实际进展时可以持续汇报，但不要重复发送没有信息量的内容。"
     "先创建合适运行环境的沙盒，再写入或导入文件、执行构建和测试；"
+    "沙盒基础环境提供 Python、Node、GCC、Git、SQLite 和中文 PDF；"
+    "缺少 Go、Rust、Java、ffmpeg、LibreOffice、OCR 或科学计算库时，"
+    "先用 nix_search 找属性名，再通过 sandbox_exec 的 packages 参数按需加载，"
+    "不要使用 apt，也不要全局 pip install；"
     "需要交付时，用 send_file_from_sandbox 或 send_image_from_sandbox 发到当前群。"
     "生成含中文的 PDF 时必须使用沙盒内的 kennethbot-pdf input.md output.pdf，"
     "再用 pdffonts 确认字体已嵌入、pdftotext 确认中文可提取；"
@@ -278,6 +283,7 @@ class AgentToolExecutor:
             SANDBOX_LIST_TOOL_NAME: self._sandbox_list,
             SANDBOX_DESTROY_TOOL_NAME: self._sandbox_destroy,
             SANDBOX_EXEC_TOOL_NAME: self._sandbox_exec,
+            NIX_SEARCH_TOOL_NAME: self._nix_search,
             SANDBOX_WRITE_FILE_TOOL_NAME: self._sandbox_write_file,
             SANDBOX_READ_FILE_TOOL_NAME: self._sandbox_read_file,
             SEND_FILE_FROM_SANDBOX_TOOL_NAME: self._send_file_from_sandbox,
@@ -343,6 +349,7 @@ class AgentToolExecutor:
             return _json_result(ok=False, error="持久任务队列没有开启。")
         sandbox_id = str(arguments.get("sandbox_id") or "").strip()
         command = str(arguments.get("command") or "").strip()
+        packages = self._package_arguments(arguments.get("packages"))
         if not sandbox_id or not command:
             return _json_result(ok=False, error="后台命令参数不完整。")
         owned = await self.sandbox_manager.list(self.owner)
@@ -359,6 +366,7 @@ class AgentToolExecutor:
                 "owner": self.owner,
                 "sandbox_id": sandbox_id,
                 "command": command,
+                "packages": packages,
                 "timeout_seconds": timeout,
             },
             max_attempts=3,
@@ -819,11 +827,13 @@ class AgentToolExecutor:
         command = str(arguments.get("command", ""))
         raw_timeout = arguments.get("timeout_seconds")
         timeout = int(raw_timeout) if raw_timeout is not None else None
+        packages = self._package_arguments(arguments.get("packages"))
         result = await self.sandbox_manager.exec(
             self.owner,
             sandbox_id,
             command,
             timeout,
+            packages=packages,
         )
         if result.manifest is not None:
             for path in result.manifest.changed_workspace_paths:
@@ -839,6 +849,21 @@ class AgentToolExecutor:
                 else None
             ),
         )
+
+    async def _nix_search(self, arguments: dict[str, object]) -> str:
+        query = str(arguments.get("query") or "")
+        matches = await self.sandbox_manager.search_nix_packages(query)
+        return _json_result(ok=True, packages=matches)
+
+    @staticmethod
+    def _package_arguments(value: object) -> list[str]:
+        if value is None:
+            return []
+        if not isinstance(value, list) or not all(
+            isinstance(item, str) for item in value
+        ):
+            raise SandboxError("packages 必须是 Nix 属性名数组。")
+        return [str(item) for item in value]
 
     async def _sandbox_write_file(
         self,

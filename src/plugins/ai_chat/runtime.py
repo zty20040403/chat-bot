@@ -715,6 +715,7 @@ def build_app_context(
         max_total=settings.sandbox_max_total,
         default_timeout_seconds=settings.sandbox_timeout_seconds,
         max_file_bytes=settings.sandbox_max_file_bytes,
+        nix_cache_volume=settings.sandbox_nix_cache_volume,
     )
 
     job_store: DurableJobStore | None = None
@@ -748,6 +749,11 @@ def build_app_context(
                     str(payload.get("sandbox_id") or ""),
                     str(payload.get("command") or ""),
                     int(payload.get("timeout_seconds") or 300),
+                    packages=[
+                        str(item)
+                        for item in (payload.get("packages") or [])
+                        if isinstance(item, str)
+                    ],
                 )
                 if result.returncode != 0:
                     raise RuntimeError(

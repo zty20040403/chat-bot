@@ -1,6 +1,6 @@
 {pkgs, lib}:
 let
-  sandboxToolchainVersion = "toolchain-v1";
+  sandboxToolchainVersion = "toolchain-v2-compact-nix";
   python = pkgs.python312.withPackages (ps:
     with ps; [
       aiohttp
@@ -8,30 +8,42 @@ let
       httpx
       jinja2
       lxml
-      matplotlib
-      numpy
       odfpy
       openpyxl
-      pandas
       pillow
       pymupdf
       pypdf
       pytest
+      pip
       python-docx
       python-pptx
       pyyaml
       reportlab
       requests
-      scikit-learn
-      scipy
-      seaborn
+      setuptools
+      wheel
       xlrd
     ]);
 
+  # Keep the pinned package catalog in the image without merging the nixpkgs
+  # source tree into /. Package preparation can therefore evaluate offline and
+  # only needs the network to fetch missing binary closures.
+  nixpkgsPin = pkgs.runCommand "kennethbot-nixpkgs-pin" {} ''
+    mkdir -p "$out/share"
+    ln -s ${pkgs.path} "$out/share/nixpkgs"
+  '';
+
+  nixConfigPackage = pkgs.writeTextDir "etc/nix/nix.conf" ''
+    sandbox = false
+    experimental-features = nix-command
+    warn-dirty = false
+    keep-outputs = true
+    keep-derivations = true
+  '';
+
   sandboxFontConfig = pkgs.makeFontsConf {
     fontDirectories = [
-      pkgs.noto-fonts-cjk-sans
-      pkgs.sarasa-gothic
+      pkgs.wqy_microhei
     ];
   };
 
@@ -70,10 +82,9 @@ let
           TableStyle,
       )
 
-      REGULAR_FONT = "${pkgs.sarasa-gothic}/share/fonts/truetype/Sarasa-Regular.ttc"
-      BOLD_FONT = "${pkgs.sarasa-gothic}/share/fonts/truetype/Sarasa-Bold.ttc"
+      REGULAR_FONT = "${pkgs.wqy_microhei}/share/fonts/truetype/wqy-microhei.ttc"
       FONT_NAME = "KennethbotCJK"
-      BOLD_NAME = "KennethbotCJKBold"
+      BOLD_NAME = FONT_NAME
 
 
       def inline_markup(value: str) -> str:
@@ -206,7 +217,6 @@ let
           output.parent.mkdir(parents=True, exist_ok=True)
 
           pdfmetrics.registerFont(TTFont(FONT_NAME, REGULAR_FONT))
-          pdfmetrics.registerFont(TTFont(BOLD_NAME, BOLD_FONT))
           pdfmetrics.registerFontFamily(
               FONT_NAME,
               normal=FONT_NAME,
@@ -280,7 +290,10 @@ let
     '';
   };
 
+  # The base is intentionally boring and useful. Large specialist stacks are
+  # supplied per command through sandbox_exec.packages and cached in /nix.
   tools = with pkgs; [
+    nix
     bashInteractive
     coreutils
     gnused
@@ -325,50 +338,41 @@ let
     ripgrep
     gnumake
     gcc
-    clang
     cmake
     ninja
     pkg-config
-    gdb
     shellcheck
     python
     nodejs_22
-    go
-    rustc
-    cargo
-    jdk21_headless
     sqlite
-    postgresql
-    ffmpeg-headless
     poppler-utils
     qpdf
-    pandoc
-    libreoffice-fresh
-    imagemagick
-    ghostscript
-    tesseract5
-    graphviz
-    exiftool
-    mediainfo
-    yt-dlp
     fontconfig
-    noto-fonts-cjk-sans
-    sarasa-gothic
+    wqy_microhei
     cjkPdfTool
   ];
+
+  baseEnvironment = pkgs.buildEnv {
+    name = "kennethbot-sandbox-base";
+    paths = tools;
+    pathsToLink = ["/bin" "/share"];
+  };
 in
-pkgs.dockerTools.buildLayeredImage {
+pkgs.dockerTools.buildLayeredImageWithNixDb {
   name = "kennethbot-sandbox";
   tag = "latest";
   maxLayers = 120;
-  contents = tools ++ [
+  contents = [
+    baseEnvironment
     sandboxFontConfigPackage
+    nixConfigPackage
+    nixpkgsPin
     pkgs.dockerTools.binSh
     pkgs.dockerTools.usrBinEnv
   ];
 
   extraCommands = ''
-    mkdir -p workspace home/sandbox tmp etc
+    mkdir -p workspace home/sandbox tmp etc nix/var/nix/gcroots/kennethbot-packages
     # Nix builders cannot materialize arbitrary numeric ownership in every
     # sandbox backend. The container is isolated and runs as uid 1000, so make
     # its private workspace and home writable without a build-time chown.
@@ -377,13 +381,14 @@ pkgs.dockerTools.buildLayeredImage {
     printf 'sandbox:x:1000:1000:Kennethbot sandbox:/home/sandbox:/bin/sh\n' > etc/passwd
     printf 'sandbox:x:1000:\n' > etc/group
     printf 'hosts: files dns\n' > etc/nsswitch.conf
+    ln -s ${baseEnvironment} nix/var/nix/gcroots/kennethbot-base
     printf '%s\n' \
-      'Languages: Python 3.12, Node.js 22, Go, Rust, Java 21' \
-      'Development: git, gcc, clang, cmake, ninja, make, gdb, shellcheck' \
-      'Documents: poppler, qpdf, pandoc, LibreOffice, Python Office libraries' \
+      'Languages: Python 3.12 with pip, Node.js 22 with npm' \
+      'Development: git, gcc, make, pkg-config, shellcheck' \
+      'Documents: poppler, qpdf, Python PDF and Office libraries' \
       'CJK PDF: kennethbot-pdf input.md output.pdf (embedded Chinese font)' \
-      'Media: ffmpeg, ImageMagick, Tesseract, Graphviz, ExifTool, yt-dlp' \
-      'Data: pandas, NumPy, SciPy, scikit-learn, SQLite, PostgreSQL client' \
+      'Data: SQLite, JSON/YAML/XML parsers' \
+      'On demand: pass nixpkgs attributes in sandbox_exec.packages' \
       > etc/kennethbot-sandbox-tools
   '';
 
@@ -397,9 +402,11 @@ pkgs.dockerTools.buildLayeredImage {
       "USER=sandbox"
       "LANG=C.UTF-8"
       "LC_ALL=C.UTF-8"
+      "NIX_PATH=nixpkgs=${nixpkgsPin}/share/nixpkgs"
+      "NIX_PAGER=cat"
       "FONTCONFIG_FILE=/etc/kennethbot/fonts.conf"
-      "PDF_CJK_FONT=${pkgs.sarasa-gothic}/share/fonts/truetype/Sarasa-Regular.ttc"
-      "PDF_CJK_BOLD_FONT=${pkgs.sarasa-gothic}/share/fonts/truetype/Sarasa-Bold.ttc"
+      "PDF_CJK_FONT=${pkgs.wqy_microhei}/share/fonts/truetype/wqy-microhei.ttc"
+      "PDF_CJK_BOLD_FONT=${pkgs.wqy_microhei}/share/fonts/truetype/wqy-microhei.ttc"
       "PYTHONUNBUFFERED=1"
       "MPLCONFIGDIR=/tmp/matplotlib"
       "XDG_CACHE_HOME=/tmp/cache"

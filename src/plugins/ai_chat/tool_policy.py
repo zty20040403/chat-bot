@@ -82,6 +82,7 @@ _READ_TOOLS = {
     "get_shared_content",
     "browser_snapshot",
     "job_status",
+    "nix_search",
 }
 
 _SEND_TOOLS = {
