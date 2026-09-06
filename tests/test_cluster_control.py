@@ -237,7 +237,7 @@ class MaxOpsClientTests(unittest.IsolatedAsyncioTestCase):
                     return httpx.Response(
                         200,
                         json={
-                            "version": 1,
+                            "version": 2,
                             "operations": [
                                 {
                                     "name": "fleet.overview",
@@ -266,6 +266,7 @@ class MaxOpsClientTests(unittest.IsolatedAsyncioTestCase):
             try:
                 operations = await client.operations()
                 self.assertEqual([item.name for item in operations], ["fleet.overview"])
+                self.assertEqual(client.catalog_version, 2)
                 response = await client.execute("fleet.overview", {})
                 self.assertEqual(response.data, {"hosts": []})
                 with self.assertRaises(MaxOpsError) as caught:

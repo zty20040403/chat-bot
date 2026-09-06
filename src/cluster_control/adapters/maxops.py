@@ -14,6 +14,7 @@ import httpx
 MAX_REQUEST_BYTES = 4096
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_TOKEN_FILE_BYTES = 515
+SUPPORTED_CATALOG_VERSIONS = frozenset({1, 2})
 
 
 class MaxOpsError(RuntimeError):
@@ -56,6 +57,7 @@ class MaxOpsClient:
         self.timeout_seconds = min(max(float(timeout_seconds), 1.0), 30.0)
         self.catalog_cache_seconds = min(max(float(catalog_cache_seconds), 1.0), 30.0)
         self._catalog: tuple[MaxOpsOperation, ...] | None = None
+        self._catalog_version: int | None = None
         self._catalog_at = 0.0
         self._catalog_lock = asyncio.Lock()
         self._client = httpx.AsyncClient(
@@ -67,6 +69,10 @@ class MaxOpsClient:
 
     async def close(self) -> None:
         await self._client.aclose()
+
+    @property
+    def catalog_version(self) -> int | None:
+        return self._catalog_version
 
     def _credential(self) -> bytes:
         try:
@@ -183,14 +189,24 @@ class MaxOpsClient:
             ):
                 return self._catalog
             response = await self._request("GET", "/v1/operations", deadline=deadline)
-            operations = self._decode_catalog(response.data)
+            version, operations = self._decode_catalog(response.data)
             self._catalog = operations
+            self._catalog_version = version
             self._catalog_at = monotonic()
             return operations
 
     @staticmethod
-    def _decode_catalog(payload: Any) -> tuple[MaxOpsOperation, ...]:
-        if not isinstance(payload, dict) or payload.get("version") != 1:
+    def _decode_catalog(payload: Any) -> tuple[int, tuple[MaxOpsOperation, ...]]:
+        if not isinstance(payload, dict):
+            raise MaxOpsError(
+                "incompatible_catalog", "MaxOps returned an unsupported catalog"
+            )
+        version = payload.get("version")
+        if (
+            isinstance(version, bool)
+            or not isinstance(version, int)
+            or version not in SUPPORTED_CATALOG_VERSIONS
+        ):
             raise MaxOpsError(
                 "incompatible_catalog", "MaxOps returned an unsupported catalog"
             )
@@ -206,7 +222,7 @@ class MaxOpsClient:
             if not isinstance(name, str) or not name or not isinstance(schema, dict):
                 raise MaxOpsError("invalid_catalog", "MaxOps returned an invalid catalog")
             operations.append(MaxOpsOperation(name=name, params_schema=schema))
-        return tuple(operations)
+        return version, tuple(operations)
 
     async def execute(self, operation: str, params: dict[str, Any]) -> MaxOpsResponse:
         if not isinstance(params, dict):

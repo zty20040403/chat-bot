@@ -102,6 +102,7 @@ class FleetControlService:
         self,
         *,
         state: str,
+        catalog_version: int | None = None,
         operations: list[str],
         checked_at: int,
         error_code: str = "",
@@ -112,6 +113,7 @@ class FleetControlService:
             await asyncio.to_thread(
                 self.store.record_backend,
                 state=state,
+                catalog_version=catalog_version or 0,
                 operations=operations,
                 checked_at=checked_at,
                 last_success_at=self._last_success_at,
@@ -193,7 +195,10 @@ class FleetControlService:
         checked_at = int(time.time())
         if self.maxops is None:
             await self._record_backend(
-                state="disabled", operations=[], checked_at=checked_at
+                state="disabled",
+                catalog_version=0,
+                operations=[],
+                checked_at=checked_at,
             )
             return {}
         try:
@@ -201,6 +206,7 @@ class FleetControlService:
         except MaxOpsError as exc:
             await self._record_backend(
                 state="unavailable",
+                catalog_version=self._maxops_catalog_version(),
                 operations=[],
                 checked_at=checked_at,
                 error_code=exc.code,
@@ -210,9 +216,18 @@ class FleetControlService:
         names = set(operations)
         self._last_success_at = checked_at
         await self._record_backend(
-            state="online", operations=sorted(names), checked_at=checked_at
+            state="online",
+            catalog_version=self._maxops_catalog_version(),
+            operations=sorted(names),
+            checked_at=checked_at,
         )
         return operations
+
+    def _maxops_catalog_version(self) -> int:
+        if self.maxops is None:
+            return 0
+        value = getattr(self.maxops, "catalog_version", None)
+        return value if isinstance(value, int) and not isinstance(value, bool) else 1
 
     async def capabilities(self) -> dict[str, Any]:
         try:
@@ -227,7 +242,7 @@ class FleetControlService:
             }
         return {
             "backend": "maxops",
-            "catalog_version": 1,
+            "catalog_version": self._maxops_catalog_version(),
             "checked_at": int(time.time()),
             "capabilities": capability_manifest(operations),
             "error": error,
@@ -569,7 +584,7 @@ class FleetControlService:
         return stored or {
             "backend_name": "maxops",
             "state": "disabled" if self.maxops is None else "unknown",
-            "catalog_version": 1,
+            "catalog_version": self._maxops_catalog_version(),
             "operations": [],
             "error_code": "",
             "last_success_at": self._last_success_at,

@@ -28,6 +28,7 @@ class FleetProjectionStore:
         self,
         *,
         state: str,
+        catalog_version: int,
         operations: list[str],
         checked_at: int,
         last_success_at: int | None,
@@ -41,7 +42,7 @@ class FleetProjectionStore:
                 INSERT INTO fleet_backend_states (
                     backend_name, state, catalog_version, operations_json,
                     error_code, last_success_at, checked_at
-                ) VALUES ('maxops', ?, 1, ?, ?, ?, ?)
+                ) VALUES ('maxops', ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(backend_name) DO UPDATE SET
                     state = EXCLUDED.state,
                     catalog_version = EXCLUDED.catalog_version,
@@ -52,6 +53,7 @@ class FleetProjectionStore:
                 """,
                 (
                     state,
+                    catalog_version,
                     _json(operations),
                     error_code,
                     last_success_at,
