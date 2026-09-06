@@ -12,7 +12,7 @@ from typing import Any
 from src.bot_storage import PostgresDatabase
 
 from .execution_contracts import canonical_json, new_handle, safe_artifact_name
-from .scheduling import ResourceRequest, eligibility_reason
+from .scheduling import ResourceRequest, eligibility_reason, settle_reported_cost
 
 
 def _decode(value: Any, fallback: Any) -> Any:
@@ -476,6 +476,27 @@ class ClusterExecutionStore:
             if policy is None or policy["desired_availability"] != "available":
                 connection.commit()
                 return None
+            active_rows = cursor.execute(
+                """SELECT r.cpu_millis, r.memory_bytes, r.gpu_slots, j.grant_id
+                   FROM fleet_reservations r
+                   JOIN fleet_worker_jobs j ON j.job_id = r.job_id
+                   WHERE r.worker_id = ? AND r.status = 'active'
+                     AND r.lease_expires_at > ?""",
+                (worker_id, now),
+            ).fetchall()
+            active_totals = {"cpu_millis": 0, "memory_bytes": 0, "gpu_slots": 0}
+            grant_usage: dict[str, dict[str, int]] = {}
+            for reservation in active_rows:
+                for field in active_totals:
+                    active_totals[field] += int(reservation[field] or 0)
+                grant_id = str(reservation["grant_id"] or "")
+                if grant_id:
+                    usage = grant_usage.setdefault(
+                        grant_id,
+                        {"cpu_millis": 0, "memory_bytes": 0, "gpu_slots": 0},
+                    )
+                    for field in usage:
+                        usage[field] += int(reservation[field] or 0)
             capabilities = set(_decode(worker["capabilities_json"], []))
             rows = cursor.execute(
                 """SELECT * FROM fleet_worker_jobs
@@ -510,6 +531,7 @@ class ClusterExecutionStore:
                         request, worker=worker, host=host_policy, policy=policy,
                         grant=candidate, job_kind=str(row["kind"]), now=now,
                         external_borrow=external_borrow,
+                        grant_usage=grant_usage.get(str(candidate["grant_id"])),
                     )
                     if not reason:
                         grant = candidate
@@ -518,6 +540,11 @@ class ClusterExecutionStore:
                     request, worker=worker, host=host_policy, policy=policy,
                     grant=grant, job_kind=str(row["kind"]), now=now,
                     external_borrow=external_borrow,
+                    grant_usage=(
+                        grant_usage.get(str(grant["grant_id"]))
+                        if grant is not None
+                        else None
+                    ),
                 )
                 if reason:
                     cursor.execute(
@@ -537,44 +564,42 @@ class ClusterExecutionStore:
             memory = chosen_request.memory_bytes
             gpu = chosen_request.gpu_slots
             capacity = _decode(worker["capacity_json"], {})
-            active = cursor.execute(
-                """SELECT COALESCE(SUM(cpu_millis),0), COALESCE(SUM(memory_bytes),0),
-                          COALESCE(SUM(gpu_slots),0) FROM fleet_reservations
-                   WHERE worker_id = ? AND status = 'active' AND lease_expires_at > ?""",
-                (worker_id, now),
-            ).fetchone()
             if (
-                int(active[0]) + cpu > int(capacity.get("cpu_millis", 0))
-                or int(active[1]) + memory > int(capacity.get("memory_bytes", 0))
-                or int(active[2]) + gpu > int(capacity.get("gpu_slots", 0))
+                active_totals["cpu_millis"] + cpu > int(capacity.get("cpu_millis", 0))
+                or active_totals["memory_bytes"] + memory > int(capacity.get("memory_bytes", 0))
+                or active_totals["gpu_slots"] + gpu > int(capacity.get("gpu_slots", 0))
             ):
                 connection.commit()
                 return None
             if policy is not None and (
-                int(active[0]) + cpu > int(policy["cpu_limit_millis"])
-                or int(active[1]) + memory > int(policy["memory_limit_bytes"])
-                or int(active[2]) + gpu > int(policy["gpu_limit_slots"])
+                active_totals["cpu_millis"] + cpu > int(policy["cpu_limit_millis"])
+                or active_totals["memory_bytes"] + memory > int(policy["memory_limit_bytes"])
+                or active_totals["gpu_slots"] + gpu > int(policy["gpu_limit_slots"])
             ):
                 connection.commit()
                 return None
             fence = int(chosen["fence"]) + 1
             lease_at = min(now + min(max(lease_seconds, 15), 300), int(chosen["deadline_at"]))
             grant_id = str(chosen_grant["grant_id"]) if chosen_grant else None
-            expected_cost = chosen_request.expected_cost_microunits
-            if chosen_grant is not None and expected_cost:
+            reserved_cost = (
+                chosen_request.max_cost_microunits
+                if chosen_grant is not None
+                else 0
+            )
+            if chosen_grant is not None and reserved_cost:
                 cursor.execute(
                     """UPDATE fleet_borrow_grants
                        SET budget_reserved_microunits = budget_reserved_microunits + ?,
                            resource_version = resource_version + 1, updated_at = ?
                        WHERE grant_id = ?""",
-                    (expected_cost, now, grant_id),
+                    (reserved_cost, now, grant_id),
                 )
             cursor.execute(
                 """UPDATE fleet_worker_jobs SET status = 'running', worker_id = ?,
                    attempt = attempt + 1, fence = ?, lease_expires_at = ?, grant_id = ?,
                    reserved_cost_microunits = ?, scheduler_reason = 'scheduled', updated_at = ?
                    WHERE job_id = ?""",
-                (worker_id, fence, lease_at, grant_id, expected_cost, now, chosen["job_id"]),
+                (worker_id, fence, lease_at, grant_id, reserved_cost, now, chosen["job_id"]),
             )
             cursor.execute(
                 """INSERT INTO fleet_reservations
@@ -672,15 +697,32 @@ class ClusterExecutionStore:
             if row["status"] not in {"running", "verifying", "cancelling"}:
                 return self._job(dict(row), cursor)
             cancelled = row["status"] == "cancelling"
-            status = "cancelled" if cancelled else ("succeeded" if ok else "failed")
-            stored_result = {"cancelled": True} if cancelled else result
-            stored_error = "cancelled" if cancelled else error_code[:80]
             reserved_cost = int(row["reserved_cost_microunits"] or 0)
-            try:
-                reported_cost = int(result.get("cost_microunits") or 0)
-            except (TypeError, ValueError):
-                reported_cost = 0
-            settled_cost = min(max(reported_cost, 0), reserved_cost)
+            request = ResourceRequest.parse(_decode(row["constraints_json"], {}))
+            settlement = settle_reported_cost(
+                request, result.get("cost_microunits")
+            )
+            cost_invalid = settlement.invalid_report or settlement.limit_exceeded
+            status = (
+                "cancelled"
+                if cancelled
+                else ("succeeded" if ok and not cost_invalid else "failed")
+            )
+            stored_result = {"cancelled": True} if cancelled else result
+            stored_error = (
+                "cancelled"
+                if cancelled
+                else (
+                    "invalid_cost_report"
+                    if settlement.invalid_report
+                    else (
+                        "cost_limit_exceeded"
+                        if settlement.limit_exceeded
+                        else error_code[:80]
+                    )
+                )
+            )
+            settled_cost = settlement.settled_microunits if row["grant_id"] else 0
             if row["grant_id"]:
                 cursor.execute(
                     """UPDATE fleet_borrow_grants SET
@@ -707,9 +749,19 @@ class ClusterExecutionStore:
             )
             self._event(
                 cursor, "fleet_job_events", "job_id", job_id,
-                event_type=("cancelled" if cancelled else ("completed" if ok else "failed")),
+                event_type=(
+                    "cancelled"
+                    if cancelled
+                    else ("completed" if status == "succeeded" else "failed")
+                ),
                 status=status, worker_id=worker_id, fence=fence,
-                payload=stored_result, created_at=now,
+                payload={
+                    **stored_result,
+                    "reported_cost_microunits": settlement.reported_microunits,
+                    "settled_cost_microunits": settled_cost,
+                    "cost_limit_exceeded": settlement.limit_exceeded,
+                },
+                created_at=now,
             )
             if row["kind"] == "preview.static":
                 self._finish_preview(cursor, dict(row), result, status, now)

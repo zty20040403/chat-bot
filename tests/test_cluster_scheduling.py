@@ -18,7 +18,11 @@ from src.cluster_control.guardian import (
 )
 from src.cluster_control.execution_contracts import WorkerJobProposal
 from src.cluster_control.reliability import ReliabilityStore
-from src.cluster_control.scheduling import ResourceRequest, eligibility_reason
+from src.cluster_control.scheduling import (
+    ResourceRequest,
+    eligibility_reason,
+    settle_reported_cost,
+)
 from src.cluster_worker.service import ClusterWorker
 from src.plugins.ai_chat.fleet_case_recall import semantic_runbook_scores
 from src.plugins.ai_chat.semantic_recall import SemanticHit
@@ -139,12 +143,12 @@ class SchedulingPolicyTests(unittest.TestCase):
 
     def test_cost_reservation_cannot_exceed_grant(self) -> None:
         grant = _grant()
-        grant["budget_reserved_microunits"] = 950
+        grant["budget_reserved_microunits"] = 850
         request = ResourceRequest.parse(
             {
                 "borrow_required": True,
-                "expected_cost_microunits": 100,
-                "max_cost_microunits": 100,
+                "expected_cost_microunits": 50,
+                "max_cost_microunits": 200,
             }
         )
         self.assertEqual(
@@ -155,6 +159,48 @@ class SchedulingPolicyTests(unittest.TestCase):
             ),
             "cost_budget_exhausted",
         )
+
+    def test_grant_resource_limits_include_existing_reservations(self) -> None:
+        request = ResourceRequest.parse(
+            {
+                "borrow_required": True,
+                "cpu_millis": 1000,
+                "memory_bytes": 512 * 1024**2,
+            }
+        )
+        self.assertEqual(
+            eligibility_reason(
+                request,
+                worker=_worker(),
+                host={"gpu_compute": False},
+                policy={"desired_availability": "available"},
+                grant=_grant(),
+                grant_usage={
+                    "cpu_millis": 3500,
+                    "memory_bytes": 512 * 1024**2,
+                    "gpu_slots": 0,
+                },
+                job_kind="media.inspect",
+                now=200,
+            ),
+            "grant_cpu_limit",
+        )
+
+    def test_cost_settlement_enforces_the_hard_limit(self) -> None:
+        request = ResourceRequest.parse(
+            {"expected_cost_microunits": 100, "max_cost_microunits": 200}
+        )
+        accepted = settle_reported_cost(request, 150)
+        self.assertEqual(accepted.settled_microunits, 150)
+        self.assertFalse(accepted.limit_exceeded)
+        self.assertFalse(accepted.invalid_report)
+
+        exceeded = settle_reported_cost(request, 250)
+        self.assertEqual(exceeded.settled_microunits, 200)
+        self.assertTrue(exceeded.limit_exceeded)
+
+        invalid = settle_reported_cost(request, True)
+        self.assertTrue(invalid.invalid_report)
 
     def test_external_borrow_always_requires_a_matching_grant(self) -> None:
         request = ResourceRequest.parse({})

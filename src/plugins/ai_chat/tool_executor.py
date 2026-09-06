@@ -1657,6 +1657,14 @@ class ToolExecutor(HandlerService):
                         )
                     elif name == CLUSTER_JOB_SUBMIT_TOOL_NAME:
                         kind = str(arguments.get("kind") or "")
+                        expected_cost = int(
+                            arguments.get("expected_cost_microunits") or 0
+                        )
+                        max_cost = int(
+                            arguments.get("max_cost_microunits")
+                            if "max_cost_microunits" in arguments
+                            else expected_cost
+                        )
                         job_payload: dict[str, object] = {}
                         if kind == "probe.http":
                             job_payload["target_id"] = str(arguments.get("target_id") or "")
@@ -1673,11 +1681,11 @@ class ToolExecutor(HandlerService):
                                     "memory_bytes": int(arguments.get("memory_bytes") or 268435456),
                                     "gpu_slots": int(arguments.get("gpu_slots") or 0),
                                     "priority": str(arguments.get("priority") or "normal"),
-                                    "borrow_required": bool(arguments.get("borrow_required", False)),
+                                    "borrow_required": arguments.get("borrow_required", False),
                                     "checkpoint_format": "kennethbot-result-v1",
                                     "executor_version": "worker-v2",
-                                    "expected_cost_microunits": int(arguments.get("expected_cost_microunits") or 0),
-                                    "max_cost_microunits": int(arguments.get("max_cost_microunits") or 0),
+                                    "expected_cost_microunits": expected_cost,
+                                    "max_cost_microunits": max_cost,
                                 },
                                 "idempotency_key": str(arguments.get("idempotency_key") or ""),
                             },

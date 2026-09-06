@@ -130,6 +130,35 @@ class ResourceRequest:
         }
 
 
+@dataclass(frozen=True)
+class CostSettlement:
+    reported_microunits: int
+    settled_microunits: int
+    limit_exceeded: bool
+    invalid_report: bool
+
+
+def settle_reported_cost(
+    request: ResourceRequest, reported_value: Any
+) -> CostSettlement:
+    invalid = isinstance(reported_value, bool)
+    try:
+        reported = int(reported_value or 0) if not invalid else 0
+    except (TypeError, ValueError):
+        reported = 0
+        invalid = True
+    if reported < 0:
+        reported = 0
+        invalid = True
+    maximum = request.max_cost_microunits
+    return CostSettlement(
+        reported_microunits=reported,
+        settled_microunits=min(reported, maximum),
+        limit_exceeded=reported > maximum,
+        invalid_report=invalid,
+    )
+
+
 def decode_json(value: Any, fallback: Any) -> Any:
     try:
         return json.loads(str(value))
@@ -147,6 +176,7 @@ def eligibility_reason(
     job_kind: str,
     now: int,
     external_borrow: bool = False,
+    grant_usage: Mapping[str, Any] | None = None,
 ) -> str:
     if worker.get("availability") != "available":
         return "worker_not_available"
@@ -169,7 +199,7 @@ def eligibility_reason(
         external_borrow
         or request.borrow_required
         or request.gpu_slots
-        or request.expected_cost_microunits
+        or request.max_cost_microunits
     ):
         if grant is None:
             return "borrow_grant_required"
@@ -182,16 +212,26 @@ def eligibility_reason(
             return "job_kind_not_granted"
         if request.priority > int(grant.get("max_priority") or 0):
             return "priority_not_granted"
-        if request.cpu_millis > int(grant.get("cpu_limit_millis") or 0):
+        usage = grant_usage or {}
+        if (
+            int(usage.get("cpu_millis") or 0) + request.cpu_millis
+            > int(grant.get("cpu_limit_millis") or 0)
+        ):
             return "grant_cpu_limit"
-        if request.memory_bytes > int(grant.get("memory_limit_bytes") or 0):
+        if (
+            int(usage.get("memory_bytes") or 0) + request.memory_bytes
+            > int(grant.get("memory_limit_bytes") or 0)
+        ):
             return "grant_memory_limit"
-        if request.gpu_slots > int(grant.get("gpu_limit_slots") or 0):
+        if (
+            int(usage.get("gpu_slots") or 0) + request.gpu_slots
+            > int(grant.get("gpu_limit_slots") or 0)
+        ):
             return "grant_gpu_limit"
         budget = int(grant.get("budget_limit_microunits") or 0)
         used = int(grant.get("budget_reserved_microunits") or 0) + int(
             grant.get("budget_spent_microunits") or 0
         )
-        if request.expected_cost_microunits and used + request.expected_cost_microunits > budget:
+        if request.max_cost_microunits and used + request.max_cost_microunits > budget:
             return "cost_budget_exhausted"
     return ""

@@ -1,4 +1,4 @@
 from __future__ import annotations
 
 
-HEAD_REVISION = "0023_cluster_deployments"
+HEAD_REVISION = "0024_cluster_constraints"

@@ -1,7 +1,7 @@
 {
   "name": "kennethbot-admin-ui",
   "private": true,
-  "version": "0.17.2",
+  "version": "0.17.3",
   "type": "module",
   "scripts": {
     "build": "tsc --noEmit && vite build",
