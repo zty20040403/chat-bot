@@ -34,7 +34,6 @@ GET_MESSAGE_BY_ID_TOOL_NAME = "get_message_by_id"
 SEARCH_MESSAGES_TOOL_NAME = "search_messages"
 SANDBOX_CREATE_TOOL_NAME = "sandbox_create"
 SANDBOX_LIST_TOOL_NAME = "sandbox_list"
-SANDBOX_DESTROY_TOOL_NAME = "sandbox_destroy"
 SANDBOX_EXEC_TOOL_NAME = "sandbox_exec"
 NIX_SEARCH_TOOL_NAME = "nix_search"
 SANDBOX_WRITE_FILE_TOOL_NAME = "sandbox_write_file"
@@ -723,8 +722,8 @@ SANDBOX_CREATE_TOOL: ToolDefinition = {
             "Go、Rust、Java、LibreOffice、ffmpeg、OCR、科学计算等大工具通过 "
             "sandbox_exec.packages 按需加入。需要写代码、处理文件、"
             "构建或测试项目时先调用。"
-            "工作目录固定为 /workspace。本次任务结束时宿主会自动销毁它，"
-            "销毁前必须用发送工具交付需要保留的文件。"
+            "工作目录固定为 /workspace。任务结束后容器会停止但工作区会保留；"
+            "再次执行命令时会自动恢复。交付文件由宿主持久快照独立上传。"
         ),
         "parameters": {
             "type": "object",
@@ -749,22 +748,6 @@ SANDBOX_LIST_TOOL: ToolDefinition = {
         "parameters": {
             "type": "object",
             "properties": {},
-            "additionalProperties": False,
-        },
-    },
-}
-
-SANDBOX_DESTROY_TOOL: ToolDefinition = {
-    "type": "function",
-    "function": {
-        "name": SANDBOX_DESTROY_TOOL_NAME,
-        "description": "销毁不再需要的沙盒，释放 CPU、内存和磁盘。",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "sandbox_id": {"type": "string", "description": "例如 s1a2b3c。"}
-            },
-            "required": ["sandbox_id"],
             "additionalProperties": False,
         },
     },
@@ -1672,7 +1655,6 @@ MEMORY_TOOLS = [MEMORY_ADD_TOOL, MEMORY_LIST_TOOL, MEMORY_REMOVE_TOOL]
 SANDBOX_TOOLS = [
     SANDBOX_CREATE_TOOL,
     SANDBOX_LIST_TOOL,
-    SANDBOX_DESTROY_TOOL,
     SANDBOX_EXEC_TOOL,
     NIX_SEARCH_TOOL,
     SANDBOX_WRITE_FILE_TOOL,

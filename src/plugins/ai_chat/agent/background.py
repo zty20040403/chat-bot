@@ -120,27 +120,31 @@ class SubAgentDispatcher:
         if matched:
             task = self.store.get(task_id)
             if task is not None:
-                cleanup_executor = SimpleNamespace(
+                lifecycle_executor = SimpleNamespace(
                     owner=task.conversation_id,
                     base_owner=task.conversation_id,
                     sandbox_manager=self.context.sandbox_manager,
                 )
                 workspaces = StepWorkspaces(
                     self.context.state_dir,
-                    cleanup_executor,
+                    lifecycle_executor,
                     retention_days=self.context.settings.subagent_artifact_retention_days,
                 )
-                cleanup_ready, artifact_digests = self.coordinator._artifact_cleanup_state(task)
-                if cleanup_ready:
-                    await workspaces.cleanup_task(
+                retention_ready, artifact_digests = self.coordinator._artifact_retention_state(task)
+                if retention_ready:
+                    await workspaces.finalize_task(
                         task_id,
                         self.store.runs(task_id),
                         artifact_digests=artifact_digests,
                     )
                     self.store.append_event(
                         task_id,
-                        "task.workspace_cleaned",
-                        {"reason": "artifact_delivery_reconciled"},
+                        "task.workspace_retained",
+                        {
+                            "reason": "artifact_delivery_reconciled",
+                            "containers": "stopped",
+                            "workspace": "retained",
+                        },
                     )
         return {"matched": matched}
 

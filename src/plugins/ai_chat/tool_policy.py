@@ -14,7 +14,6 @@ ToolCompensation = Literal[
     "none",
     "cancel-process",
     "close-browser",
-    "cleanup-created-resource",
 ]
 
 
@@ -110,7 +109,6 @@ _MEMORY_WRITE_TOOLS = {
 
 _SANDBOX_WRITE_TOOLS = {
     "sandbox_create",
-    "sandbox_destroy",
     "sandbox_exec",
     "sandbox_write_file",
     "import_file_to_sandbox",
@@ -252,7 +250,7 @@ def _policy_registry() -> dict[str, ToolPolicy]:
         idempotency="non-idempotent",
         side_effects=("write:sandbox", "allocate:resource"),
         timeout_seconds=310.0,
-        compensation="cleanup-created-resource",
+        compensation="none",
         max_identical_calls=1,
     )
     policies["run_subagents"] = ToolPolicy(
@@ -281,14 +279,6 @@ def _policy_registry() -> dict[str, ToolPolicy]:
     policies["import_agent_artifact"] = ToolPolicy(risk="low", idempotency="idempotent",
         side_effects=("write:sandbox",), timeout_seconds=90)
     policies["read_agent_result"] = ToolPolicy(risk="low", idempotency="pure", timeout_seconds=10)
-    policies["sandbox_destroy"] = ToolPolicy(
-        risk="critical",
-        idempotency="idempotent",
-        side_effects=("write:sandbox", "destructive"),
-        timeout_seconds=60.0,
-        approval="explicit",
-        max_identical_calls=1,
-    )
     policies["browser_clear"] = ToolPolicy(
         risk="critical",
         idempotency="idempotent",
@@ -392,7 +382,6 @@ def policy_manifest_for_tools(tools: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 _EXPLICIT_APPROVAL_TERMS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
-    "sandbox_destroy": (("销毁", "删除", "清理", "destroy"), ("沙盒", "sandbox")),
     "browser_clear": (("清空", "重置", "删除", "clear"), ("浏览器", "cookie", "缓存", "profile")),
     "job_cancel": (("取消", "停止", "终止", "cancel"), ("任务", "job", "后台")),
     "memory_remove": (("删除", "忘掉", "移除", "remove"), ("记忆", "memory")),

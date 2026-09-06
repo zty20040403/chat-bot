@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.17.0-22c55e?style=for-the-badge">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.17.1-22c55e?style=for-the-badge">
   <img alt="Python" src="https://img.shields.io/badge/Python-3.12-3776ab?style=for-the-badge&amp;logo=python&amp;logoColor=white">
   <img alt="NoneBot2" src="https://img.shields.io/badge/NoneBot2-OneBot_V11-ea5252?style=for-the-badge">
   <img alt="PostgreSQL" src="https://img.shields.io/badge/PostgreSQL-Durable-4169e1?style=for-the-badge&amp;logo=postgresql&amp;logoColor=white">
@@ -477,9 +477,9 @@ Sub-Agent V2 内核区分直接回答、单专家委派、后台工作流和已�
 - 把构建产物、压缩包或图片发回当前群。
 - 使用 `say` 汇报长任务进度。
 
-沙箱不挂载宿主机目录，并按“群 + 发起用户”授权。任务结束后，本轮创建的容器会自动销毁。
-生产环境应配置允许使用沙箱的 QQ 账号和并发数量；开放给所有群成员可能消耗大量 CPU、
-内存、网络和磁盘。
+沙箱不挂载宿主机目录，并按“群 + 发起用户”授权。任务结束后，工作容器会停止但不会删除，
+`/workspace` 和独立产物快照仍可用于复查、修订和补发；模型不能调用销毁工具。真正删除由
+管理员明确执行。生产环境仍应限制并发并定期审核保留项，否则磁盘占用会持续增长。
 
 ```dotenv
 AI_SANDBOX_ENABLED=true

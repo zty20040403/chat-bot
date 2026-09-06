@@ -101,12 +101,16 @@ class DockerSandboxManager:
 
         owner_hash = self._owner_hash(owner)
         owner_sandboxes = await self.list(owner)
-        if len(owner_sandboxes) >= self.max_per_owner:
+        owner_running = [
+            item for item in owner_sandboxes if self._status_is_running(item)
+        ]
+        if len(owner_running) >= self.max_per_owner:
             raise SandboxError(
-                f"你最多同时创建 {self.max_per_owner} 个沙盒，请先销毁旧沙盒。"
+                f"你最多同时运行 {self.max_per_owner} 个沙盒，"
+                "请等待当前任务结束或让管理员回收旧工作区。"
             )
         all_sandboxes = await self._list_by_label("qqbot.sandbox=true")
-        if len(all_sandboxes) >= self.max_total:
+        if sum(self._status_is_running(item) for item in all_sandboxes) >= self.max_total:
             raise SandboxError("机器人沙盒总数已达到上限。")
 
         sandbox_id = "s" + secrets.token_hex(3)
@@ -912,9 +916,49 @@ with tempfile.TemporaryFile() as output:
 
     async def start_owned(self, owner: str, sandbox_id: str) -> None:
         name = await self._owned_container(owner, sandbox_id, require_running=False)
+        owned = await self.list(owner)
+        target = next(
+            (
+                item
+                for item in owned
+                if str(item.get("sandbox_id") or "") == sandbox_id
+            ),
+            None,
+        )
+        if target is not None and self._status_is_running(target):
+            return
+        if sum(self._status_is_running(item) for item in owned) >= self.max_per_owner:
+            raise SandboxError(
+                f"你最多同时运行 {self.max_per_owner} 个沙盒，请先停止其他沙盒。"
+            )
+        all_sandboxes = await self._list_by_label("qqbot.sandbox=true")
+        if sum(self._status_is_running(item) for item in all_sandboxes) >= self.max_total:
+            raise SandboxError("机器人正在运行的沙盒总数已达到上限。")
         result = await self._run("docker", "start", name, timeout=30)
         if result.returncode:
             raise SandboxError(self._docker_error(result.stderr))
+
+    async def stop_owned(self, owner: str, sandbox_id: str) -> None:
+        """Stop a container without deleting its persistent workspace volume."""
+        name = await self._owned_container(owner, sandbox_id, require_running=False)
+        owned = await self.list(owner)
+        target = next(
+            (
+                item
+                for item in owned
+                if str(item.get("sandbox_id") or "") == sandbox_id
+            ),
+            None,
+        )
+        if target is not None and not self._status_is_running(target):
+            return
+        result = await self._run("docker", "stop", "--time", "5", name, timeout=15)
+        if result.returncode:
+            raise SandboxError(self._docker_error(result.stderr))
+
+    @staticmethod
+    def _status_is_running(item: dict[str, str]) -> bool:
+        return str(item.get("status") or "").lower().startswith("up ")
 
     async def _owned_container(
         self,

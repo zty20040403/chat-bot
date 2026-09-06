@@ -138,37 +138,35 @@ class StepWorkspaces:
     async def deliver(self, task_id: int, artifact: dict) -> str:
         assert_job_owned()
         content = await asyncio.to_thread(self._path(task_id, artifact["snapshot"]).read_bytes)
-        sandbox = await self.manager.create(self.executor.owner, "python")
-        sid = sandbox["sandbox_id"]
-        try:
-            path = PurePosixPath(artifact["name"]).name
-            await self.manager.write_file(self.executor.owner, sid, path, content, allow_large=True)
-            assert_job_owned()
-            return await self.executor._send_file_from_sandbox({"sandbox_id": sid, "path": path, "filename": artifact["name"]})
-        finally:
-            await self.manager.destroy(self.executor.owner, sid)
+        assert_job_owned()
+        return await self.executor.send_file_content(content, artifact["name"])
 
     async def reconcile(self, filename: str, size: int) -> dict:
         result = await self.executor.confirm_group_file(filename, size, attempts=1)
         return {**result, "filename": filename, "size": size}
 
-    async def cleanup_step(self):
+    async def stop_step(self):
+        """Quiesce step containers without deleting their workspaces."""
         for sandbox in await self.manager.list(self.executor.owner):
             if sandbox.get("purpose", "task") == "task":
-                await self.manager.destroy(self.executor.owner, sandbox["sandbox_id"])
+                await self.manager.stop_owned(
+                    self.executor.owner,
+                    sandbox["sandbox_id"],
+                )
 
     async def restore_step(self):
         for sandbox in await self.manager.list(self.executor.owner):
             if sandbox.get("purpose", "task") == "task":
                 await self.manager.start_owned(self.executor.owner, sandbox["sandbox_id"])
 
-    async def cleanup_task(
+    async def finalize_task(
         self,
         task_id: int,
         runs,
         *,
         artifact_digests: tuple[str, ...] = (),
     ):
+        """Stop task containers and retain their persistent workspace volumes."""
         base_owner = getattr(self.executor, "base_owner", None)
         if not isinstance(base_owner, str) or not base_owner:
             base_owner = str(self.executor.owner)
@@ -176,7 +174,7 @@ class StepWorkspaces:
             owner = f"{base_owner}:task#{task_id}/{run.step_key}"
             for sandbox in await self.manager.list(owner):
                 if sandbox.get("purpose", "task") == "task":
-                    await self.manager.destroy(owner, sandbox["sandbox_id"])
+                    await self.manager.stop_owned(owner, sandbox["sandbox_id"])
         acknowledged_at = int(time.time())
         for digest in artifact_digests:
             await asyncio.to_thread(

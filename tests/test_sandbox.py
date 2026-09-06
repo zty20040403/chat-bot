@@ -163,6 +163,34 @@ class DockerSandboxCancellationTests(unittest.IsolatedAsyncioTestCase):
             ("docker", "volume", "rm", "-f", "kennethbot-work-sabc123"),
         )
 
+    async def test_stop_preserves_the_owned_workspace_volume(self) -> None:
+        manager = DockerSandboxManager(image="kennethbot-sandbox:latest")
+        manager._owned_container = AsyncMock(return_value="qqbot-sabc123")  # type: ignore[method-assign]
+        manager.list = AsyncMock(  # type: ignore[method-assign]
+            return_value=[
+                {
+                    "sandbox_id": "sabc123",
+                    "runtime": "python",
+                    "purpose": "task",
+                    "status": "Up 2 minutes",
+                }
+            ]
+        )
+        manager._run = AsyncMock(  # type: ignore[method-assign]
+            return_value=SandboxResult("qqbot-sabc123\n", "", 0)
+        )
+
+        await manager.stop_owned("owner", "sabc123")
+
+        manager._run.assert_awaited_once_with(
+            "docker",
+            "stop",
+            "--time",
+            "5",
+            "qqbot-sabc123",
+            timeout=15,
+        )
+
     async def test_exec_prepares_and_wraps_requested_nix_packages(self) -> None:
         manager = DockerSandboxManager(image="kennethbot-sandbox:latest")
         manager._owned_container = AsyncMock(return_value="qqbot-sabc123")  # type: ignore[method-assign]

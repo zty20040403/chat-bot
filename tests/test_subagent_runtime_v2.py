@@ -258,7 +258,7 @@ class RuntimeV2Tests(unittest.IsolatedAsyncioTestCase):
         manager.list = AsyncMock(
             return_value=[{"sandbox_id": "s123abc", "purpose": "task"}]
         )
-        manager.destroy = AsyncMock()
+        manager.stop_owned = AsyncMock()
         jobs = DurableJobStore(Path(self.tmp.name) / "receipt-jobs.sqlite3")
         bot = Mock(self_id=123)
         bot.call_api = AsyncMock(
@@ -297,7 +297,7 @@ class RuntimeV2Tests(unittest.IsolatedAsyncioTestCase):
                 self.store.deliveries(task.task_id)[0]["state"],
                 "acknowledged",
             )
-            manager.destroy.assert_awaited_once_with(
+            manager.stop_owned.assert_awaited_once_with(
                 f"{packet.conversation_id}:task#{task.task_id}/files",
                 "s123abc",
             )
@@ -342,12 +342,15 @@ class RuntimeV2Tests(unittest.IsolatedAsyncioTestCase):
             {"filename": "out.pdf", "ok": False},
         )
         self.store.set_task_state(task.task_id, "partial")
-        workspaces = Mock(cleanup_task=AsyncMock())
+        workspaces = Mock(finalize_task=AsyncMock())
 
-        await self.coordinator._cleanup_finished_task(
+        await self.coordinator._finalize_finished_task(
             task.task_id, AgentExecutionHooks(workspaces=workspaces)
         )
-        workspaces.cleanup_task.assert_not_awaited()
+        self.assertEqual(
+            workspaces.finalize_task.await_args.kwargs["artifact_digests"],
+            (),
+        )
 
         self.store.finish_delivery(
             task.task_id,
@@ -355,10 +358,14 @@ class RuntimeV2Tests(unittest.IsolatedAsyncioTestCase):
             "acknowledged",
             {"filename": "out.pdf", "ok": True},
         )
-        await self.coordinator._cleanup_finished_task(
+        await self.coordinator._finalize_finished_task(
             task.task_id, AgentExecutionHooks(workspaces=workspaces)
         )
-        workspaces.cleanup_task.assert_awaited_once()
+        self.assertEqual(workspaces.finalize_task.await_count, 2)
+        self.assertEqual(
+            workspaces.finalize_task.await_args.kwargs["artifact_digests"],
+            (snapshot,),
+        )
 
     async def test_delivery_prefers_final_or_repair_artifact(self):
         task = self.submit()
@@ -511,7 +518,10 @@ class RuntimeV2Tests(unittest.IsolatedAsyncioTestCase):
         )
         acknowledged = workspaces._persist(1, b"acknowledged")
         unconfirmed = workspaces._persist(2, b"unconfirmed")
-        await workspaces.cleanup_task(
+        manager = executor.sandbox_manager
+        manager.list = AsyncMock(return_value=[])
+        manager.stop_owned = AsyncMock()
+        await workspaces.finalize_task(
             1,
             [],
             artifact_digests=(acknowledged,),
@@ -596,13 +606,13 @@ class RuntimeV2Tests(unittest.IsolatedAsyncioTestCase):
             DockerSandboxManager()._workspace_path(path)
             checked.append(path)
         manager.write_file = AsyncMock(side_effect=write)
-        executor._send_file_from_sandbox = AsyncMock(return_value='{"ok":true}')
+        executor.send_file_content = AsyncMock(return_value='{"ok":true}')
         workspaces = StepWorkspaces(Path(self.tmp.name), executor)
         artifact = {"name": "result.txt", "snapshot": workspaces._persist(1, b"test")}
         self.assertTrue((await workspaces.validate(1, artifact))["ok"])
         await workspaces.deliver(1, artifact)
-        self.assertEqual(checked, ["acceptance.txt", "result.txt"])
-        self.assertEqual(executor._send_file_from_sandbox.await_args.args[0]["path"], "result.txt")
+        self.assertEqual(checked, ["acceptance.txt"])
+        executor.send_file_content.assert_awaited_once_with(b"test", "result.txt")
 
     async def test_scheduler_cancellation_releases_slot_and_avoids_group_head_of_line(self):
         scheduler = SpecialistScheduler(total=2, per_group=1, per_model=2)

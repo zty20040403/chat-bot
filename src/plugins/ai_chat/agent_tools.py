@@ -37,7 +37,6 @@ from .ai_tools import (
     LIST_RECENT_FILES_TOOL_NAME,
     NIX_SEARCH_TOOL_NAME,
     SANDBOX_CREATE_TOOL_NAME,
-    SANDBOX_DESTROY_TOOL_NAME,
     SANDBOX_EXEC_TOOL_NAME,
     SANDBOX_LIST_TOOL_NAME,
     SANDBOX_READ_FILE_TOOL_NAME,
@@ -99,10 +98,10 @@ AGENT_TOOL_PROMPT = (
     "生成含中文的 PDF 时必须使用沙盒内的 kennethbot-pdf input.md output.pdf，"
     "再用 pdffonts 确认字体已嵌入、pdftotext 确认中文可提取；"
     "禁止用 Helvetica 等默认西文字体直接生成中文 PDF。"
-    "本次任务创建的普通沙盒会在最终回复前由宿主统一销毁；"
-    "因此必须先发送需要保留的文件或图片。只有 sandbox_exec 明确使用 "
-    "background=true 时，沙盒才由持久队列接管并跨重启保留；"
-    "用 job_status 查看结果，取走产物后再明确请求销毁沙盒。"
+    "任务沙盒不会由模型销毁；任务结束后宿主会停止容器并保留 /workspace，"
+    "下次可用 sandbox_list 找到后继续使用。sandbox_exec 会自动启动已停止的沙盒。"
+    "需要交付的文件会先形成宿主持有的不可变快照，再独立发送到 QQ；"
+    "上传结果未确认时，快照和工作区都必须保留。"
     "只有工具结果明确成功时才能说任务已完成。"
     "沙盒是临时开发环境，不等于公网部署；需要云平台账号或密钥时，"
     "先完成可运行项目和打包，再说明仍需用户提供外部部署条件。"
@@ -239,6 +238,11 @@ class AgentToolExecutor:
     def base_owner(self) -> str:
         return self._owner
 
+    async def _activate_task_sandbox(self, sandbox_id: str) -> None:
+        """Resume a retained workspace and include it in end-of-turn quiescing."""
+        await self.sandbox_manager.start_owned(self.owner, sandbox_id)
+        self._task_sandbox_ids.add(sandbox_id)
+
     @property
     def canonical_messages_enabled(self) -> bool:
         return self.ledger is not None and self.scope is not None
@@ -285,7 +289,6 @@ class AgentToolExecutor:
             SEARCH_MESSAGES_TOOL_NAME: self._search_messages,
             SANDBOX_CREATE_TOOL_NAME: self._sandbox_create,
             SANDBOX_LIST_TOOL_NAME: self._sandbox_list,
-            SANDBOX_DESTROY_TOOL_NAME: self._sandbox_destroy,
             SANDBOX_EXEC_TOOL_NAME: self._sandbox_exec,
             NIX_SEARCH_TOOL_NAME: self._nix_search,
             SANDBOX_WRITE_FILE_TOOL_NAME: self._sandbox_write_file,
@@ -403,9 +406,6 @@ class AgentToolExecutor:
                 reason=reason,
                 message="沙盒执行器已收到取消信号并终止子进程。",
             )
-        if name == SANDBOX_CREATE_TOOL_NAME:
-            cleanup = await self.cleanup_task_sandboxes()
-            return _json_result(ok=not cleanup["failed"], **cleanup)
         if name in {
             BROWSER_NAVIGATE_TOOL_NAME,
             BROWSER_CLICK_TOOL_NAME,
@@ -788,37 +788,25 @@ class AgentToolExecutor:
         sandboxes = await self.sandbox_manager.list(self.owner)
         return _json_result(ok=True, sandboxes=sandboxes)
 
-    async def _sandbox_destroy(
-        self,
-        arguments: dict[str, object],
-    ) -> str:
-        sandbox_id = str(arguments.get("sandbox_id", ""))
-        await self.sandbox_manager.destroy(self.owner, sandbox_id)
-        self._task_sandbox_ids.discard(sandbox_id)
-        return _json_result(ok=True, sandbox_id=sandbox_id, status="destroyed")
-
-    async def cleanup_task_sandboxes(self) -> dict[str, tuple[str, ...]]:
-        """Destroy only sandboxes created by this executor's agent turn."""
-        destroyed: list[str] = []
+    async def retain_task_sandboxes(self) -> dict[str, tuple[str, ...]]:
+        """Stop this turn's containers while preserving their workspaces."""
+        stopped: list[str] = []
         failed: list[str] = []
         retained: list[str] = []
         for sandbox_id in sorted(self._task_sandbox_ids):
-            if self._pending_artifacts.get(sandbox_id):
-                self._task_sandbox_ids.discard(sandbox_id)
-                retained.append(sandbox_id)
-                continue
             try:
-                await self.sandbox_manager.destroy(self.owner, sandbox_id)
+                await self.sandbox_manager.stop_owned(self.owner, sandbox_id)
             except Exception as exc:
                 logger.warning(
-                    f"Automatic cleanup of sandbox {sandbox_id} failed: {exc}"
+                    f"Could not stop retained sandbox {sandbox_id}: {exc}"
                 )
                 failed.append(sandbox_id)
             else:
-                self._task_sandbox_ids.discard(sandbox_id)
-                destroyed.append(sandbox_id)
+                stopped.append(sandbox_id)
+            self._task_sandbox_ids.discard(sandbox_id)
+            retained.append(sandbox_id)
         return {
-            "destroyed": tuple(destroyed),
+            "stopped": tuple(stopped),
             "failed": tuple(failed),
             "retained": tuple(retained),
         }
@@ -832,6 +820,7 @@ class AgentToolExecutor:
         raw_timeout = arguments.get("timeout_seconds")
         timeout = int(raw_timeout) if raw_timeout is not None else None
         packages = self._package_arguments(arguments.get("packages"))
+        await self._activate_task_sandbox(sandbox_id)
         result = await self.sandbox_manager.exec(
             self.owner,
             sandbox_id,
@@ -876,6 +865,7 @@ class AgentToolExecutor:
         sandbox_id = str(arguments.get("sandbox_id", ""))
         path = str(arguments.get("path", ""))
         content = str(arguments.get("content", "")).encode("utf-8")
+        await self._activate_task_sandbox(sandbox_id)
         size = await self.sandbox_manager.write_file(
             self.owner,
             sandbox_id,
@@ -891,6 +881,7 @@ class AgentToolExecutor:
     ) -> str:
         sandbox_id = str(arguments.get("sandbox_id", ""))
         path = str(arguments.get("path", ""))
+        await self._activate_task_sandbox(sandbox_id)
         content = await self.sandbox_manager.read_file(
             self.owner,
             sandbox_id,
@@ -913,6 +904,7 @@ class AgentToolExecutor:
         filename = self._safe_filename(
             requested_name or PurePosixPath(path).name
         )
+        await self._activate_task_sandbox(sandbox_id)
         content = await self.sandbox_manager.read_file(
             self.owner,
             sandbox_id,
@@ -969,28 +961,57 @@ class AgentToolExecutor:
                 "embedded_font": embedded_font,
                 "extractable_text": bool(extracted_text),
             }
+        return await self.send_file_content(
+            content,
+            filename,
+            source_sandbox_id=sandbox_id,
+            source_path=path,
+            pdf_validation=pdf_validation,
+        )
+
+    async def send_file_content(
+        self,
+        content: bytes,
+        filename: str,
+        *,
+        source_sandbox_id: str = "",
+        source_path: str = "",
+        pdf_validation: dict[str, object] | None = None,
+    ) -> str:
+        """Upload trusted bytes independently from the producing container."""
+        if not content:
+            return _json_result(ok=False, error="交付文件为空，未发送。")
+        if self.max_file_bytes and len(content) > self.max_file_bytes:
+            return _json_result(
+                ok=False,
+                error=(
+                    f"交付文件大小 {len(content)} 字节，超过发送上限 "
+                    f"{self.max_file_bytes} 字节。"
+                ),
+            )
+        safe_filename = self._safe_filename(filename)
         upload_started_at = int(time.time())
         response = await self.bot.call_api(
             "upload_group_file",
             group_id=self.event.group_id,
             file="base64://" + base64.b64encode(content).decode("ascii"),
-            name=filename,
+            name=safe_filename,
         )
         accepted = bool(response is not False)
         receipt = (
             await self.confirm_group_file(
-                filename, len(content), not_before=upload_started_at
+                safe_filename, len(content), not_before=upload_started_at
             )
             if accepted
             else {"ok": False, "reconciled": False}
         )
         delivered = bool(receipt.get("ok"))
-        if delivered:
-            self._mark_artifact_delivered(sandbox_id, path)
-            await self._schedule_delivered_task_cleanup(sandbox_id)
+        if delivered and source_sandbox_id:
+            self._mark_artifact_delivered(source_sandbox_id, source_path)
+            await self._retain_delivered_task_sandbox(source_sandbox_id)
         return _json_result(
             ok=delivered,
-            filename=filename,
+            filename=safe_filename,
             size=len(content),
             upload_started_at=upload_started_at,
             uploaded=accepted,
@@ -1012,7 +1033,7 @@ class AgentToolExecutor:
         attempts: int = 6,
         not_before: int | None = None,
     ) -> dict[str, object]:
-        """Confirm that QQ committed an uploaded file before cleanup begins."""
+        """Confirm that QQ committed an uploaded file before retention starts."""
         expected_uploader = str(
             getattr(
                 self.bot,
@@ -1088,7 +1109,7 @@ class AgentToolExecutor:
         if not pending:
             self._pending_artifacts.pop(sandbox_id, None)
 
-    async def _schedule_delivered_task_cleanup(self, sandbox_id: str) -> None:
+    async def _retain_delivered_task_sandbox(self, sandbox_id: str) -> None:
         sandboxes = await self.sandbox_manager.list(self.owner)
         if any(
             str(item.get("sandbox_id") or "") == sandbox_id
@@ -1105,6 +1126,7 @@ class AgentToolExecutor:
         path = str(arguments.get("path", ""))
         if PurePosixPath(path).suffix.lower() not in IMAGE_SUFFIXES:
             return _json_result(ok=False, error="只允许发送常见图片格式。")
+        await self._activate_task_sandbox(sandbox_id)
         content = await self.sandbox_manager.read_file(
             self.owner,
             sandbox_id,
@@ -1302,6 +1324,7 @@ class AgentToolExecutor:
             native_file_id,
         )
         content = await self._read_napcat_file(response)
+        await self._activate_task_sandbox(sandbox_id)
         await self.sandbox_manager.write_file(
             self.owner,
             sandbox_id,

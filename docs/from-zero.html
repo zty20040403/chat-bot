@@ -1806,7 +1806,7 @@ OneBot V11 ... connected</code></pre>
 → sandbox_exec("pytest")
 → sandbox_exec("tar -czf project.tar.gz ...")
 → send_file_from_sandbox("project.tar.gz")
-→ sandbox_destroy()</code></pre>
+→ 宿主停止容器并保留 /workspace</code></pre>
 
           <details open>
             <summary>一个沙盒项目任务是怎样一步一步完成的</summary>
@@ -1824,7 +1824,7 @@ OneBot V11 ... connected</code></pre>
                     <tr><td><code>sandbox_exec("pytest")</code></td><td>运行测试并返回结果。</td><td>模型根据失败输出修改代码，再次运行测试，直到通过或达到工具限制。</td></tr>
                     <tr><td><code>sandbox_exec("tar -czf ...")</code></td><td>在容器内执行打包命令。</td><td>把多个项目文件打成一个便于上传的压缩包。</td></tr>
                     <tr><td><code>send_file_from_sandbox(...)</code></td><td>输入沙盒内文件路径。</td><td>机器人读取受限工作区中的产物并上传到当前群，不能借此发送宿主机私人文件。</td></tr>
-                    <tr><td><code>sandbox_destroy()</code></td><td>输入当前沙盒 ID。</td><td>停止并删除临时容器，释放磁盘、内存和进程资源。重要产物要先发出。</td></tr>
+                    <tr><td><code>宿主保留工作区</code></td><td>不需要模型调用。</td><td>任务结束后只停止容器；<code>/workspace</code> 保留供复查和补发，真正删除必须由管理员明确执行。</td></tr>
                   </tbody>
                 </table>
               </div>
@@ -2393,7 +2393,6 @@ handle_group_context_recorder()  把普通群消息写入群上下文</code></pr
                 <tr><td><code>_search_messages(args)</code></td><td>关键词+数量 → 匹配列表</td><td>只读取当前群最近 100 条，做不区分大小写的子串搜索，最多返回 20 条。</td></tr>
                 <tr><td><code>_sandbox_create(args)</code></td><td>runtime → 沙盒JSON</td><td>调用管理器创建 python、node 或 debian 容器。</td></tr>
                 <tr><td><code>_sandbox_list(args)</code></td><td>无 → 沙盒列表</td><td>只列当前 owner 的沙盒。</td></tr>
-                <tr><td><code>_sandbox_destroy(args)</code></td><td>sandbox_id → 状态</td><td>验证所有权后销毁并返回 destroyed。</td></tr>
                 <tr><td><code>_sandbox_exec(args)</code></td><td>ID+命令+超时 → 输出JSON</td><td>执行命令，退出码为 0 时 <code>ok=true</code>，同时把 stdout/stderr 交回模型。</td></tr>
                 <tr><td><code>_sandbox_write_file(args)</code></td><td>ID+路径+UTF-8文本</td><td>把模型生成的完整文本编码成 UTF-8 后写入沙盒。</td></tr>
                 <tr><td><code>_sandbox_read_file(args)</code></td><td>ID+路径 → 文本</td><td>最多读取 64KB，并以 UTF-8 容错解码；适合源码和配置，不适合二进制文件。</td></tr>

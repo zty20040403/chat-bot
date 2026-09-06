@@ -37,7 +37,6 @@ SANDBOX_TOOLS = frozenset(
         "sandbox_exec",
         "sandbox_write_file",
         "sandbox_read_file",
-        "sandbox_destroy",
         "import_file_to_sandbox",
         "job_cancel",
     }

@@ -1283,7 +1283,7 @@ class SubAgentCoordinator:
     def manifest() -> list[dict[str, object]]:
         return DEFAULT_AGENT_REGISTRY.manifest()
 
-    async def _cleanup_finished_task(self, task_id, hooks):
+    async def _finalize_finished_task(self, task_id, hooks):
         task = self.store.get(task_id)
         if not (
             hooks
@@ -1292,31 +1292,34 @@ class SubAgentCoordinator:
             and task.status in {"completed", "partial", "failed", "cancelled"}
         ):
             return
-        cleanup_ready, artifact_digests = self._artifact_cleanup_state(task)
-        if not cleanup_ready:
+        retention_ready, artifact_digests = self._artifact_retention_state(task)
+        try:
+            await hooks.workspaces.finalize_task(
+                task_id,
+                self.store.runs(task_id),
+                artifact_digests=artifact_digests if retention_ready else (),
+            )
             self.store.append_event(
                 task_id,
                 "task.workspace_retained",
-                {"reason": "artifact_delivery_not_acknowledged"},
-            )
-            return
-        try:
-            await hooks.workspaces.cleanup_task(
-                task_id,
-                self.store.runs(task_id),
-                artifact_digests=artifact_digests,
+                {
+                    "reason": (
+                        "task_finished_delivery_acknowledged"
+                        if retention_ready
+                        else "task_finished_delivery_not_acknowledged"
+                    ),
+                    "containers": "stopped",
+                    "workspace": "retained",
+                },
             )
         except Exception as exc:
             self.logger.warning(
-                "Task workspace cleanup failed for task#%s: %s",
+                "Task workspace finalization failed for task#%s: %s",
                 task_id,
                 type(exc).__name__,
             )
 
-    def _artifact_cleanup_ready(self, task: TaskRecord) -> bool:
-        return self._artifact_cleanup_state(task)[0]
-
-    def _artifact_cleanup_state(
+    def _artifact_retention_state(
         self,
         task: TaskRecord,
     ) -> tuple[bool, tuple[str, ...]]:
@@ -1471,7 +1474,7 @@ class SubAgentCoordinator:
             return f"{task.handle} 恢复失败：{message}"
         finally:
             self._active.pop(task.task_id, None)
-            await self._cleanup_finished_task(task.task_id, hooks)
+            await self._finalize_finished_task(task.task_id, hooks)
 
     @scoped_agent_models
     async def run(
@@ -1568,7 +1571,7 @@ class SubAgentCoordinator:
             return f"{task.handle} 执行失败：{message}"
         finally:
             self._active.pop(task.task_id, None)
-            await self._cleanup_finished_task(task.task_id, hooks)
+            await self._finalize_finished_task(task.task_id, hooks)
 
     @scoped_agent_models
     async def delegate(
@@ -1720,7 +1723,7 @@ class SubAgentCoordinator:
             }
         finally:
             self._active.pop(task.task_id, None)
-            await self._cleanup_finished_task(task.task_id, hooks)
+            await self._finalize_finished_task(task.task_id, hooks)
 
     async def _run_task(
         self,

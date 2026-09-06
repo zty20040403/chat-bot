@@ -2987,23 +2987,23 @@ class ToolExecutor(HandlerService):
             raise ChatFailure("我这边处理消息时出错了。", code="internal") from exc
         finally:
             if agent_executor is not None and not (subagent_task_started or subagent_delegations):
-                cleanup = await agent_executor.cleanup_task_sandboxes()
-                destroyed = cleanup["destroyed"]
-                failed = cleanup["failed"]
-                retained = cleanup["retained"]
-                if destroyed:
+                lifecycle = await agent_executor.retain_task_sandboxes()
+                stopped = lifecycle["stopped"]
+                failed = lifecycle["failed"]
+                retained = lifecycle["retained"]
+                if stopped:
                     self.context.logger.info(
-                        f"Destroyed {len(destroyed)} task sandbox(es): "
-                        + ", ".join(destroyed)
+                        f"Stopped {len(stopped)} retained task sandbox(es): "
+                        + ", ".join(stopped)
                     )
                 if failed:
                     self.context.logger.warning(
-                        f"Could not destroy {len(failed)} task sandbox(es): "
+                        f"Could not stop {len(failed)} retained task sandbox(es): "
                         + ", ".join(failed)
                     )
                 if retained:
                     self.context.logger.info(
-                        f"Retained {len(retained)} task sandbox(es) with unsent artifacts: "
+                        f"Retained {len(retained)} task sandbox workspace(s): "
                         + ", ".join(retained)
                     )
 
