@@ -512,10 +512,20 @@ in {
         ${pkgs.docker}/bin/docker load --input ${cfg.sandbox.imageArchive}
 
         volume=${lib.escapeShellArg cfg.sandbox.nixCacheVolume}
+        for container in $(${pkgs.docker}/bin/docker ps -aq --filter volume="$volume"); do
+          managed=$(${pkgs.docker}/bin/docker inspect \
+            --format '{{ index .Config.Labels "qqbot.managed" }}' "$container" 2>/dev/null || true)
+          initializer=$(${pkgs.docker}/bin/docker inspect \
+            --format '{{ index .Config.Labels "io.kennethbot.cache-initializer" }}' "$container" 2>/dev/null || true)
+          if [ "$initializer" = true ] || [ "$managed" != true ]; then
+            ${pkgs.docker}/bin/docker rm -f "$container" >/dev/null
+          fi
+        done
         if ${pkgs.docker}/bin/docker volume inspect "$volume" >/dev/null 2>&1; then
           if ! ${pkgs.docker}/bin/docker run --rm \
             --network none \
             --user 0:0 \
+            --label io.kennethbot.cache-initializer=true \
             --cap-drop ALL \
             --security-opt no-new-privileges \
             --read-only \
@@ -530,6 +540,7 @@ in {
         ${pkgs.docker}/bin/docker run --rm \
           --network none \
           --user 0:0 \
+          --label io.kennethbot.cache-initializer=true \
           --cap-drop ALL \
           --security-opt no-new-privileges \
           --memory 2g \
