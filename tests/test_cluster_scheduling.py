@@ -12,7 +12,9 @@ nonebot.init()
 from src.cluster_control.guardian import (
     GuardianService,
     guardian_status_after_check,
+    materialize_guardian_action,
     resolve_guardian_target,
+    validate_guardian_action,
 )
 from src.cluster_control.reliability import ReliabilityStore
 from src.cluster_control.scheduling import ResourceRequest, eligibility_reason
@@ -192,6 +194,60 @@ class SchedulingPolicyTests(unittest.TestCase):
             ),
             "completed",
         )
+
+    def test_guardian_action_is_bound_and_materialized_at_execution_time(self) -> None:
+        template = validate_guardian_action(
+            {
+                "host_id": "h610",
+                "resource_ref": "nginx.service",
+                "operation": "service.restart",
+                "verification": {"probe": "admin"},
+            },
+            mode="remediate",
+            max_actions=1,
+            host_id="h610",
+            service_ref="nginx.service",
+        )
+        action = materialize_guardian_action(
+            template,
+            {
+                "guardian_id": "guardian_" + "8" * 32,
+                "host_id": "h610",
+                "service_ref": "nginx.service",
+                "actions_used": 0,
+                "expires_at": 500,
+            },
+            now=100,
+        )
+        self.assertEqual(action["deadline_at"], 400)
+        self.assertEqual(
+            action["idempotency_key"], "guardian:guardian_" + "8" * 32 + ":1"
+        )
+        with self.assertRaises(PermissionError):
+            validate_guardian_action(
+                {
+                    "host_id": "tank",
+                    "resource_ref": "nginx.service",
+                    "operation": "service.restart",
+                },
+                mode="remediate",
+                max_actions=1,
+                host_id="h610",
+                service_ref="nginx.service",
+            )
+        with self.assertRaises(ValueError):
+            validate_guardian_action(
+                {
+                    "host_id": "h610",
+                    "resource_ref": "nginx.service",
+                    "operation": "service.restart",
+                    "deadline_at": 200,
+                },
+                mode="remediate",
+                max_actions=1,
+                host_id="h610",
+                service_ref="nginx.service",
+            )
 
 
 class _GuardianStore:

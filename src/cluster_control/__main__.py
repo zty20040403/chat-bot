@@ -75,7 +75,7 @@ def main() -> None:
     guardian = GuardianService(
         reliability,
         settings.diagnostic_targets,
-        operation_factory=lambda raw, actor, origin: execution.prepare_operation(
+        operation_factory=lambda raw, actor, origin: execution.submit_guardian_operation(
             raw, actor_id=actor, origin_scope=origin
         ),
     )

@@ -82,24 +82,24 @@ class ClusterExecutionService:
             },
         }
 
+    def _operation_capability(
+        self, proposal: OperationProposal
+    ) -> tuple[str, str]:
+        host = self.inventory.get(proposal.host_id)
+        if host is None or not host.get("operate"):
+            return "forbidden", "该主机没有授予 Kennethbot 宿主操作权限"
+        if proposal.resource_ref not in set(host.get("operable_units", [])):
+            return "forbidden", "该服务不在可操作白名单中"
+        if not self.write_backend.available:
+            return "not_configured", self.write_backend.reason
+        return "available", ""
+
     def prepare_operation(
         self, raw: Mapping[str, Any], *, actor_id: str, origin_scope: str
     ) -> dict[str, Any]:
         now = int(time.time())
         proposal = OperationProposal.parse(raw, now=now)
-        host = self.inventory.get(proposal.host_id)
-        if host is None or not host.get("operate"):
-            capability_status = "forbidden"
-            reason = "该主机没有授予 Kennethbot 宿主操作权限"
-        elif proposal.resource_ref not in set(host.get("operable_units", [])):
-            capability_status = "forbidden"
-            reason = "该服务不在可操作白名单中"
-        elif not self.write_backend.available:
-            capability_status = "not_configured"
-            reason = self.write_backend.reason
-        else:
-            capability_status = "available"
-            reason = ""
+        capability_status, reason = self._operation_capability(proposal)
         contract = {
             "task_ref": proposal.task_ref,
             "step_ref": proposal.step_ref,
@@ -146,6 +146,33 @@ class ClusterExecutionService:
             expected_hash=expected_hash,
             expected_version=expected_version,
             expires_at=int(time.time()) + 300,
+        )
+
+    def submit_guardian_operation(
+        self, raw: Mapping[str, Any], *, actor_id: str, origin_scope: str
+    ) -> dict[str, Any]:
+        """Materialize and consume an administrator's bounded guardian grant."""
+        if not actor_id.startswith("admin:"):
+            raise PermissionError("guardian operations require an administrator")
+        proposal = OperationProposal.parse(raw)
+        capability_status, reason = self._operation_capability(proposal)
+        if capability_status != "available":
+            return {
+                "status": "not_started",
+                "capability_status": capability_status,
+                "executable": False,
+                "disabled_reason": reason,
+            }
+        operation = self.prepare_operation(
+            raw, actor_id=actor_id, origin_scope=origin_scope
+        )
+        if not operation.get("executable"):
+            return operation
+        return self.approve_operation(
+            str(operation["operation_id"]),
+            actor_id=actor_id,
+            expected_hash=str(operation["contract_hash"]),
+            expected_version=int(operation["resource_version"]),
         )
 
     @staticmethod

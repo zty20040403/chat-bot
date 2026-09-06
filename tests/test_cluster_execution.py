@@ -35,10 +35,15 @@ class _Fleet:
 class _ExecutionStore:
     def __init__(self) -> None:
         self.operation: dict | None = None
+        self.approval: dict | None = None
 
     def prepare_operation(self, record: dict) -> dict:
         self.operation = dict(record)
         return dict(record)
+
+    def approve_operation(self, operation_id: str, **kwargs: object) -> dict:
+        self.approval = {"operation_id": operation_id, **kwargs}
+        return {"operation_id": operation_id, "status": "queued"}
 
 
 class _Execution:
@@ -113,6 +118,72 @@ class ClusterContractTests(unittest.TestCase):
                 origin_scope="onebot-v11:group:456",
             )
         self.assertFalse(store.submitted)
+
+    def test_guardian_operation_consumes_its_preapproval(self) -> None:
+        store = _ExecutionStore()
+        service = ClusterExecutionService(
+            store,  # type: ignore[arg-type]
+            inventory=(
+                {
+                    "host_id": "h610",
+                    "operate": True,
+                    "operable_units": ["nginx.service"],
+                },
+            ),
+            diagnostic_targets=(),
+            worker_hosts={},
+            write_backend=type(
+                "Backend",
+                (),
+                {
+                    "available": True,
+                    "backend_ref": "test",
+                    "binding_version": 1,
+                    "reason": "",
+                },
+            )(),
+        )
+        result = service.submit_guardian_operation(
+            {
+                "host_id": "h610",
+                "resource_ref": "nginx.service",
+                "operation": "service.restart",
+                "deadline_at": int(time.time()) + 300,
+                "idempotency_key": "guardian:test:1",
+            },
+            actor_id="admin:kenneth",
+            origin_scope="admin-console",
+        )
+        self.assertEqual(result["status"], "queued")
+        self.assertIsNotNone(store.approval)
+
+    def test_unavailable_guardian_action_does_not_leave_a_stale_operation(self) -> None:
+        store = _ExecutionStore()
+        service = ClusterExecutionService(
+            store,  # type: ignore[arg-type]
+            inventory=(
+                {
+                    "host_id": "h610",
+                    "operate": True,
+                    "operable_units": ["nginx.service"],
+                },
+            ),
+            diagnostic_targets=(),
+            worker_hosts={},
+        )
+        result = service.submit_guardian_operation(
+            {
+                "host_id": "h610",
+                "resource_ref": "nginx.service",
+                "operation": "service.restart",
+                "deadline_at": int(time.time()) + 300,
+                "idempotency_key": "guardian:test:unavailable",
+            },
+            actor_id="admin:kenneth",
+            origin_scope="admin-console",
+        )
+        self.assertEqual(result["capability_status"], "not_configured")
+        self.assertIsNone(store.operation)
 
 
 class SignedActorApiTests(unittest.IsolatedAsyncioTestCase):

@@ -8,6 +8,8 @@ from typing import Any, Callable, Mapping, Protocol
 
 import httpx
 
+from .execution_contracts import OPERATION_ACTIONS, bounded_object
+
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +77,70 @@ def guardian_status_after_check(
     ):
         return "needs_attention"
     return "active"
+
+
+def validate_guardian_action(
+    raw: Any,
+    *,
+    mode: str,
+    max_actions: int,
+    host_id: str,
+    service_ref: str,
+) -> dict[str, Any]:
+    action = bounded_object(raw or {}, field="authorized_action")
+    if mode == "observe":
+        if max_actions or action:
+            raise ValueError("observe-only guardians cannot authorize actions")
+        return {}
+    if max_actions < 1:
+        raise ValueError("remediation guardians require a positive action limit")
+    if not service_ref:
+        raise ValueError("remediation guardians require a registered service target")
+    allowed = {
+        "host_id", "resource_ref", "operation", "arguments",
+        "expected_state", "verification", "compensation",
+    }
+    unknown = set(action) - allowed
+    if unknown:
+        raise ValueError("authorized action contains runtime-managed fields")
+    if str(action.get("host_id") or "") != host_id:
+        raise PermissionError("guardian action host does not match its target")
+    if str(action.get("resource_ref") or "") != service_ref:
+        raise PermissionError("guardian action service does not match its target")
+    operation = str(action.get("operation") or "")
+    if operation not in OPERATION_ACTIONS:
+        raise ValueError("guardian action is not a supported service operation")
+    return {
+        "host_id": host_id,
+        "resource_ref": service_ref,
+        "operation": operation,
+        **{
+            field: bounded_object(action.get(field, {}), field=field)
+            for field in (
+                "arguments", "expected_state", "verification", "compensation"
+            )
+        },
+    }
+
+
+def materialize_guardian_action(
+    template: Mapping[str, Any], guardian: Mapping[str, Any], *, now: int
+) -> dict[str, Any]:
+    expires_at = int(guardian.get("expires_at") or now + 300)
+    deadline_at = min(now + 300, expires_at)
+    if deadline_at <= now:
+        raise ValueError("guardian authorization has expired")
+    action_number = int(guardian.get("actions_used") or 0) + 1
+    guardian_id = str(guardian["guardian_id"])
+    return {
+        **dict(template),
+        "host_id": str(guardian["host_id"]),
+        "resource_ref": str(guardian["service_ref"]),
+        "deadline_at": deadline_at,
+        "idempotency_key": f"guardian:{guardian_id}:{action_number}",
+        "task_ref": guardian_id,
+        "step_ref": f"action-{action_number}",
+    }
 
 
 class GuardianService:
@@ -209,7 +275,11 @@ class GuardianService:
                 try:
                     operation = await asyncio.to_thread(
                         self.operation_factory,
-                        dict(guardian["authorized_action"]),
+                        materialize_guardian_action(
+                            guardian["authorized_action"],
+                            guardian,
+                            now=int(time.time()),
+                        ),
                         str(guardian["actor_id"]),
                         str(guardian["origin_scope"]),
                     )

@@ -12,6 +12,7 @@ from .guardian import (
     guardian_status_after_check,
     guardian_target_snapshot,
     resolve_guardian_target,
+    validate_guardian_action,
 )
 
 
@@ -380,7 +381,6 @@ class ReliabilityStore:
         threshold = int(raw.get("failure_threshold") or 3)
         max_actions = int(raw.get("max_actions") or 0)
         mode = str(raw.get("mode") or "observe")
-        action = raw.get("authorized_action") or {}
         if mode not in {"observe", "remediate"}:
             raise ValueError("invalid guardian mode")
         if not now - 60 <= starts_at < expires_at <= now + 31 * 86_400:
@@ -389,10 +389,13 @@ class ReliabilityStore:
             raise ValueError("invalid guardian interval or failure threshold")
         if not 0 <= max_actions <= 20:
             raise ValueError("invalid guardian action limit")
-        if mode == "observe" and (max_actions or action):
-            raise ValueError("observe-only guardians cannot authorize actions")
-        if mode == "remediate" and (not isinstance(action, dict) or not action):
-            raise ValueError("remediation guardian requires a fixed authorized action")
+        action = validate_guardian_action(
+            raw.get("authorized_action"),
+            mode=mode,
+            max_actions=max_actions,
+            host_id=target_host_id,
+            service_ref=target_service_ref,
+        )
         probe_policy = dict(raw.get("probe_policy") or {})
         probe_policy["registered_target"] = target_snapshot
         guardian_id = new_handle("guardian")
