@@ -263,6 +263,12 @@ class Settings:
     alert_notify_enabled: bool
     alert_notify_group_id: int
     alert_notify_check_seconds: int
+    cluster_enabled: bool
+    cluster_control_url: str
+    cluster_control_token_file: str
+    cluster_control_timeout_seconds: int
+    fleet_allowed_groups: set[int]
+    fleet_log_allowed_groups: set[int]
     otel_service_name: str
     otel_exporter_otlp_endpoint: str
     mirror_routes_json: str
@@ -817,6 +823,21 @@ class Settings:
             alert_notify_check_seconds=max(
                 _get_int("AI_ALERT_NOTIFY_CHECK_SECONDS", 30),
                 10,
+            ),
+            cluster_enabled=_get_bool("AI_CLUSTER_ENABLED", False),
+            cluster_control_url=os.getenv(
+                "AI_CLUSTER_CONTROL_URL", "http://127.0.0.1:8091"
+            ).strip().rstrip("/"),
+            cluster_control_token_file=os.getenv(
+                "AI_CLUSTER_CONTROL_TOKEN_FILE", ""
+            ).strip(),
+            cluster_control_timeout_seconds=min(
+                max(_get_int("AI_CLUSTER_CONTROL_TIMEOUT_SECONDS", 12), 1),
+                30,
+            ),
+            fleet_allowed_groups=_get_group_ids("AI_FLEET_ALLOWED_GROUPS"),
+            fleet_log_allowed_groups=_get_group_ids(
+                "AI_FLEET_LOG_ALLOWED_GROUPS"
             ),
             otel_service_name=(
                 os.getenv("OTEL_SERVICE_NAME", "kennethbot").strip()

@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.10.2-22c55e?style=for-the-badge">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.12.0-22c55e?style=for-the-badge">
   <img alt="Python" src="https://img.shields.io/badge/Python-3.12-3776ab?style=for-the-badge&amp;logo=python&amp;logoColor=white">
   <img alt="NoneBot2" src="https://img.shields.io/badge/NoneBot2-OneBot_V11-ea5252?style=for-the-badge">
   <img alt="PostgreSQL" src="https://img.shields.io/badge/PostgreSQL-Durable-4169e1?style=for-the-badge&amp;logo=postgresql&amp;logoColor=white">
@@ -49,6 +49,10 @@ Kennethbot 通过 NapCatQQ 接收 OneBot V11 事件，使用 NoneBot2 处理消�
     <td><strong>Durable Runtime</strong><br>PostgreSQL 保存消息、回合、工具效果、Outbox、提醒、持久任务和媒体元数据。</td>
     <td><strong>生产部署</strong><br>实时管理控制台、权威告警查询、Nix Flake、NixOS module、systemd Worker 与数据库迁移。</td>
   </tr>
+  <tr>
+    <td><strong>集群只读控制面</strong><br>独立服务查询获准节点、systemd 状态与有限日志，保留来源、时间、过期状态和审计投影。</td>
+    <td><strong>双层权限边界</strong><br>会话、主机与服务先由 Kennethbot 收窄，再由运维后端复核；模型不能提交地址、凭据或任意命令。</td>
+  </tr>
 </table>
 
 ## 系统结构
@@ -75,12 +79,14 @@ flowchart LR
     TOOLS --> PG
     OUT --> PG
     OUT --> NC
+    TOOLS --> CC[Cluster Control]
+    CC --> OPS[Read-only Operations API]
 
     classDef core fill:#18181b,stroke:#22c55e,color:#fafafa,stroke-width:2px;
     classDef service fill:#27272a,stroke:#71717a,color:#fafafa;
     classDef data fill:#172554,stroke:#60a5fa,color:#eff6ff;
     class AGENT,LLM core;
-    class NC,NB,IR,CTX,TOOLS,MEDIA,BOX,OUT service;
+    class NC,NB,IR,CTX,TOOLS,MEDIA,BOX,OUT,CC,OPS service;
     class PG data;
 ```
 
@@ -104,6 +110,7 @@ OneBot 消息段并发送。
 | 语音 | Edge TTS、腾讯 SILK、NapCat 语音转写 |
 | 富文本 | CodeSnap、Pygments |
 | 部署 | Nix Flakes、NixOS、systemd |
+| 集群观测 | 独立控制服务、受控只读运维 API、Prometheus 指标 |
 
 ## 目录结构
 
@@ -120,6 +127,7 @@ bot/
 ├── docs/                        # 架构、运维和迁移文档
 ├── tests/                       # 单元测试与集成测试
 └── src/
+    ├── cluster_control/         # 独立集群控制服务、权限交集与查询投影
     ├── bot_storage/             # PostgreSQL、迁移与存储工具
     └── plugins/ai_chat/
         ├── __init__.py          # NoneBot Matcher 与兼容入口
@@ -250,6 +258,9 @@ Sub-Agent 委派的普通聊天；复杂任务仍使用会话原本选择的模�
 配置步骤见 [本地千问运维](docs/local-qwen.md)。
 
 完整字段和可选服务见 [`.env.example`](.env.example)。
+
+集群只读接入默认关闭。它使用独立控制进程和两份用途不同的凭据，部署、验收和
+回滚步骤见 [集群控制运行手册](docs/cluster-control-runbook.md)。
 
 ### 4. 启动 Bot
 

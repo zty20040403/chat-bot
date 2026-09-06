@@ -21,6 +21,8 @@ COMMON_READ_TOOLS = frozenset(
         "list_recent_files",
         "job_status",
         "say",
+        "fleet_overview",
+        "host_inspect",
     }
 )
 SANDBOX_TOOLS = frozenset(
@@ -175,7 +177,15 @@ AGENT_SPECS: dict[SubAgentRole, AgentSpec] = {
         ),
         allowed_tools=(
             COMMON_READ_TOOLS
-            | {"query_alerts", "sandbox_list", "job_status", "group_members"}
+            | {
+                "query_alerts",
+                "fleet_overview",
+                "host_inspect",
+                "service_logs",
+                "sandbox_list",
+                "job_status",
+                "group_members",
+            }
         ),
         model_policy="operations",
         risk_level="privileged",

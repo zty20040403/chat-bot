@@ -5,11 +5,14 @@ import {
   CircleAlert,
   Clock3,
   Database,
+  Eye,
   ExternalLink,
+  FileText,
   GitBranch,
   Maximize2,
   Minimize2,
   Play,
+  RefreshCw,
   RotateCcw,
   ShieldCheck,
   Square,
@@ -541,6 +544,106 @@ export function DatabasesView({ plane }: { plane: Plane }) {
   )
 }
 
+function fleetHostState(host: any): string {
+  const agent = String(host?.agent?.state ?? '')
+  const exporter = String(host?.exporter?.state ?? '')
+  if (agent === 'reachable' && (!exporter || exporter === 'up')) return 'online'
+  if (agent === 'unreachable' || exporter === 'down') return 'offline'
+  return agent || exporter || 'unknown'
+}
+
+export function FleetView({ plane }: { plane: Plane }) {
+  const payload = plane.data.fleet ?? {}
+  const fleet = payload.fleet ?? {}
+  const backend = rows(payload.backends?.items)[0] ?? {}
+  const capabilities = rows(payload.capabilities?.capabilities)
+  const observations = rows(payload.observations?.items)
+  const observedHosts = rows(fleet.data?.hosts)
+  const inventory = rows(fleet.inventory)
+  const observedByHost = new Map(observedHosts.map((host) => [String(host.host), host]))
+  const knownHosts = inventory.map((host) => ({
+    ...host,
+    ...(observedByHost.get(String(host.host_id)) ?? {}),
+  }))
+  const [selectedHostId, setSelectedHostId] = useState('')
+  const [selectedUnit, setSelectedUnit] = useState('')
+  const [hostDetail, setHostDetail] = useState<any>(null)
+  const [unitDetail, setUnitDetail] = useState<any>(null)
+  const [logDetail, setLogDetail] = useState<any>(null)
+  const [detailLoading, setDetailLoading] = useState(false)
+  const [detailError, setDetailError] = useState('')
+  const selectedHost = knownHosts.find((host) => String(host.host ?? host.host_id) === selectedHostId)
+  const loadHost = async (hostId: string) => {
+    setSelectedHostId(hostId)
+    setSelectedUnit('')
+    setUnitDetail(null)
+    setLogDetail(null)
+    setDetailLoading(true)
+    try {
+      setHostDetail(await plane.query(`/fleet/hosts/${encodeURIComponent(hostId)}`))
+      setDetailError('')
+    } catch (reason) {
+      setHostDetail(null)
+      setDetailError(reason instanceof Error ? reason.message : '节点详情读取失败')
+    } finally {
+      setDetailLoading(false)
+    }
+  }
+  const loadUnit = async (includeLogs: boolean) => {
+    if (!selectedHostId || !selectedUnit) return
+    setDetailLoading(true)
+    try {
+      const base = `/fleet/hosts/${encodeURIComponent(selectedHostId)}/units/${encodeURIComponent(selectedUnit)}`
+      if (includeLogs) setLogDetail(await plane.query(`${base}/logs?lines=50&since_seconds=3600`))
+      else setUnitDetail(await plane.query(base))
+      setDetailError('')
+    } catch (reason) {
+      setDetailError(reason instanceof Error ? reason.message : '服务详情读取失败')
+    } finally {
+      setDetailLoading(false)
+    }
+  }
+  const availableCapabilities = capabilities.filter((item) => item.available)
+  const status = payload.configured ? fleet.status ?? backend.state ?? 'unknown' : 'unconfigured'
+  return (
+    <>
+      <PageHeader title="服务器集群" description="MaxOps 只读观测、来源时间和 Kennethbot 可用能力" action={<RefreshButton loading={plane.loading.has('fleet')} onClick={() => void plane.refresh('fleet')} />} />
+      <div className="metric-grid">
+        <Metric label="控制链路" value={<StatusBadge value={status} />} hint={payload.configured ? `MaxOps：${backend.state ?? 'unknown'}` : '尚未配置集群控制服务'} />
+        <Metric label="登记节点" value={fmtNumber(knownHosts.length)} hint={`${fmtNumber(observedHosts.length)} 台有当前观测`} />
+        <Metric label="可用能力" value={`${availableCapabilities.length}/${capabilities.length}`} hint="新能力不会自动授权" />
+        <Metric label="最后成功" value={fmtTime(backend.last_success_at ?? fleet.observed_at)} hint={fleet.cached ? '当前结果来自缓存' : '当前结果来自上游'} />
+      </div>
+      <Section title="节点状态" description="unknown 只表示证据不足，不等于机器关机">
+        {knownHosts.length ? <DataTable><thead><tr><th>节点</th><th>角色</th><th>Agent</th><th>Exporter</th><th>失败服务</th><th>观测状态</th><th></th></tr></thead><tbody>{knownHosts.map((host) => { const hostId = String(host.host ?? host.host_id); return <tr key={hostId}><td><strong>{host.label || hostId}</strong><small className="cell-sub">{hostId} · {host.site ?? host.architecture ?? '-'}</small></td><td>{host.role ?? host.roles?.join?.('、') ?? '-'}</td><td><StatusBadge value={host.agent?.state ?? 'unknown'} /></td><td><StatusBadge value={host.exporter?.state ?? 'unknown'} /></td><td>{host.agent?.failed_units == null ? '-' : fmtNumber(host.agent.failed_units)}</td><td><StatusBadge value={fleetHostState(host)} /></td><td className="actions"><button className="icon-button" title={`查看 ${hostId} 详情`} aria-label={`查看 ${hostId} 详情`} onClick={() => void loadHost(hostId)}><Eye size={15} /></button></td></tr>})}</tbody></DataTable> : <EmptyState>暂无登记节点；控制服务离线时不会猜测机器状态</EmptyState>}
+      </Section>
+      {selectedHostId && <Section title={`节点详情 · ${selectedHostId}`} description="主机事实和服务状态按需读取；日志不会自动加载">
+        <div className="fleet-detail-toolbar">
+          <span><strong>{selectedHost?.label || selectedHostId}</strong><small>{selectedHost?.maintainer ? `维护者：${selectedHost.maintainer}` : '维护者未登记'} · 权限来源：{selectedHost?.permission_source || '未确认'}</small></span>
+          <button className="icon-button" title="刷新主机事实" aria-label="刷新主机事实" disabled={detailLoading} onClick={() => void loadHost(selectedHostId)}><RefreshCw className={detailLoading ? 'spin' : ''} size={15} /></button>
+        </div>
+        {detailError && <div className="inline-error">{detailError}</div>}
+        {hostDetail && <DataTable><thead><tr><th>结果</th><th>内核</th><th>运行时间</th><th>系统版本</th><th>观测时间</th></tr></thead><tbody><tr><td><StatusBadge value={hostDetail.status} /></td><td>{hostDetail.data?.facts?.kernel ?? '-'}</td><td>{hostDetail.data?.facts?.uptime_seconds == null ? '-' : fmtDuration(hostDetail.data.facts.uptime_seconds)}</td><td className="truncate" title={hostDetail.data?.facts?.system_closure ?? ''}>{hostDetail.data?.facts?.system_closure ?? '-'}</td><td>{fmtTime(hostDetail.observed_at ?? hostDetail.data?.observed_at)}</td></tr></tbody></DataTable>}
+        <div className="fleet-service-controls">
+          <label><span>允许读取的服务</span><select value={selectedUnit} onChange={(event) => { setSelectedUnit(event.target.value); setUnitDetail(null); setLogDetail(null) }}><option value="">选择 systemd 服务</option>{rows(selectedHost?.readable_units).map((unit) => <option key={unit} value={unit}>{unit}</option>)}</select></label>
+          <button className="icon-button" type="button" title="读取服务状态" aria-label="读取服务状态" disabled={!selectedUnit || detailLoading} onClick={() => void loadUnit(false)}><Eye size={15} /></button>
+          <button className="icon-button" type="button" title="读取最近一小时日志" aria-label="读取最近一小时日志" disabled={!selectedUnit || detailLoading} onClick={() => void loadUnit(true)}><FileText size={15} /></button>
+        </div>
+        {unitDetail && <DataTable><thead><tr><th>服务</th><th>加载</th><th>运行</th><th>子状态</th><th>主进程</th><th>内存</th></tr></thead><tbody><tr><td><code>{selectedUnit}</code></td><td>{unitDetail.data?.unit?.load_state ?? '-'}</td><td><StatusBadge value={unitDetail.data?.unit?.active_state ?? unitDetail.status} /></td><td>{unitDetail.data?.unit?.sub_state ?? '-'}</td><td>{unitDetail.data?.unit?.details?.main_pid ?? '-'}</td><td>{fmtBytes(unitDetail.data?.unit?.details?.memory_current)}</td></tr></tbody></DataTable>}
+        {logDetail && <div className="fleet-log-lines"><div><strong>最近一小时日志</strong><StatusBadge value={logDetail.status} /></div>{rows(logDetail.data?.entries).map((entry, index) => <p key={`${entry.timestamp_us}-${index}`}><time>{fmtTime(Number(entry.timestamp_us ?? 0) / 1_000_000)}</time><code>{entry.priority ?? '-'}</code><span>{entry.message ?? ''}</span></p>)}{!rows(logDetail.data?.entries).length && <EmptyState>没有返回日志；可能没有记录或当前范围无权读取</EmptyState>}</div>}
+      </Section>}
+      <Section title="只读能力" description="能力必须同时存在于上游目录和 Kennethbot 映射中">
+        <DataTable><thead><tr><th>能力</th><th>上游操作</th><th>可用</th><th>敏感</th><th>原因</th></tr></thead><tbody>{capabilities.map((item) => <tr key={item.name}><td><code>{item.name}</code></td><td><code>{item.operation}</code></td><td><StatusBadge value={item.available ? 'enabled' : 'disabled'} /></td><td>{item.sensitive ? '是' : '否'}</td><td>{item.reason || '-'}</td></tr>)}</tbody></DataTable>
+        {!capabilities.length && <EmptyState>尚未取得 MaxOps 操作目录</EmptyState>}
+      </Section>
+      <Section title="最近观测" description="日志正文不落库，这里只保存操作、目标、状态和时间">
+        <DataTable><thead><tr><th>收到时间</th><th>操作</th><th>目标</th><th>状态</th><th>耗时</th><th>敏感</th><th>错误码</th></tr></thead><tbody>{observations.slice(0, 5).map((item) => <tr key={item.observation_id}><td>{fmtTime(item.received_at)}</td><td><code>{item.operation}</code></td><td>{item.target_key}</td><td><StatusBadge value={item.status} /></td><td>{item.duration_ms ?? '-'} ms</td><td>{item.sensitive ? '是' : '否'}</td><td>{item.error_code || '-'}</td></tr>)}</tbody></DataTable>
+        {!observations.length && <EmptyState>还没有集群查询证据</EmptyState>}
+      </Section>
+    </>
+  )
+}
+
 export function SandboxesView({ plane }: { plane: Plane }) {
   const payload = plane.data.sandboxes ?? {}
   const sandboxes = rows(payload.items)
@@ -626,6 +729,7 @@ const HELP_SECTIONS = [
       ['Trace 与上下文', '用 Trace ID 串起一次回答的模型、工具、Token 和耗时；上下文决策显示“你觉得呢”等追问最终关联了哪条消息及置信度。'],
       ['上下文调试', '左侧选择一次回答，右侧查看当前话题、原始证据、候选评分、Token 分区及群/个人记忆。确认质量后点“答对了”或“答非所问”，备注会连同版本写入审计。'],
       ['数据库', '查看 h610 主库和备用节点、连接池、延迟及复制状态。出现 offline 或 degraded 时先看节点错误，不要直接清数据。'],
+      ['服务器集群', '查看 MaxOps 只读链路、节点观测、操作能力和最近查询。fresh 是新数据，stale 是旧数据加上游错误，unavailable 只表示当前取不到证据，不能据此断定服务器关机。'],
       ['沙盒', '查看临时容器、正在执行的命令、内存和 Agent 任务。任务完成后沙盒自动销毁，因此这里为空通常是正常状态。'],
     ],
   },

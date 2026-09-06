@@ -157,6 +157,40 @@ in {
       '';
     };
 
+    cluster = {
+      enable = lib.mkEnableOption "read-only Kennethbot fleet tools";
+
+      controlUrl = lib.mkOption {
+        type = lib.types.str;
+        default = "http://127.0.0.1:8091";
+        description = "Fixed Kennethbot cluster-control API URL.";
+      };
+
+      tokenFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Credential file for the internal cluster-control API.";
+      };
+
+      allowedGroups = lib.mkOption {
+        type = lib.types.listOf lib.types.ints.unsigned;
+        default = [];
+        description = "QQ groups allowed to use non-sensitive fleet queries.";
+      };
+
+      logAllowedGroups = lib.mkOption {
+        type = lib.types.listOf lib.types.ints.unsigned;
+        default = [];
+        description = "QQ groups allowed to request allowlisted service logs.";
+      };
+
+      timeoutSeconds = lib.mkOption {
+        type = lib.types.ints.between 1 30;
+        default = 12;
+        description = "Whole-request timeout used by the bot-side control client.";
+      };
+    };
+
     sandbox.enable = lib.mkOption {
       type = lib.types.bool;
       default = false;
@@ -330,6 +364,10 @@ in {
         assertion = builtins.match "^[A-Za-z0-9_.-]+$" cfg.cacheDirectory != null;
         message = "services.qq-deepseek-bot.cacheDirectory must be a directory name, not a path";
       }
+      {
+        assertion = !cfg.cluster.enable || cfg.cluster.tokenFile != null;
+        message = "services.qq-deepseek-bot.cluster.tokenFile is required when cluster tools are enabled";
+      }
     ];
 
     users.groups.${serviceName} = lib.mkIf (cfg.group == serviceName) {};
@@ -346,12 +384,15 @@ in {
     systemd.services.${serviceName} = {
       description = "DeepSeek QQ bot";
       wantedBy = ["multi-user.target"];
-      wants = ["network-online.target"];
+      wants =
+        ["network-online.target"]
+        ++ lib.optional cfg.cluster.enable "kennethbot-cluster-control.service";
       requires = lib.optionals cfg.sandbox.enable [
         "${serviceName}-sandbox-image.service"
       ];
       after =
         ["network-online.target"]
+        ++ lib.optional cfg.cluster.enable "kennethbot-cluster-control.service"
         ++ lib.optionals cfg.sandbox.enable [
           "${serviceName}-sandbox-image.service"
         ];
@@ -402,6 +443,17 @@ in {
         // lib.optionalAttrs (!cfg.videoDeep.enable) {
           AI_VIDEO_DEEP_ENABLED = "false";
         }
+        // lib.optionalAttrs cfg.cluster.enable {
+          AI_CLUSTER_ENABLED = "true";
+          AI_CLUSTER_CONTROL_URL = cfg.cluster.controlUrl;
+          AI_CLUSTER_CONTROL_TOKEN_FILE = "%d/fleet-control-token";
+          AI_CLUSTER_CONTROL_TIMEOUT_SECONDS = toString cfg.cluster.timeoutSeconds;
+          AI_FLEET_ALLOWED_GROUPS = lib.concatMapStringsSep "," toString cfg.cluster.allowedGroups;
+          AI_FLEET_LOG_ALLOWED_GROUPS = lib.concatMapStringsSep "," toString cfg.cluster.logAllowedGroups;
+        }
+        // lib.optionalAttrs (!cfg.cluster.enable) {
+          AI_CLUSTER_ENABLED = "false";
+        }
         // cfg.environment;
 
       serviceConfig =
@@ -422,6 +474,7 @@ in {
           Restart = "on-failure";
           RestartSec = 5;
           UMask = "0077";
+          LoadCredential = lib.optional (cfg.cluster.enable && cfg.cluster.tokenFile != null) "fleet-control-token:${cfg.cluster.tokenFile}";
 
           NoNewPrivileges = true;
           PrivateTmp = true;

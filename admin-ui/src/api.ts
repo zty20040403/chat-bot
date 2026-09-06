@@ -12,6 +12,7 @@ export type ResourceName =
   | 'media'
   | 'sources'
   | 'databases'
+  | 'fleet'
   | 'groups'
   | 'localModel'
   | 'tools'
@@ -45,6 +46,7 @@ export const RESOURCE_PATHS: Record<ResourceName, string> = {
   media: '/media',
   sources: '/sources',
   databases: '/databases',
+  fleet: '/fleet',
   groups: '/group-models',
   localModel: '/local-model',
   tools: '/tools',
@@ -69,6 +71,7 @@ export const EVENT_RESOURCES: Record<string, ResourceName[]> = {
   media: ['media'],
   sources: ['sources'],
   databases: ['databases'],
+  fleet: ['fleet'],
   groups: ['groups'],
   'local-model': ['localModel'],
   tools: ['tools'],

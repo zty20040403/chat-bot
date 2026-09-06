@@ -273,6 +273,19 @@ dd { margin: 0; font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
 .alert-row time { color: #a1a1aa; font-family: "SFMono-Regular", Consolas, monospace; font-size: 9px; }
 .alert-row svg { color: var(--amber); }
 .detail-page { display: grid; gap: 14px; }
+.fleet-detail-toolbar, .fleet-service-controls { display: flex; align-items: end; gap: 10px; flex-wrap: wrap; }
+.fleet-detail-toolbar { justify-content: space-between; align-items: center; }
+.fleet-detail-toolbar > span { display: grid; gap: 3px; }
+.fleet-detail-toolbar small { color: var(--muted); }
+.fleet-service-controls label { display: grid; gap: 5px; min-width: min(360px, 100%); }
+.fleet-service-controls label span { color: var(--muted); font-size: 12px; }
+.fleet-service-controls select { min-height: 34px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); padding: 0 30px 0 10px; }
+.fleet-log-lines { display: grid; gap: 0; border-top: 1px solid var(--border); }
+.fleet-log-lines > div { display: flex; align-items: center; gap: 8px; padding: 10px 0; }
+.fleet-log-lines p { display: grid; grid-template-columns: 150px 36px minmax(0, 1fr); gap: 10px; margin: 0; padding: 7px 0; border-top: 1px solid var(--border); font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.fleet-log-lines p time, .fleet-log-lines p code { color: var(--muted); }
+.fleet-log-lines p span { min-width: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+@media (max-width: 720px) { .fleet-log-lines p { grid-template-columns: 1fr; gap: 2px; } }
 .detail-toolbar { min-height: 48px; display: flex; align-items: center; gap: 12px; padding-bottom: 13px; border-bottom: 1px solid var(--border); }
 .back-button { min-height: 32px; display: inline-flex; align-items: center; gap: 7px; padding: 0 9px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: #52525b; font-size: 11px; }
 .back-button:hover { border-color: var(--border-strong); color: var(--foreground); }

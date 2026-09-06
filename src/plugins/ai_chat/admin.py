@@ -24,6 +24,7 @@ from .admin_control import (
     parse_expected_version,
 )
 from .admin_dashboard import ADMIN_FAVICON_SVG, admin_asset_path, dashboard_html
+from .admin_fleet import register_fleet_admin_routes
 from .conversation_scope import ConversationScope
 from .model_catalog import SUPPORTED_REASONING_EFFORTS
 from .local_model import LocalModelControlError
@@ -82,6 +83,7 @@ class AdminServices:
     database: Any = None
     telemetry: Any = None
     alert_store: Any = None
+    fleet_client: Any = None
 
 
 @dataclass(frozen=True)
@@ -243,6 +245,8 @@ _DATABASE_RESOURCE_MAP: dict[str, tuple[str, ...]] = {
     "bridge_sources": ("overview",),
     "bridge_deliveries": ("overview",),
     "bridge_cursors": ("overview",),
+    "fleet_backend_states": ("fleet", "overview"),
+    "fleet_observations": ("fleet",),
 }
 
 
@@ -278,6 +282,7 @@ class AdminRealtimeMonitor:
         first = True
         next_process = 0.0
         next_external = 0.0
+        next_fleet = 0.0
         try:
             while self.broker.has_subscribers:
                 changed: set[str] = set()
@@ -320,6 +325,7 @@ class AdminRealtimeMonitor:
                             "media",
                             "sources",
                             "databases",
+                            "fleet",
                             "groups",
                             "tools",
                             "traces",
@@ -334,6 +340,9 @@ class AdminRealtimeMonitor:
                 if now >= next_external:
                     changed.update(("alerts", "databases", "stickers"))
                     next_external = now + 5.0
+                if now >= next_fleet:
+                    changed.add("fleet")
+                    next_fleet = now + 10.0
                 if changed:
                     self.broker.publish_runtime(*changed)
                 await asyncio.sleep(1.0)
@@ -683,6 +692,8 @@ def register_admin(
                 "pool": {},
             }
         return services.database.topology_snapshot()
+
+    register_fleet_admin_routes(router, services, authorize, versioned)
 
     @router.get("/api/platforms")
     async def platforms(

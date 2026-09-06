@@ -101,7 +101,7 @@
         pname = "kennethbot-admin-ui";
         version = project.project.version;
         src = ./admin-ui;
-        npmDepsHash = "sha256-OZcHLAk3j0OqfY7HCq/Lsxc4EyUAeHw8RLkDVgPtW7o=";
+        npmDepsHash = "sha256-9VDkAcgazpnK+SidDg/8TibaaitMoWtfH54UNLbxzvE=";
         npmBuildScript = "build";
         installPhase = ''
           runHook preInstall
@@ -141,6 +141,11 @@
             --chdir "$out/share/qq-deepseek-bot" \
             --set PYTHONDONTWRITEBYTECODE 1 \
             --set PYTHONUNBUFFERED 1
+          makeWrapper ${virtualenv}/bin/python "$out/bin/kennethbot-cluster-control" \
+            --add-flags "-m src.cluster_control" \
+            --chdir "$out/share/qq-deepseek-bot" \
+            --set PYTHONDONTWRITEBYTECODE 1 \
+            --set PYTHONUNBUFFERED 1
 
           runHook postInstall
         '';
@@ -177,6 +182,10 @@
         type = "app";
         program = lib.getExe self.packages.${system}.default;
       };
+      cluster-control = {
+        type = "app";
+        program = "${self.packages.${system}.default}/bin/kennethbot-cluster-control";
+      };
     });
 
     checks = forAllSystems (system: let
@@ -212,6 +221,7 @@
       default = import ./nix/module.nix {inherit self;};
       qq-deepseek-bot = self.nixosModules.default;
       qwen-control = import ./nix/qwen-control.nix;
+      cluster-control = import ./nix/cluster-control.nix {inherit self;};
     };
   };
 }

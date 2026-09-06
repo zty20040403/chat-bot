@@ -26,6 +26,7 @@ from .content_sources import ContentSourceStore
 from .context_store import CaptureCandidate, ContextStore
 from .context_pipeline import TopicGraphStore
 from .delivery import DeliveryStore
+from .fleet_client import FleetControlClient
 from .historian import (
     DreamOperation,
     DreamService,
@@ -145,6 +146,7 @@ class AppContext:
     vision_worker: VisionWorker | None = None
     cold_archive: ColdArchiveService | None = None
     alert_store: AlertEventStore | None = None
+    fleet_client: FleetControlClient | None = None
     _closed: bool = field(default=False, init=False, repr=False)
 
     async def shutdown(self) -> None:
@@ -170,6 +172,7 @@ class AppContext:
             ("media library", self.media_library),
             ("vision worker", self.vision_worker),
             ("cold archive", self.cold_archive),
+            ("fleet control client", self.fleet_client),
         ):
             if resource is None:
                 continue
@@ -332,6 +335,20 @@ def build_app_context(
 
     source_store = ContentSourceStore(database) if database is not None else None
     alert_store = AlertEventStore(database) if database is not None else None
+    fleet_client: FleetControlClient | None = None
+    if settings.cluster_enabled:
+        if not settings.cluster_control_token_file:
+            raise RuntimeError(
+                "AI_CLUSTER_CONTROL_TOKEN_FILE is required when cluster access is enabled"
+            )
+        try:
+            fleet_client = FleetControlClient(
+                settings.cluster_control_url,
+                settings.cluster_control_token_file,
+                timeout_seconds=settings.cluster_control_timeout_seconds,
+            )
+        except ValueError as exc:
+            raise RuntimeError(f"Fleet control client could not start: {exc}") from exc
 
     context_store: ContextStore | None = None
     if settings.context_lifecycle_enabled and message_ledger is not None:
@@ -863,4 +880,5 @@ def build_app_context(
         vision_worker=vision_worker,
         cold_archive=cold_archive,
         alert_store=alert_store,
+        fleet_client=fleet_client,
     )

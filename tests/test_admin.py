@@ -388,6 +388,40 @@ class Database:
         }
 
 
+class FleetClient:
+    async def fleet(self):
+        return {
+            "ok": True,
+            "status": "fresh",
+            "data": {"hosts": [{"host": "h610"}]},
+            "inventory": [{"host_id": "h610", "role": "control"}],
+        }
+
+    async def backends(self):
+        return {"items": [{"backend_name": "maxops", "state": "online"}]}
+
+    async def capabilities(self):
+        return {"capabilities": [{"name": "fleet.read", "available": True}]}
+
+    async def observations(self, *, limit=50):
+        return {"items": [{"observation_id": 1}][:limit]}
+
+    async def host(self, host_id):
+        return {"host": host_id, "status": "fresh"}
+
+    async def unit(self, host_id, unit):
+        return {"host": host_id, "unit": unit, "status": "fresh"}
+
+    async def logs(self, host_id, unit, *, lines=50, since_seconds=3600):
+        return {
+            "host": host_id,
+            "unit": unit,
+            "lines": lines,
+            "since_seconds": since_seconds,
+            "status": "fresh",
+        }
+
+
 class AdminTests(unittest.TestCase):
     def test_admin_event_broker_coalesces_resource_names(self) -> None:
         broker = AdminEventBroker()
@@ -500,6 +534,7 @@ class AdminTests(unittest.TestCase):
                 database=Database(),
                 telemetry=Telemetry(),
                 alert_store=AlertHistory(),
+                fleet_client=FleetClient(),
             ),
             token="secret",
         )
@@ -566,6 +601,10 @@ class AdminTests(unittest.TestCase):
                     "/bot-admin/api/databases",
                     headers={"Authorization": "Bearer secret"},
                 )
+                fleet = await client.get(
+                    "/bot-admin/api/v1/fleet",
+                    headers={"Authorization": "Bearer secret"},
+                )
                 observability = await client.get(
                     "/bot-admin/api/observability",
                     headers={"Authorization": "Bearer secret"},
@@ -590,6 +629,7 @@ class AdminTests(unittest.TestCase):
                     context_detail,
                     context_feedback,
                     databases,
+                    fleet,
                     observability,
                     alerts,
                 )
@@ -610,6 +650,7 @@ class AdminTests(unittest.TestCase):
             context_detail,
             context_feedback,
             databases,
+            fleet,
             observability,
             alerts,
         ) = asyncio.run(run())
@@ -618,6 +659,8 @@ class AdminTests(unittest.TestCase):
         self.assertIn('"apiBase":"/bot-admin/api/v1"', page.text)
         self.assertIn('id="root"', page.text)
         self.assertEqual(favicon.status_code, 200)
+        self.assertEqual(fleet.status_code, 200)
+        self.assertEqual(fleet.json()["fleet"]["status"], "fresh")
         self.assertTrue(favicon.headers["content-type"].startswith("image/svg+xml"))
         self.assertIn("<svg", favicon.text)
         self.assertIn("#22c55e", favicon.text)
