@@ -163,7 +163,6 @@
     in
       import ./nix/sandbox-image.nix {
         inherit pkgs lib;
-        version = project.project.version;
       };
   in {
     packages = forAllSystems (system: let

@@ -1,5 +1,6 @@
-{pkgs, lib, version}:
+{pkgs, lib}:
 let
+  sandboxToolchainVersion = "toolchain-v1";
   python = pkgs.python312.withPackages (ps:
     with ps; [
       aiohttp
@@ -406,7 +407,9 @@ pkgs.dockerTools.buildLayeredImage {
     ];
     Labels = {
       "org.opencontainers.image.title" = "Kennethbot advanced sandbox";
-      "org.opencontainers.image.version" = version;
+      # Keep this independent from the Bot release. Bump it only when the
+      # sandbox toolchain itself has a compatibility-breaking change.
+      "org.opencontainers.image.version" = sandboxToolchainVersion;
       "io.kennethbot.sandbox" = "advanced";
     };
   };
