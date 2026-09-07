@@ -102,7 +102,7 @@
         pname = "gaoji-admin-ui";
         version = project.project.version;
         src = ./admin-ui;
-        npmDepsHash = "sha256-S1TnE1IDXR/dZJrXmnyGkFvksmlmlzblAdphAyvr9NA=";
+        npmDepsHash = "sha256-ykbVQUM/tq5vIooW/6rk0YUtUfwYHUAn4hKfxg4c7nM=";
         npmBuildScript = "build";
         installPhase = ''
           runHook preInstall
