@@ -14,7 +14,7 @@ Worker resource borrowing is separate from host root permissions.
 | P4 | Each worker registers, receives a real job and serves its own expiring preview | Worker package built; three-host Nix configuration committed, encrypted credential push awaiting authorization; live acceptance pending |
 | P5 | Owner dispatch, external grant requirement, resource reservation, grant revocation and checkpoint recovery | Existing mechanisms; three-host live acceptance pending |
 | P6 | Registered targets on all three, observed incident and recovery, searchable evidence; approved bounded remediation via the single Ops backend | Ops bridge and explicit console authorization implemented; isolated PostgreSQL and desktop/mobile checks passed; production acceptance pending |
-| P7 | Fixed revision preflight, approval, serial verification and rollback contracts for three hosts through the single Ops backend | Integration and acceptance pending |
+| P7 | Fixed revision preflight, approval, serial verification and rollback contracts for three hosts through the single Ops backend | Evidence protocol tested on three-host fixtures; upstream exact-source compatibility, durable orchestration and live acceptance pending |
 
 Do not describe a configured host as a verified runtime. Do not perform destructive
 service or network tests on classmates' workloads. Use disposable previews and
@@ -64,3 +64,33 @@ The shared configuration commit `a5966aa` has not been pushed: the credential
 publication gate needs explicit approval. Do not work around that gate by copying
 credentials through another channel. This does not prevent code-only development
 or isolated tests; it does prevent claiming the new three-host rollout is live.
+
+## P7 Protocol Findings (2026-09-07)
+
+The live catalog and pinned upstream source were both inspected. The adapter in
+`src/cluster_control/deployment_ops_protocol.py` checks exact host, repository,
+profile, flake attribute, Git commit, workspace revision/tree, artifact and runtime
+baseline. It validates the upstream **BLAKE3** lock digest against file content and
+also records our **SHA-256** lock digest; these are not interchangeable. Successful
+job state alone is insufficient: a verification receipt must confirm both running
+and persistent system profiles. Job results use bounded UTF-8 byte pagination.
+
+The adapter is an evidence/protocol layer, not a deployed P7 executor. Its methods
+do not approve or execute writes. The existing P7 contract scheduler still needs
+to be connected to the Ops operation ledger and recovery policy.
+
+One upstream compatibility issue must be resolved without weakening the contract:
+`workspace.create` produces a clean workspace with `base_commit` but no
+`commit_hash`. The pinned hub's `deploy.prepare` rejects this. Calling
+`workspace.commit` always creates a new commit, even with the same tree. That would
+change `self.rev` and violate the requested exact source identity. Do not hide the
+difference or publish an unnecessary synthetic commit. Upstream should explicitly
+accept the base commit of an unchanged, clean workspace; dirty workspaces must
+still be rejected. The adapter can form the exact prepare request, but the
+currently pinned hub will reject it; the orchestrator must surface this upstream
+conflict rather than silently changing revisions.
+
+Also, `workspace.create` currently pins the observed remote head, not an arbitrary
+older commit. An old-commit deployment needs an explicit upstream exact-checkout
+capability; it must never be approximated by deploying today's head. No shared
+MaxOps package has been patched or switched as part of these isolated checks.

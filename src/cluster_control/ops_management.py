@@ -78,8 +78,9 @@ class OpsManagementService:
             Draft202012Validator(definition["params_schema"]).validate(params)
         except ValidationError as exc:
             raise ValueError(f"Invalid operation parameters: {exc.message[:500]}") from None
-        if params.get("host") and params["host"] not in self.hosts:
-            raise PermissionError("Host is outside the management grant")
+        for field in ("host", "target_host"):
+            if params.get(field) and params[field] not in self.hosts:
+                raise PermissionError("Host is outside the management grant")
         if definition["read_only"]:
             response = await self.client._request("POST", "/v1/execute",
                 body=canonical_json({"op": operation, "params": params}).encode())

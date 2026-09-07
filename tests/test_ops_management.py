@@ -127,6 +127,20 @@ class ManagementTests(unittest.IsolatedAsyncioTestCase):
             await self.manager.call('invented', {}, actor='admin:kenneth', origin='admin-console')
         self.assertFalse(self.posts('exec.run'))
 
+    async def test_deployment_target_uses_the_same_host_grant(self):
+        self.definitions.append({
+            'name': 'deploy.prepare', 'read_only': False, 'kind': 'job_submission',
+            'idempotency': 'required', 'params_schema': {
+                'type': 'object', 'properties': {'target_host': {'type': 'string'}},
+                'required': ['target_host'], 'additionalProperties': False,
+            },
+        })
+        with self.assertRaises(PermissionError):
+            await self.manager.call('deploy.prepare', {'target_host': 'b650'},
+                actor='admin:kenneth', origin='admin-console', idempotency_key='deploy-wrong-host')
+        self.assertFalse(self.store.records)
+        self.assertFalse(self.posts('deploy.prepare'))
+
     async def test_write_requires_approval_and_runs_once(self):
         proposal = await self.propose()
         self.assertTrue(proposal['approval_required'])
