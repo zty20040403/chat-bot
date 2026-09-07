@@ -20,6 +20,7 @@ from .execution_storage import ClusterExecutionStore
 from .guardian import GuardianService
 from .reliability import ReliabilityStore
 from .resource_policy import ResourcePolicyStore
+from .ops_management import OpsManagementService
 
 
 def main() -> None:
@@ -56,6 +57,10 @@ def main() -> None:
         local_host_id=settings.local_host_id,
     )
     execution_store = ClusterExecutionStore(database, Path(settings.artifact_dir))
+    management = (OpsManagementService(
+        OpsClient(settings.ops_base_url, settings.ops_management_token_file, timeout_seconds=25),
+        execution_store, hosts=settings.ops_management_hosts, actors=settings.ops_management_actors,
+    ) if settings.ops_management_token_file else None)
     resource_policies = ResourcePolicyStore(database)
     reliability = ReliabilityStore(database)
     worker_hosts = {
@@ -107,6 +112,7 @@ def main() -> None:
         guardian=guardian,
         deployments=deployments,
         deployer_authenticator=deployer_authenticator,
+        management=management,
     )
     uvicorn.run(app, host=settings.host, port=settings.port, log_level="info")
 

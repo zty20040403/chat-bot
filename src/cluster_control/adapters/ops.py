@@ -97,6 +97,7 @@ class OpsClient:
         *,
         body: bytes | None = None,
         deadline: float | None = None,
+        idempotency_key: str | None = None,
     ) -> OpsResponse:
         token = self._credential()
         started = monotonic()
@@ -113,6 +114,7 @@ class OpsClient:
                     "Authorization": "Bearer " + token.decode("ascii"),
                     "Accept": "application/json",
                     "Content-Type": "application/json",
+                    **({"Idempotency-Key": idempotency_key} if idempotency_key else {}),
                 },
                 content=body,
                 timeout=httpx.Timeout(max(remaining, 0.05)),

@@ -202,6 +202,20 @@ in {
 
     ops = {
       enable = lib.mkEnableOption "the Ops read-only adapter";
+      management = {
+        enable = lib.mkEnableOption "catalog-backed Ops management with mandatory approval";
+        tokenFile = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          description = "Separate management credential restricted upstream to the granted hosts and repositories.";
+        };
+        hosts = lib.mkOption {type = lib.types.listOf lib.types.str; default = [];};
+        actors = lib.mkOption {
+          type = lib.types.listOf lib.types.str;
+          default = [];
+          description = "Exact authenticated actor identities, e.g. qq:123 and admin:kenneth.";
+        };
+      };
 
       baseUrl = lib.mkOption {
         type = lib.types.str;
@@ -288,6 +302,15 @@ in {
       {
         assertion = !cfg.ops.enable || (cfg.ops.baseUrl != "" && cfg.ops.tokenFile != null);
         message = "Ops baseUrl and tokenFile are required when the adapter is enabled";
+      }
+      {
+        assertion = !cfg.ops.management.enable || (
+          cfg.ops.enable && cfg.ops.management.tokenFile != null
+          && cfg.ops.management.tokenFile != cfg.ops.tokenFile
+          && cfg.ops.management.hosts != [] && cfg.ops.management.actors != []
+          && lib.all (name: builtins.elem name inventoryHostIds) cfg.ops.management.hosts
+        );
+        message = "Ops management requires separate credentials and explicit host/actor grants";
       }
       {
         assertion = cfg.listenAddress == "127.0.0.1" || cfg.listenAddress == "::1" || cfg.openFirewall;
@@ -394,6 +417,9 @@ in {
         KC_OPS_ENABLED = if cfg.ops.enable then "true" else "false";
         KC_OPS_BASE_URL = cfg.ops.baseUrl;
         KC_OPS_TOKEN_FILE = if cfg.ops.enable then "%d/ops-token" else "";
+        KC_OPS_MANAGEMENT_TOKEN_FILE = if cfg.ops.management.enable then "%d/ops-management-token" else "";
+        KC_OPS_MANAGEMENT_HOSTS = builtins.toJSON cfg.ops.management.hosts;
+        KC_OPS_MANAGEMENT_ACTORS = builtins.toJSON cfg.ops.management.actors;
         KC_OPS_TIMEOUT_SECONDS = toString cfg.ops.timeoutSeconds;
         KC_CACHE_SECONDS = toString cfg.cacheSeconds;
         KC_INVENTORY_JSON = builtins.toJSON cfg.inventory;
@@ -435,6 +461,7 @@ in {
           LoadCredential =
             lib.optional (cfg.apiTokenFile != null) "api-token:${cfg.apiTokenFile}"
             ++ lib.optional (cfg.ops.enable && cfg.ops.tokenFile != null) "ops-token:${cfg.ops.tokenFile}"
+            ++ lib.optional (cfg.ops.management.enable && cfg.ops.management.tokenFile != null) "ops-management-token:${cfg.ops.management.tokenFile}"
             ++ map (worker: "worker-${worker.workerId}:${worker.tokenFile}") cfg.workers
             ++ map (deployer: "deployer-${deployer.deployerId}:${deployer.tokenFile}") cfg.deployments.deployers;
           # The bot starts after this service, so the control plane owns the

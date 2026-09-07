@@ -81,6 +81,8 @@ class FleetControlClient:
                     payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True
                 ).encode("utf-8")
                 request_kwargs["content"] = body
+            if path.startswith("/v1/ops/"):
+                request_kwargs["timeout"] = httpx.Timeout(55.0)
             token = self._token()
             headers = {
                 "Authorization": f"Bearer {token}",
@@ -260,6 +262,14 @@ class FleetControlClient:
 
     async def execution_capabilities(self) -> dict[str, Any]:
         return await self._get("/v1/execution/capabilities")
+
+    async def ops_catalog(self, operation: str = "", *, actor: str, origin: str) -> dict[str, Any]:
+        return await self._signed_get(
+            f"/v1/ops/catalog?operation={quote(operation, safe='')}", actor=actor, origin=origin,
+        )
+
+    async def ops_call(self, payload: dict[str, Any], *, actor: str, origin: str) -> dict[str, Any]:
+        return await self._signed_post("/v1/ops/call", payload, actor=actor, origin=origin)
 
     async def operations(self, *, limit: int = 50) -> dict[str, Any]:
         return await self._get(f"/v1/operations?limit={min(max(limit, 1), 200)}")

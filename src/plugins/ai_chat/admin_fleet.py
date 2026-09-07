@@ -42,6 +42,13 @@ class FleetApprovalRequest(BaseModel):
     resource_version: int = Field(ge=1)
 
 
+class OpsCallRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    operation: str = Field(min_length=1, max_length=120)
+    params: dict[str, Any]
+    idempotency_key: str = Field(default="", max_length=160)
+
+
 class FleetDeploymentRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     repository_id: str
@@ -185,7 +192,37 @@ def register_fleet_admin_routes(
     services: Any,
     authorize: Callable[[Optional[str]], None],
     versioned: Callable[[str, dict[str, object]], dict[str, object]],
+    authorize_management: Callable[[Optional[str]], None] | None = None,
 ) -> None:
+    def management_auth(authorization: Optional[str]) -> None:
+        if authorize_management is None:
+            raise HTTPException(503, "服务器管理需要已配置的管理员认证")
+        authorize_management(authorization)
+
+    @router.get("/api/fleet/ops/catalog")
+    async def ops_catalog(operation: str = "", authorization: Optional[str] = Header(default=None)):
+        management_auth(authorization)
+        try:
+            return await configured_client().ops_catalog(operation, actor="admin:kenneth", origin="admin-console")
+        except FleetControlError as exc:
+            raise HTTPException(502, str(exc)) from None
+
+    @router.post("/api/fleet/ops/call")
+    async def ops_call(request: OpsCallRequest, authorization: Optional[str] = Header(default=None)):
+        management_auth(authorization)
+        try:
+            return await configured_client().ops_call(request.model_dump(), actor="admin:kenneth", origin="admin-console")
+        except FleetControlError as exc:
+            raise HTTPException(502, str(exc)) from None
+
+    @router.get("/api/fleet/operations/{operation_id}")
+    async def operation_detail(operation_id: str, authorization: Optional[str] = Header(default=None)):
+        management_auth(authorization)
+        try:
+            return await configured_client().operation(operation_id, actor="admin:kenneth", origin="admin-console")
+        except FleetControlError as exc:
+            raise HTTPException(502, str(exc)) from None
+
     @router.get("/api/fleet")
     async def fleet(
         authorization: Optional[str] = Header(default=None),
@@ -332,7 +369,7 @@ def register_fleet_admin_routes(
         request: FleetOperationRequest,
         authorization: Optional[str] = Header(default=None),
     ) -> dict[str, object]:
-        authorize(authorization)
+        management_auth(authorization)
         try:
             return await configured_client().prepare_operation(
                 request.model_dump(), actor="admin:kenneth", origin="admin-console"
@@ -409,7 +446,7 @@ def register_fleet_admin_routes(
         request: FleetApprovalRequest,
         authorization: Optional[str] = Header(default=None),
     ) -> dict[str, object]:
-        authorize(authorization)
+        management_auth(authorization)
         try:
             return await configured_client().approve_operation(
                 operation_id, request.contract_hash, request.resource_version,
@@ -423,7 +460,7 @@ def register_fleet_admin_routes(
         operation_id: str,
         authorization: Optional[str] = Header(default=None),
     ) -> dict[str, object]:
-        authorize(authorization)
+        management_auth(authorization)
         try:
             return await configured_client().cancel_operation(
                 operation_id, actor="admin:kenneth", origin="admin-console"

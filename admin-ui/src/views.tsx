@@ -21,6 +21,7 @@ import {
 } from 'lucide-react'
 import { TokenUsageChart } from './TokenUsageChart'
 import { SubAgentControls } from './SubAgentControls'
+import { OpsManagementPanel } from './OpsManagementPanel'
 import { LocalModelPanel, ModelRouteSummary } from './LocalModelPanel'
 import {
   DataTable,
@@ -562,9 +563,9 @@ export function FleetView({ plane }: { plane: Plane }) {
   const diagnosticTemplates = rows(payload.diagnostic_templates?.items)
   const diagnosticRuns = rows(payload.diagnostics?.items)
   const executionCapabilities = payload.execution_capabilities ?? {}
-  const operationCapability = executionCapabilities.operations ?? {}
+  const operationCapability = executionCapabilities.ops_management?.available
+    ? { ...executionCapabilities.ops_management, backend: 'MaxOps' } : executionCapabilities.operations ?? {}
   const workerCapability = executionCapabilities.worker ?? {}
-  const operations = rows(payload.operations?.items)
   const deploymentCapabilities = payload.deployment_capabilities ?? {}
   const deploymentRepositories = rows(deploymentCapabilities.repositories)
   const deployments = rows(payload.deployments?.items)
@@ -927,10 +928,7 @@ export function FleetView({ plane }: { plane: Plane }) {
       <Section title="节点状态" description="unknown 只表示证据不足，不等于机器关机">
         {knownHosts.length ? <DataTable><thead><tr><th>节点</th><th>角色</th><th>Agent</th><th>Exporter</th><th>失败服务</th><th>观测状态</th><th></th></tr></thead><tbody>{knownHosts.map((host) => { const hostId = String(host.host ?? host.host_id); return <tr key={hostId}><td><strong>{host.label || hostId}</strong><small className="cell-sub">{hostId} · {host.site ?? host.architecture ?? '-'}</small></td><td>{host.role ?? host.roles?.join?.('、') ?? '-'}</td><td><StatusBadge value={host.agent?.state ?? 'unknown'} /></td><td><StatusBadge value={host.exporter?.state ?? 'unknown'} /></td><td>{host.agent?.failed_units == null ? '-' : fmtNumber(host.agent.failed_units)}</td><td><StatusBadge value={fleetHostState(host)} /></td><td className="actions"><button className="icon-button" title={`查看 ${hostId} 详情`} aria-label={`查看 ${hostId} 详情`} onClick={() => void loadHost(hostId)}><Eye size={15} /></button></td></tr>})}</tbody></DataTable> : <EmptyState>暂无登记节点；控制服务离线时不会猜测机器状态</EmptyState>}
       </Section>
-      <Section title="受控操作" description="合同、人工批准、执行和验收分开；没有写后端时不会伪装成已重启">
-        <DataTable><thead><tr><th>更新时间</th><th>操作</th><th>目标</th><th>发起者</th><th>能力</th><th>状态</th></tr></thead><tbody>{operations.slice(0, 5).map((item) => <tr key={item.operation_id}><td>{fmtTime(item.updated_at)}</td><td><code>{item.operation_id}</code><small className="cell-sub">{item.operation}</small></td><td>{item.host_id}<small className="cell-sub">{item.resource_ref}</small></td><td><code>{item.actor_id}</code></td><td><StatusBadge value={item.capability_status} /></td><td><StatusBadge value={item.status} /></td></tr>)}</tbody></DataTable>
-        {!operations.length && <EmptyState>还没有远程操作合同；当前写能力为 {operationCapability.reason || '未知'}</EmptyState>}
-      </Section>
+      <OpsManagementPanel plane={plane} />
       <Section title="固定版本部署" description="先对固定 Git 提交做隔离预检，再批准同一份闭包；不接受任意命令">
         <div className="diagnostic-controls">
           <label><span>配置仓库</span><select value={deploymentRepository} onChange={(event) => selectDeploymentRepository(event.target.value)}><option value="">选择仓库</option>{deploymentRepositories.map((item) => <option key={item.repository_id} value={item.repository_id}>{item.repository_id}</option>)}</select></label>

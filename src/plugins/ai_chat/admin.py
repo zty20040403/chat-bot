@@ -256,6 +256,9 @@ _DATABASE_RESOURCE_MAP: dict[str, tuple[str, ...]] = {
     "bridge_cursors": ("overview",),
     "fleet_backend_states": ("fleet", "overview"),
     "fleet_observations": ("fleet",),
+    "fleet_operations": ("fleet",),
+    "fleet_operation_events": ("fleet",),
+    "fleet_approvals": ("fleet",),
 }
 
 
@@ -439,6 +442,11 @@ def register_admin(
             supplied = authorization[7:].strip()
         if not hmac.compare_digest(supplied, expected_token):
             raise HTTPException(status_code=401, detail="invalid admin token")
+
+    def authorize_management(authorization: Optional[str] = None) -> None:
+        if not expected_token:
+            raise HTTPException(status_code=503, detail="服务器管理需先配置 AI_ADMIN_TOKEN")
+        authorize(authorization)
 
     def mutation_context(
         if_match: Optional[str] = Header(default=None, alias="If-Match"),
@@ -702,7 +710,7 @@ def register_admin(
             }
         return services.database.topology_snapshot()
 
-    register_fleet_admin_routes(router, services, authorize, versioned)
+    register_fleet_admin_routes(router, services, authorize, versioned, authorize_management)
 
     @router.get("/api/platforms")
     async def platforms(

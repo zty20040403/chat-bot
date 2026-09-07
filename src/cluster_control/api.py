@@ -25,6 +25,8 @@ from .guardian import GuardianService
 from .reliability import ReliabilityStore
 from .resource_policy import ResourcePolicyStore
 from .service import FleetControlService
+from .ops_management import OpsManagementService
+from .adapters.ops import OpsError
 
 
 _HOST_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
@@ -60,6 +62,13 @@ class OperationApproveRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     contract_hash: str = Field(pattern="^[a-f0-9]{64}$")
     resource_version: int = Field(ge=1)
+
+
+class OpsCallRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    operation: str = Field(min_length=1, max_length=80)
+    params: dict[str, object] = Field(default_factory=dict)
+    idempotency_key: str = Field(default="", max_length=160)
 
 
 class WorkerHeartbeatRequest(BaseModel):
@@ -138,15 +147,21 @@ def create_app(
     guardian: GuardianService | None = None,
     deployments: DeploymentService | None = None,
     deployer_authenticator: CredentialFileAuthenticator | None = None,
+    management: OpsManagementService | None = None,
 ) -> FastAPI:
     token_path = Path(api_token_file)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         guardian_task = asyncio.create_task(guardian.run()) if guardian is not None else None
+        management_task = asyncio.create_task(management.run()) if management is not None else None
         try:
             yield
         finally:
+            if management_task is not None:
+                management_task.cancel()
+                await asyncio.gather(management_task, return_exceptions=True)
+                await management.close()
             if guardian is not None:
                 await guardian.close()
             if guardian_task is not None:
@@ -355,7 +370,38 @@ def create_app(
 
     @app.get("/v1/execution/capabilities", dependencies=auth)
     async def execution_capabilities() -> dict[str, object]:
-        return execution_service().capabilities()
+        result = execution_service().capabilities()
+        result["ops_management"] = {"available": management is not None,
+            "hosts": sorted(management.hosts) if management else [], "approval_required": True}
+        return result
+
+    def management_service() -> OpsManagementService:
+        if management is None:
+            raise HTTPException(503, "Ops management is not configured")
+        return management
+
+    @app.get("/v1/ops/catalog")
+    async def ops_catalog(operation: str = "", principal: tuple[str, str] = Depends(signed_principal)):
+        try:
+            return await management_service().catalog(principal[0], operation)
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from None
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from None
+        except OpsError as exc:
+            raise HTTPException(502, str(exc)) from None
+
+    @app.post("/v1/ops/call")
+    async def ops_call(body: OpsCallRequest, principal: tuple[str, str] = Depends(signed_principal)):
+        try:
+            return await management_service().call(body.operation, body.params, actor=principal[0],
+                origin=principal[1], idempotency_key=body.idempotency_key)
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+        except OpsError as exc:
+            raise HTTPException(502, str(exc)) from None
 
     @app.get("/v1/operations", dependencies=auth)
     async def operations(limit: int = Query(default=50, ge=1, le=200)) -> dict[str, object]:
@@ -368,12 +414,25 @@ def create_app(
     ) -> dict[str, object]:
         actor, origin = principal
         try:
+            if management is not None:
+                if body.operation not in {"service.start", "service.stop", "service.restart"} or any(
+                    (body.arguments, body.expected_state, body.verification, body.compensation)
+                ):
+                    raise ValueError("Use ops_catalog and ops_call for upstream service preconditions; custom checks cannot be silently dropped")
+                result = await management.call(body.operation.replace("service.", "units."),
+                    {"host": body.host_id, "unit": body.resource_ref}, actor=actor, origin=origin,
+                    idempotency_key=body.idempotency_key)
+                return result["operation"]
             return await asyncio.to_thread(
                 execution_service().prepare_operation,
                 body.model_dump(exclude_none=True), actor_id=actor, origin_scope=origin,
             )
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from None
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from None
+        except OpsError as exc:
+            raise HTTPException(502, str(exc)) from None
 
     @app.get("/v1/operations/{operation_id}")
     async def operation(
@@ -400,6 +459,10 @@ def create_app(
     ) -> dict[str, object]:
         actor, _ = principal
         try:
+            item = await asyncio.to_thread(execution_service().store.get_operation, operation_id)
+            if item and item["operation"] == "maxops.execute":
+                return await management_service().approve(operation_id, actor=actor,
+                    expected_hash=body.contract_hash, expected_version=body.resource_version)
             return await asyncio.to_thread(
                 execution_service().approve_operation,
                 operation_id, actor_id=actor, expected_hash=body.contract_hash,
@@ -411,6 +474,9 @@ def create_app(
             raise HTTPException(status_code=403, detail=str(exc)) from None
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from None
+
+        except OpsError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from None
 
     @app.post("/v1/operations/{operation_id}/cancel")
     async def cancel_operation(

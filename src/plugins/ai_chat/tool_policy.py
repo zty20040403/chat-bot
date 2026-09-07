@@ -51,6 +51,7 @@ class ToolApproval:
 
 
 _READ_TOOLS = {
+    "ops_catalog",
     "read_agent_result",
     "web_search",
     "query_alerts",
@@ -222,6 +223,11 @@ def _policy_registry() -> dict[str, ToolPolicy]:
         side_effects=("write:operation-ledger",),
         timeout_seconds=30.0,
         max_identical_calls=1,
+    )
+    policies["ops_call"] = ToolPolicy(
+        risk="high", idempotency="keyed",
+        side_effects=("read:fleet", "write:operation-ledger"),
+        timeout_seconds=60.0, max_identical_calls=2,
     )
     policies["operation_cancel"] = ToolPolicy(
         risk="high",

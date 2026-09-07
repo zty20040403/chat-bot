@@ -194,6 +194,8 @@ AGENT_SPECS: dict[SubAgentRole, AgentSpec] = {
                 "service_logs",
                 "diagnose_incident",
                 "operation_prepare",
+                "ops_catalog",
+                "ops_call",
                 "operation_cancel",
                 "cluster_job_submit",
                 "sandbox_list",

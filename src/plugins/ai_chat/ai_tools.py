@@ -16,6 +16,8 @@ DIAGNOSE_INCIDENT_TOOL_NAME = "diagnose_incident"
 OPERATION_PREPARE_TOOL_NAME = "operation_prepare"
 OPERATION_STATUS_TOOL_NAME = "operation_status"
 OPERATION_CANCEL_TOOL_NAME = "operation_cancel"
+OPS_CATALOG_TOOL_NAME = "ops_catalog"
+OPS_CALL_TOOL_NAME = "ops_call"
 CLUSTER_ARTIFACT_UPLOAD_TOOL_NAME = "cluster_artifact_upload"
 CLUSTER_JOB_SUBMIT_TOOL_NAME = "cluster_job_submit"
 CLUSTER_JOB_STATUS_TOOL_NAME = "cluster_job_status"
@@ -74,6 +76,29 @@ BROWSER_WAIT_FOR_TOOL_NAME = "browser_wait_for"
 BROWSER_SCROLL_TOOL_NAME = "browser_scroll"
 BROWSER_CLOSE_TOOL_NAME = "browser_close"
 BROWSER_CLEAR_TOOL_NAME = "browser_clear"
+
+OPS_CATALOG_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": OPS_CATALOG_TOOL_NAME,
+        "description": "管理员服务器操作目录。先不带参数查已授权操作，再指定 operation 读取准确参数 schema；包括命令、服务、工作区、部署和持久任务。不要猜参数或权限。",
+        "parameters": {"type": "object", "properties": {
+            "operation": {"type": "string", "description": "目录中的准确操作名；留空列出目录。"}
+        }, "additionalProperties": False},
+    },
+}
+OPS_CALL_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": OPS_CALL_TOOL_NAME,
+        "description": "仅管理员可用的 MaxOps 接口，参数必须来自 ops_catalog。只读操作直接返回；任何写操作只创建待批准请求，不会立即执行。将 operation_id 和准确目标、参数告诉管理员，到控制台批准。之后用 operation_status 查询。不要声称待批准等于成功，不得用沙盒绕过批准或自行批准。",
+        "parameters": {"type": "object", "properties": {
+            "operation": {"type": "string"},
+            "params": {"type": "object", "description": "严格符合目录 schema 的参数。"},
+            "idempotency_key": {"type": "string", "description": "写操作必填，8-160 字符。同一请求重试保持原值；不同请求用新值。"},
+        }, "required": ["operation", "params"], "additionalProperties": False},
+    },
+}
 
 WEB_SEARCH_TOOL: ToolDefinition = {
     "type": "function",
@@ -1696,6 +1721,7 @@ def available_tools(
     include_alert_tools: bool = False,
     include_fleet_tools: bool = False,
     include_fleet_logs: bool = False,
+    include_ops_management: bool = False,
     include_image_ocr: bool,
     include_voice_transcription: bool = False,
     include_voice_reply: bool = False,
@@ -1719,6 +1745,8 @@ def available_tools(
         tools.append(WEB_SEARCH_TOOL)
     if include_alert_tools:
         tools.append(QUERY_ALERTS_TOOL)
+    if include_ops_management:
+        tools.extend([OPS_CATALOG_TOOL, OPS_CALL_TOOL])
     if include_fleet_tools:
         tools.extend(
             [FLEET_OVERVIEW_TOOL, HOST_INSPECT_TOOL, SERVICE_INSPECT_TOOL, MODEL_STATUS_TOOL,

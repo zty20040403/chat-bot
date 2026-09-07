@@ -169,6 +169,7 @@ from .video_analysis import DeepVideoAnalysisError
 from .handler_services import HandlerService
 from .handler_constants import (TURN_PROMPT_VERSION)
 from .fleet_client import FleetControlError
+from .ai_tools import OPS_CATALOG_TOOL_NAME, OPS_CALL_TOOL_NAME
 from .fleet_case_recall import semantic_runbook_scores
 from .fleet_tools import inspect_host, model_status, requires_local_model_status, summarize_fleet
 
@@ -502,6 +503,7 @@ class ToolExecutor(HandlerService):
             include_alert_tools=alert_tools_enabled,
             include_fleet_tools=fleet_tools_enabled,
             include_fleet_logs=fleet_logs_enabled,
+            include_ops_management=fleet_tools_enabled and event.user_id in self.context.settings.admin_user_ids,
             include_image_ocr=(
                 self.context.settings.ocr_enabled and bool(available_image_sources)
             ),
@@ -1560,6 +1562,8 @@ class ToolExecutor(HandlerService):
                 )
 
             if name in {
+                OPS_CATALOG_TOOL_NAME,
+                OPS_CALL_TOOL_NAME,
                 FLEET_OVERVIEW_TOOL_NAME,
                 HOST_INSPECT_TOOL_NAME,
                 SERVICE_INSPECT_TOOL_NAME,
@@ -1587,6 +1591,8 @@ class ToolExecutor(HandlerService):
                         {"ok": False, "error": "当前会话无权读取服务器日志。"},
                         ensure_ascii=False,
                     )
+                if name in {OPS_CATALOG_TOOL_NAME, OPS_CALL_TOOL_NAME} and event.user_id not in self.context.settings.admin_user_ids:
+                    return json.dumps({"ok": False, "error": "仅管理员可以访问服务器管理接口。"}, ensure_ascii=False)
                 host_id = str(arguments.get("host_id") or "").strip()
                 unit = str(arguments.get("unit") or "").strip()
                 if name in {HOST_INSPECT_TOOL_NAME, SERVICE_INSPECT_TOOL_NAME, SERVICE_LOGS_TOOL_NAME, DIAGNOSE_INCIDENT_TOOL_NAME, CLUSTER_GUARDIAN_CREATE_TOOL_NAME} and not re.fullmatch(
@@ -1604,7 +1610,13 @@ class ToolExecutor(HandlerService):
                         ensure_ascii=False,
                     )
                 try:
-                    if name == FLEET_OVERVIEW_TOOL_NAME:
+                    if name == OPS_CATALOG_TOOL_NAME:
+                        payload = await client.ops_catalog(str(arguments.get("operation") or ""),
+                            actor=f"qq:{event.user_id}", origin=self.services.chat._conversation_scope(event).key)
+                    elif name == OPS_CALL_TOOL_NAME:
+                        payload = await client.ops_call(arguments,
+                            actor=f"qq:{event.user_id}", origin=self.services.chat._conversation_scope(event).key)
+                    elif name == FLEET_OVERVIEW_TOOL_NAME:
                         payload = summarize_fleet(await client.fleet())
                     elif name == MODEL_STATUS_TOOL_NAME:
                         payload = await model_status(self.context, str(arguments.get("profile") or ""))
@@ -2298,8 +2310,11 @@ class ToolExecutor(HandlerService):
                     "服务不可用不等于所有机器已关机。"
                     "遇到模型连不上、控制台 502、QQ 不回复、回复变慢、主机失联或"
                     "存储告警时，优先调用 diagnose_incident 取得一组可审计证据；"
-                    "不要自己串联零散状态后武断下结论。宿主服务启停只能先调用 "
-                    "operation_prepare 生成合同；返回 not_configured 时说明写后端尚未接入，"
+                    "不要自己串联零散状态后武断下结论。服务器修改必须通过受控接口。"
+                    "有 ops_catalog 时先查看目录及资源授权，再用 ops_call 查询或提交管理请求；"
+                    "包括命令、服务、工作区文件和部署。写操作等待管理员在控制台逐项审阅批准，"
+                    "用 operation_status 跟踪，不得通过聊天、工具或沙盒自行批准。"
+                    "未开放该工具时可用 operation_prepare 提议服务操作；返回 not_configured 时说明写后端尚未接入，"
                     "绝不能用 SSH 或沙盒命令绕过。需要远程校验 PDF、媒体或发布静态预览时，"
                     "先把真实沙盒文件用 cluster_artifact_upload 登记，再调用 "
                     "cluster_job_submit；用 cluster_job_status 查看执行、检查点与回执。"

@@ -342,6 +342,13 @@ def _deployer_identities(raw: str) -> tuple[dict[str, object], ...]:
     return tuple(result)
 
 
+def _identity_list(name: str) -> tuple[str, ...]:
+    values = json.loads(os.getenv(name, "[]"))
+    if not isinstance(values, list) or any(not isinstance(value, str) or not value for value in values):
+        raise ValueError(f"{name} must be a JSON array of nonempty identities")
+    return tuple(dict.fromkeys(values))
+
+
 @dataclass(frozen=True)
 class ClusterControlSettings:
     host: str
@@ -364,6 +371,9 @@ class ClusterControlSettings:
     postgres_pool_min_size: int
     postgres_pool_max_size: int
     postgres_pool_timeout_seconds: int
+    ops_management_token_file: str = ""
+    ops_management_hosts: tuple[str, ...] = ()
+    ops_management_actors: tuple[str, ...] = ()
 
     @classmethod
     def from_env(cls) -> "ClusterControlSettings":
@@ -386,6 +396,9 @@ class ClusterControlSettings:
             ),
             ops_token_file=os.getenv("KC_OPS_TOKEN_FILE", "").strip(),
             ops_timeout_seconds=_int("KC_OPS_TIMEOUT_SECONDS", 15, 1, 30),
+            ops_management_token_file=os.getenv("KC_OPS_MANAGEMENT_TOKEN_FILE", "").strip(),
+            ops_management_hosts=_identity_list("KC_OPS_MANAGEMENT_HOSTS"),
+            ops_management_actors=_identity_list("KC_OPS_MANAGEMENT_ACTORS"),
             cache_seconds=_int("KC_CACHE_SECONDS", 20, 1, 300),
             inventory=_inventory(os.getenv("KC_INVENTORY_JSON", "")),
             diagnostic_targets=_diagnostic_targets(
@@ -429,6 +442,14 @@ class ClusterControlSettings:
         }:
             raise ValueError("KC_LOCAL_HOST_ID must exist in KC_INVENTORY_JSON")
         inventory = {str(item.get("host_id") or ""): item for item in self.inventory}
+        if self.ops_management_token_file:
+            if not self.ops_enabled or not self.ops_management_hosts or not self.ops_management_actors:
+                raise ValueError("Ops management requires a dedicated identity, hosts and actors")
+            if any(host not in inventory for host in self.ops_management_hosts):
+                raise ValueError("Unknown Ops management host")
+            if any(not re.fullmatch(r"(?:qq:[0-9]+|admin:[A-Za-z0-9_-]+)", actor)
+                   for actor in self.ops_management_actors):
+                raise ValueError("Invalid Ops management administrator")
         for target in self.diagnostic_targets:
             observer_host = str(target["observer_host"])
             target_host_id = str(target["host_id"])

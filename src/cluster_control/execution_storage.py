@@ -64,6 +64,10 @@ class ClusterExecutionStore:
         connection = self.database.store_connection()
         cursor = connection.cursor()
         try:
+            # Serialize equal intents before checking the unique idempotency key.
+            cursor.execute("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))", (
+                canonical_json([record["actor_id"], record["origin_scope"], record["idempotency_key"]]),
+            ))
             existing = cursor.execute(
                 """SELECT * FROM fleet_operations
                    WHERE actor_id = ? AND origin_scope = ? AND idempotency_key = ?""",
@@ -251,6 +255,92 @@ class ClusterExecutionStore:
                 (min(max(limit, 1), 200),),
             ).fetchall()
             return [self._operation(dict(row), cursor) for row in rows]
+        finally:
+            cursor.close()
+            connection.close()
+
+    def find_operation(self, actor: str, origin: str, key: str) -> dict[str, Any] | None:
+        connection = self.database.store_connection()
+        cursor = connection.cursor()
+        try:
+            row = cursor.execute("""SELECT * FROM fleet_operations
+                WHERE actor_id=? AND origin_scope=? AND idempotency_key=?""", (actor, origin, key)).fetchone()
+            return self._operation(dict(row), cursor) if row else None
+        finally:
+            cursor.close()
+            connection.close()
+
+    def claim_managed_operation(self, owner: str) -> dict[str, Any] | None:
+        now = int(time.time())
+        connection = self.database.store_connection()
+        cursor = connection.cursor()
+        try:
+            row = cursor.execute("""SELECT * FROM fleet_operations
+                WHERE operation='maxops.execute' AND status IN ('queued','running','reconciling','cancelling')
+                AND (lease_expires_at IS NULL OR lease_expires_at<=?)
+                ORDER BY updated_at, operation_id LIMIT 1 FOR UPDATE SKIP LOCKED""", (now,)).fetchone()
+            if row is None:
+                return None
+            item = dict(row)
+            problem = ""
+            if item["status"] == "queued":
+                approval = cursor.execute("SELECT * FROM fleet_approvals WHERE approval_id=? FOR UPDATE",
+                    (item["approval_ref"],)).fetchone()
+                if not approval or approval["consumed_at"] is not None or approval["expires_at"] <= now:
+                    problem = "approval_expired"
+                elif approval["contract_hash"] != item["contract_hash"] or approval["resource_version"] != item["resource_version"]:
+                    problem = "approval_changed"
+                else:
+                    cursor.execute("UPDATE fleet_approvals SET consumed_at=? WHERE approval_id=?", (now, item["approval_ref"]))
+            elif not item["backend_operation_id"]:
+                problem = "submission_outcome_unknown"
+            if problem:
+                cursor.execute("""UPDATE fleet_operations SET status='needs_attention', error_code=?,
+                    lease_owner=NULL, lease_expires_at=NULL, updated_at=? WHERE operation_id=?""",
+                    (problem, now, item["operation_id"]))
+                self._event(cursor, "fleet_operation_events", "operation_id", item["operation_id"],
+                    event_type=problem, status="needs_attention", created_at=now)
+                connection.commit()
+                return None
+            status = "cancelling" if item["status"] == "cancelling" else "running"
+            cursor.execute("""UPDATE fleet_operations SET status=?, lease_owner=?, lease_expires_at=?,
+                fence=fence+1, attempt=attempt+?, updated_at=? WHERE operation_id=?""",
+                (status, owner, now+90, int(item["status"] == "queued"), now, item["operation_id"]))
+            if item["status"] == "queued":
+                self._event(cursor, "fleet_operation_events", "operation_id", item["operation_id"],
+                    event_type="dispatching", status=status, fence=item["fence"]+1, created_at=now)
+            connection.commit()
+            return self.get_operation(item["operation_id"])
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            cursor.close()
+            connection.close()
+
+    def finish_managed_operation(self, operation_id: str, *, owner: str, fence: int,
+                                 status: str, result: Any, backend_id: str | None, error: str) -> bool:
+        now = int(time.time())
+        connection = self.database.store_connection()
+        cursor = connection.cursor()
+        try:
+            row = cursor.execute("SELECT * FROM fleet_operations WHERE operation_id=? FOR UPDATE", (operation_id,)).fetchone()
+            if not row or row["lease_owner"] != owner or row["fence"] != fence or row["lease_expires_at"] <= now:
+                return False
+            if row["status"] == "cancelling" and status in {"running", "reconciling"}:
+                status = "cancelling"
+            cursor.execute("""UPDATE fleet_operations SET status=?, result_json=?, backend_operation_id=?,
+                error_code=?, lease_owner=NULL, lease_expires_at=?, updated_at=? WHERE operation_id=?""",
+                (status, canonical_json(result), backend_id, error, now+5, now, operation_id))
+            if row["status"] != status or row["backend_operation_id"] != backend_id or row["error_code"] != error:
+                self._event(cursor, "fleet_operation_events", "operation_id", operation_id,
+                    event_type="upstream_observed", status=status, fence=fence, created_at=now,
+                    payload={"backend_operation_id": backend_id, "error_code": error})
+            connection.commit()
+            return True
+        except Exception:
+            connection.rollback()
+            raise
         finally:
             cursor.close()
             connection.close()
