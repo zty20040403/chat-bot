@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from blake3 import blake3
@@ -78,6 +79,25 @@ class OpsFixture:
 
 
 class OpsDeploymentProtocolTests(unittest.IsolatedAsyncioTestCase):
+    async def test_exact_old_source_does_not_replace_checked_head(self):
+        fixture = OpsFixture("h310")
+        binding = replace(fixture.binding, source_revision="c" * 40)
+        protocol = OpsDeploymentProtocol(fixture.read, binding)
+        self.assertEqual(protocol.create_workspace_params(), {
+            "repository": binding.repository, "expected_remote_head": COMMIT, "source_commit": "c" * 40,
+        })
+        with self.assertRaises(OpsError):
+            await protocol.workspace("workspace-test")
+        fixture.workspace.update(base_commit="c" * 40, commit_hash=None, state="clean", revision=1)
+        self.assertEqual((await protocol.workspace("workspace-test"))["base_commit"], "c" * 40)
+        for patch in [{"state": "dirty"}, {"state": "committed"}, {"state": "published"},
+                      {"revision": 2}, {"commit_hash": "c" * 40}]:
+            saved = copy.deepcopy(fixture.workspace)
+            fixture.workspace.update(patch)
+            with self.subTest(patch=patch), self.assertRaises(OpsError):
+                await protocol.workspace("workspace-test")
+            fixture.workspace = saved
+
     async def test_three_hosts_exact_preflight_activate_and_verify(self):
         for host in ("h310", "h610", "tank"):
             fixture = OpsFixture(host)
@@ -149,7 +169,7 @@ class OpsDeploymentProtocolTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_clean_workspace_does_not_forge_a_synthetic_source_commit(self):
         fixture = OpsFixture("tank")
-        fixture.workspace.update(state="clean", commit_hash=None)
+        fixture.workspace.update(state="clean", commit_hash=None, revision=1)
         protocol = OpsDeploymentProtocol(fixture.read, fixture.binding)
         workspace = await protocol.workspace("workspace-test")
         params = protocol.prepare_params(workspace)

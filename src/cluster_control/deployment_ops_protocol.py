@@ -35,6 +35,18 @@ def revision(value: Any) -> int:
     return value
 
 
+def workspace_commit(item: Mapping[str, Any]) -> str:
+    state, commit = item.get("state"), item.get("commit_hash")
+    if state == "clean" and commit is None and revision(item.get("revision")) == 1:
+        commit = item.get("base_commit")
+    else:
+        require(state in {"committed", "published"} and isinstance(commit, str),
+                "Workspace has no immutable deployment commit")
+    require(isinstance(commit, str) and REVISION_RE.fullmatch(commit) is not None,
+            "Invalid workspace commit identity")
+    return commit
+
+
 async def read_job_result(read: ReadOperation, job_id: str, *, pointer: str = "",
                           max_bytes: int = 256 * 1024, allow_failed: bool = False) -> Any:
     """Decode bounded, byte-offset JSON pages from one completed upstream job."""
@@ -102,10 +114,11 @@ class OpsDeploymentProtocol:
         self.target = target
 
     def create_workspace_params(self) -> dict[str, Any]:
-        require(self.target.source_revision == self.target.expected_remote_revision,
-                "Ops workspace.create only supports the pinned remote head; it cannot checkout a different commit")
-        return {"repository": self.target.repository,
-                "expected_remote_head": self.target.expected_remote_revision}
+        params = {"repository": self.target.repository,
+                  "expected_remote_head": self.target.expected_remote_revision}
+        if self.target.source_revision != self.target.expected_remote_revision:
+            params["source_commit"] = self.target.source_revision
+        return params
 
     async def workspace(self, workspace_id: str) -> dict[str, Any]:
         item = await self.read("workspace.status", {
@@ -115,9 +128,7 @@ class OpsDeploymentProtocol:
                 and item.get("workspace_id") == workspace_id,
                 "Workspace belongs to another repository or request")
         revision(item.get("revision"))
-        require(item.get("state") in {"clean", "committed", "published"},
-                "Dirty workspace cannot be deployed as an exact revision")
-        source = item.get("commit_hash") or item.get("base_commit")
+        source = workspace_commit(item)
         require(source == self.target.source_revision,
                 "Workspace commit differs from the requested source revision")
         require(REVISION_RE.fullmatch(str(item.get("tree_hash") or "")) is not None,
@@ -126,8 +137,7 @@ class OpsDeploymentProtocol:
 
     def prepare_params(self, workspace: Mapping[str, Any]) -> dict[str, Any]:
         require(workspace.get("repository") == self.target.repository
-                and (workspace.get("commit_hash") or workspace.get("base_commit")) == self.target.source_revision
-                and workspace.get("state") in {"clean", "committed", "published"},
+                and workspace_commit(workspace) == self.target.source_revision,
                 "Workspace does not match the frozen source")
         require(bool(workspace.get("workspace_id")), "Workspace identity is missing")
         # A legacy hub may reject a clean workspace. Never work around that rejection

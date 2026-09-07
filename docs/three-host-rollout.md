@@ -11,7 +11,7 @@ Worker resource borrowing is separate from host root permissions.
 | P1 | Fresh authenticated status for all three hosts | Management catalog and root identity checks verified; refresh read observations in final audit |
 | P2 | Diagnostic evidence names the actual target and observer; a probe from each worker | Pending three-worker deployment |
 | P3 | Prepare, review, approve, execute and query a harmless command on each host | Verified on all three with `id -u`, 2026-09-07 |
-| P4 | Each worker registers, receives a real job and serves its own expiring preview | Worker package built; three-host Nix configuration committed, encrypted credential push awaiting authorization; live acceptance pending |
+| P4 | Each worker registers, receives a real job and serves its own expiring preview | Worker package built; encrypted credential publication approved on 2026-09-07; configuration publication and live acceptance pending |
 | P5 | Owner dispatch, external grant requirement, resource reservation, grant revocation and checkpoint recovery | Existing mechanisms; three-host live acceptance pending |
 | P6 | Registered targets on all three, observed incident and recovery, searchable evidence; approved bounded remediation via the single Ops backend | Ops bridge and explicit console authorization implemented; isolated PostgreSQL and desktop/mobile checks passed; production acceptance pending |
 | P7 | Fixed revision preflight, approval, serial verification and rollback contracts for three hosts through the single Ops backend | Durable Ops runner integrated; isolated PostgreSQL scenarios passed; upstream exact-source compatibility and live acceptance pending |
@@ -60,10 +60,11 @@ interruption, and checks repeat/cancel behavior with a mocked Ops transport.
 `tools/verify_ops_ui.cjs` verifies native review dialogs on desktop/mobile and
 ensures SSE refreshes do not replace a pending authorization.
 
-The shared configuration commit `a5966aa` has not been pushed: the credential
-publication gate needs explicit approval. Do not work around that gate by copying
-credentials through another channel. This does not prevent code-only development
-or isolated tests; it does prevent claiming the new three-host rollout is live.
+The shared configuration commit `a5966aa` (rebased as `5b888c5` onto `2418d67`)
+has not yet been pushed. On 2026-09-07 the owner explicitly approved publishing
+the two SOPS-encrypted worker credentials to `imdomestic/nix-config`. No plaintext
+credentials may be published. Deployment still requires the freshness check and
+three-host runtime acceptance; authorization alone is not evidence of a rollout.
 
 ## P7 Protocol Findings (2026-09-07)
 
@@ -107,18 +108,27 @@ lost activation receipts, and the unpatched upstream's clean-workspace rejection
 `tests/nix/ops-deployment.nix` evaluates the three-host module bindings without
 real credentials or a system switch. These are not production acceptance results.
 
-One upstream compatibility issue must be resolved without weakening the contract:
+The pinned upstream has a compatibility issue:
 `workspace.create` produces a clean workspace with `base_commit` but no
 `commit_hash`. The pinned hub's `deploy.prepare` rejects this. Calling
 `workspace.commit` always creates a new commit, even with the same tree. That would
 change `self.rev` and violate the requested exact source identity. Do not hide the
 difference or publish an unnecessary synthetic commit. Upstream should explicitly
 accept the base commit of an unchanged, clean workspace; dirty workspaces must
-still be rejected. The adapter can form the exact prepare request, but the
-currently pinned hub will reject it; the orchestrator must surface this upstream
-conflict rather than silently changing revisions.
+still be rejected. The opt-in patch `nix/patches/ops-exact-source.patch` implements
+that contract in both hub and executor. The adapter independently rejects dirty
+or inconsistent workspace state. The currently running unpatched hub still rejects
+a clean workspace; the orchestrator surfaces that conflict rather than changing
+the requested revision.
 
 Also, `workspace.create` currently pins the observed remote head, not an arbitrary
-older commit. An old-commit deployment needs an explicit upstream exact-checkout
-capability; it must never be approximated by deploying today's head. No shared
-MaxOps package has been patched or switched as part of these isolated checks.
+older commit. The patch adds explicit `source_commit`, requiring a checked remote
+head and a real commit reachable from it. The adapter supplies that parameter for
+old-commit requests; it must never substitute today's head. Seven upstream Rust
+tests passed, including actual Git object/ancestry checks and Hub HTTP deployment
+regressions. `nix/ops-compat-package.nix` packages the opt-in patch with the existing
+upstream test suite. Its Linux Nix build with the upstream nixpkgs pin passed all
+74 Nextest tests on h610. The shared configuration now has local package bindings
+for the h610 hub and all three executors, plus the three Ops deployment targets.
+The final consuming derivation and three-host switch acceptance remain pending;
+no production MaxOps package has been switched by these checks.

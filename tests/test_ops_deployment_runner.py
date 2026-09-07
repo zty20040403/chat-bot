@@ -87,12 +87,14 @@ class SimulatedOps:
             fixture = OpsFixture(host)
             self.fixtures[host] = fixture
             workspace_id = f"workspace-{job_id}"
-            fixture.workspace.update(workspace_id=workspace_id, state="clean", commit_hash=None)
-            fixture.file_patch.update(workspace_id=workspace_id)
+            fixture.workspace.update(workspace_id=workspace_id, state="clean", commit_hash=None,
+                revision=1, base_commit=params.get("source_commit", COMMIT))
+            fixture.file_patch.update(workspace_id=workspace_id, revision=1)
             self.workspaces[workspace_id] = fixture
             result = {"workspace": copy.deepcopy(fixture.workspace)}
         elif op == "deploy.prepare":
-            fixture.change["plan"].update(change_id=job_id, workspace_id=params["workspace_id"])
+            fixture.change["plan"].update(change_id=job_id, workspace_id=params["workspace_id"],
+                workspace_revision=fixture.workspace["revision"], source_commit=fixture.workspace["base_commit"])
             fixture.change.update(state="prepared", revision=1, jobs={})
             self.changes[job_id] = fixture
         elif op == "deploy.run" and params["until"] == "built":
