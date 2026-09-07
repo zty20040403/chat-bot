@@ -8,11 +8,11 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 
-from src.cluster_control.adapters.ops import OpsClient
+from src.cluster_control.adapters.ops import OpsClient, OpsError
 from src.cluster_control.ops_management import OpsManagementService
 
 
@@ -184,6 +184,45 @@ class ManagementTests(unittest.IsolatedAsyncioTestCase):
         record = self.store.get_operation(proposal['operation']['operation_id'])
         self.assertEqual(record['status'], 'needs_attention')
         self.assertEqual(len(self.posts('exec.run')), 1)
+        self.assertTrue(record['result']['submission_started'])
+
+    async def test_read_only_validation_retries_before_one_submission(self):
+        proposal = await self.propose()
+        await self.approve(proposal)
+        self.store.records[proposal['operation']['operation_id']]['arguments']['deployment'] = {'host_id': 'h610'}
+        self.manager.deployment_validator = AsyncMock(side_effect=[
+            OpsError('upstream_error', 'HTTP 503 while reading workspace', retryable=True), None,
+        ])
+        with patch('src.cluster_control.ops_management.asyncio.sleep', new_callable=AsyncMock):
+            await self.manager.run_once()
+        self.assertEqual(self.manager.deployment_validator.await_count, 2)
+        self.assertEqual(len(self.posts('exec.run')), 1)
+        self.assertEqual(self.store.get_operation(proposal['operation']['operation_id'])['status'], 'running')
+
+    async def test_validation_outage_is_known_not_submitted(self):
+        proposal = await self.propose()
+        await self.approve(proposal)
+        self.store.records[proposal['operation']['operation_id']]['arguments']['deployment'] = {'host_id': 'h610'}
+        self.manager.deployment_validator = AsyncMock(side_effect=OpsError('upstream_error', '503', retryable=True))
+        with patch('src.cluster_control.ops_management.asyncio.sleep', new_callable=AsyncMock):
+            await self.manager.run_once()
+        record = self.store.get_operation(proposal['operation']['operation_id'])
+        self.assertEqual(self.manager.deployment_validator.await_count, 3)
+        self.assertFalse(self.posts('exec.run'))
+        self.assertEqual(record['status'], 'failed')
+        self.assertIs(record['result']['submission_started'], False)
+
+    async def test_cancellation_during_validation_prevents_submission(self):
+        proposal = await self.propose()
+        await self.approve(proposal)
+        key = proposal['operation']['operation_id']
+        self.store.records[key]['arguments']['deployment'] = {'host_id': 'h610'}
+        async def cancelled(_):
+            self.store.records[key]['status'] = 'cancelling'
+        self.manager.deployment_validator = cancelled
+        await self.manager.run_once()
+        self.assertFalse(self.posts('exec.run'))
+        self.assertIs(self.store.get_operation(key)['result']['submission_started'], False)
 
     async def test_poll_outage_keeps_remote_job(self):
         proposal = await self.propose()

@@ -234,6 +234,10 @@ class OpsDeploymentRunner:
             try:
                 await self._effect(item, target, "activate")
             except FailedStep as exc:
+                if exc.record.get("result", {}).get("submission_started") is False:
+                    await self._update(item, target, "failed", "validation_failed",
+                                       error_code="activation_not_submitted")
+                    return
                 change = await protocol.change(evidence["change_id"])
                 if change["state"] == "succeeded":
                     report = await protocol.verification(evidence)

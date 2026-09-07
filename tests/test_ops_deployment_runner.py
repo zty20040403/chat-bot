@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 import httpx
 
-from src.cluster_control.adapters.ops import OpsClient
+from src.cluster_control.adapters.ops import OpsClient, OpsError
 from src.cluster_control.deployment_service import DeploymentService
 from src.cluster_control.deployment_storage import DeploymentStore
 from src.cluster_control.execution_storage import ClusterExecutionStore
@@ -208,6 +208,22 @@ class OpsDeploymentPostgresTests(unittest.TestCase):
                     self.assertFalse(any(effect[1] == "tank" and effect[2].get("until") == "verified" for effect in remote.effects[start:]))
 
                     remote.fail_host = None
+                    start = len(remote.effects)
+                    item = prepare("validation-outage-before-submission")
+                    approve(await until(item, lambda value: value["status"] == "awaiting_approval"))
+                    validator = management.deployment_validator
+                    async def unavailable_read(record):
+                        binding = record["arguments"].get("deployment", {})
+                        if binding.get("host_id") == "h610" and binding.get("stage") == "activate":
+                            raise OpsError("upstream_error", "workspace.read returned 503", retryable=True)
+                        await validator(record)
+                    with patch.object(management, "deployment_validator", unavailable_read):
+                        done = await until(item, lambda value: value["phase"] == "complete")
+                    self.assertEqual(done["status"], "partial")
+                    self.assertEqual([t["status"] for t in done["targets"]], ["succeeded", "failed", "skipped"])
+                    self.assertFalse(any(effect[1] == "h610" and effect[2].get("until") == "verified"
+                                         for effect in remote.effects[start:]))
+
                     item = prepare("cancel-before-dispatch")
                     approve(await until(item, lambda value: value["status"] == "awaiting_approval"))
                     await runner.run_once()  # Mark the first target deploying.

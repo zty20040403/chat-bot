@@ -151,14 +151,47 @@ class OpsManagementService:
             raise PermissionError("Management scope or operation schema changed; prepare a new request")
         return definition
 
+    async def _validate_submission(self, record: dict[str, Any]) -> dict[str, Any]:
+        # Only read-only checks may retry; leave time in the lease for the write receipt.
+        budget = min(45, record["deadline_at"] - time.time(),
+                     record.get("lease_expires_at", time.time() + 90) - time.time() - 30)
+        if budget <= 0:
+            raise OpsError("validation_timeout", "No time remains for submission validation")
+        try:
+            async with asyncio.timeout(budget):
+                for attempt in range(3):
+                    try:
+                        definition = await self.validate_binding(record)
+                        for key, validator in (("guardian_id", self.guardian_validator),
+                                               ("deployment", self.deployment_validator)):
+                            if record["arguments"].get(key):
+                                if validator is None:
+                                    raise PermissionError("Parent authorization backend is unavailable")
+                                await validator(record)
+                        current = await asyncio.to_thread(self.store.get_operation, record["operation_id"])
+                        if (not current or current["status"] != "running"
+                                or current["fence"] != record["fence"]
+                                or current["contract_hash"] != record["contract_hash"]
+                                or current["deadline_at"] <= int(time.time())):
+                            raise PermissionError("Operation changed or was cancelled before submission")
+                        return definition
+                    except OpsError as exc:
+                        if not exc.retryable or attempt == 2:
+                            raise
+                        await asyncio.sleep(2 ** attempt)
+        except TimeoutError:
+            raise OpsError("validation_timeout", "Read-only submission checks timed out") from None
+        raise AssertionError("Submission validation did not return")
+
     async def run_once(self) -> bool:
         record = await asyncio.to_thread(self.store.claim_managed_operation, self.owner)
         if record is None:
             return False
         status, result, error, backend_id = "needs_attention", {}, "", record.get("backend_operation_id")
+        submission_started = bool(backend_id)
         try:
-            definition = await self.validate_binding(record)
             if backend_id:
+                await self.validate_binding(record)
                 response = await self.client._request("POST", "/v1/execute",
                     body=canonical_json({"op": "jobs.status", "params": {"job_id": backend_id}}).encode())
                 result = response.data
@@ -175,15 +208,9 @@ class OpsManagementService:
                     result = cancelled.data
                     status = "cancelling"
             else:
-                if record["arguments"].get("guardian_id"):
-                    if self.guardian_validator is None:
-                        raise PermissionError("Guardian authorization backend is unavailable")
-                    await self.guardian_validator(record)
-                if record["arguments"].get("deployment"):
-                    if self.deployment_validator is None:
-                        raise PermissionError("Deployment authorization backend is unavailable")
-                    await self.deployment_validator(record)
+                definition = await self._validate_submission(record)
                 # Persist the claim before any effect; lost submissions are never blindly replayed.
+                submission_started = True
                 response = await self.client._request("POST", "/v1/execute",
                     body=canonical_json({"op": record["arguments"]["op"],
                                          "params": record["arguments"]["params"]}).encode(),
@@ -199,12 +226,16 @@ class OpsManagementService:
         except (OpsError, PermissionError, ValueError, KeyError, TypeError) as exc:
             error = getattr(exc, "code", type(exc).__name__)
             result = {"error": str(exc)[:1000], "upstream_idempotency_key": record["operation_id"],
+                      "submission_started": submission_started,
                       "instruction": "Check upstream jobs before retrying; the effect may already have happened."}
             # An unavailable observation must not turn an existing remote job into a failure.
             if backend_id and isinstance(exc, OpsError) and exc.retryable and record["deadline_at"] > int(time.time()):
                 status = record["status"] if record["status"] == "cancelling" else "reconciling"
             elif isinstance(exc, PermissionError):
                 status = "needs_attention"
+            if not submission_started:
+                status = "needs_attention" if isinstance(exc, PermissionError) else "failed"
+                result["instruction"] = "Read-only validation failed. No write request was sent; review a new operation."
         await asyncio.to_thread(self.store.finish_managed_operation, record["operation_id"],
             owner=self.owner, fence=record["fence"], status=status, result=result,
             backend_id=backend_id, error=error)
