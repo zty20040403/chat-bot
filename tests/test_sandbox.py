@@ -36,6 +36,13 @@ class DockerSandboxManagerTests(unittest.TestCase):
             "Docker 服务没有启动。请先打开 Docker Desktop。",
         )
 
+    def test_missing_local_image_reports_deployment_failure(self) -> None:
+        error = self.manager._docker_error(
+            "Error response from daemon: No such image: gaoji-sandbox:latest"
+        )
+        self.assertIn("未在本机加载或已被清理", error)
+        self.assertNotIn("docker login", error)
+
 
 class DockerSandboxCancellationTests(unittest.IsolatedAsyncioTestCase):
     async def test_create_only_applies_eight_gibibyte_memory_limit(self) -> None:
@@ -55,6 +62,7 @@ class DockerSandboxCancellationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(command[command.index("--memory-swap") + 1], "8g")
         self.assertNotIn("--cpus", command)
         self.assertNotIn("--pids-limit", command)
+        self.assertNotIn("--pull=never", command)
         self.assertIn("qqbot.owner_ref=owner", command)
         self.assertIn("qqbot.purpose=task", command)
 
@@ -106,6 +114,9 @@ class DockerSandboxCancellationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(created["toolset"], "advanced")
         calls = [call.args for call in manager._run.await_args_list]
+        for call in calls:
+            if call[:2] == ("docker", "run"):
+                self.assertIn("--pull=never", call)
         self.assertIn(
             ("docker", "volume", "create", "gaoji-nix-v2"),
             calls,
@@ -145,6 +156,17 @@ class DockerSandboxCancellationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("type=volume,source=gaoji-nix-v2,target=/cache/nix", initialization.args)
         self.assertFalse(any("rm" in call.args for call in manager._run.await_args_list))
         self.assertTrue(manager._nix_volume_ready)
+
+    async def test_missing_image_does_not_mark_cache_ready(self) -> None:
+        manager = DockerSandboxManager(image="gaoji-sandbox:latest")
+        manager._run = AsyncMock(side_effect=[
+            SandboxResult("gaoji-nix-v2\n", "", 0),
+            SandboxResult("", "No such image: gaoji-sandbox:latest", 125),
+        ])
+        with self.assertRaisesRegex(SandboxError, "未在本机加载或已被清理"):
+            await manager._ensure_nix_volume(manager.image)
+        self.assertFalse(manager._nix_volume_ready)
+        self.assertIn("--pull=never", manager._run.await_args.args)
 
     async def test_destroy_removes_the_owned_workspace_volume(self) -> None:
         for prefix in ("gaoji-work", "kennethbot-work"):

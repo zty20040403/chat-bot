@@ -509,12 +509,16 @@ in {
       requires = ["docker.service"];
       after = ["docker.service"];
       script = ''
+        set -euo pipefail
         ${pkgs.docker}/bin/docker load --input ${cfg.sandbox.imageArchive}
+        image=${lib.escapeShellArg cfg.sandbox.imageName}
+        image_id=$(${pkgs.docker}/bin/docker image inspect --format '{{.Id}}' "$image")
 
         volume=${lib.escapeShellArg cfg.sandbox.nixCacheVolume}
         ${pkgs.docker}/bin/docker volume create \
           --label io.gaoji.nix-cache=true "$volume" >/dev/null
         ${pkgs.docker}/bin/docker run --rm \
+          --pull=never \
           --network none \
           --user 0:0 \
           --label io.gaoji.cache-initializer=true \
@@ -526,13 +530,27 @@ in {
           --tmpfs /tmp:rw,nosuid,nodev,size=256m,mode=1777 \
           --tmpfs /root:rw,nosuid,nodev,size=64m,mode=700 \
           --mount type=volume,source="$volume",target=/cache/nix \
-          ${lib.escapeShellArg cfg.sandbox.imageName} \
+          "$image_id" \
           gaoji-cache-seed
 
-        ${pkgs.docker}/bin/docker image ls --quiet \
-          --filter dangling=true \
-          --filter label=io.gaoji.sandbox=advanced \
-          | ${pkgs.findutils}/bin/xargs --no-run-if-empty ${pkgs.docker}/bin/docker image rm || true
+        # Loading an image must never collect images; verify the task path last.
+        ${pkgs.docker}/bin/docker run --rm -i \
+          --pull=never \
+          --network none \
+          --user 1000:1000 \
+          --cap-drop ALL \
+          --security-opt no-new-privileges \
+          --memory 512m \
+          --memory-swap 512m \
+          --read-only \
+          --env HOME=/home/sandbox \
+          --workdir /workspace \
+          --tmpfs /tmp:rw,nosuid,nodev,size=128m,mode=1777 \
+          --tmpfs /home/sandbox:rw,nosuid,nodev,size=64m,uid=1000,gid=1000,mode=700 \
+          --tmpfs /workspace:rw,nosuid,nodev,size=64m,uid=1000,gid=1000,mode=700 \
+          --mount type=volume,source="$volume",target=/nix,readonly \
+          "$image" python - < ${./sandbox-smoke.py}
+        test "$(${pkgs.docker}/bin/docker image inspect --format '{{.Id}}' "$image")" = "$image_id"
       '';
       serviceConfig = {
         Type = "oneshot";
@@ -547,6 +565,7 @@ in {
       after = ["docker.service" "${serviceName}-sandbox-image.service"];
       script = ''
         ${pkgs.docker}/bin/docker run --rm \
+          --pull=never \
           --network none \
           --user 0:0 \
           --cap-drop ALL \

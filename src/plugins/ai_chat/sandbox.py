@@ -156,6 +156,7 @@ class DockerSandboxManager:
         if self.image:
             command.extend(
                 [
+                    "--pull=never",
                     "--read-only",
                     "--user",
                     "1000:1000",
@@ -468,6 +469,7 @@ class DockerSandboxManager:
         result = await self._run(
             "docker",
             "run",
+            "--pull=never",
             "--rm",
             "--network",
             "none",
@@ -533,6 +535,7 @@ class DockerSandboxManager:
             result = await self._run(
                 "docker",
                 "run",
+                "--pull=never",
                 "--rm",
                 "--network",
                 "none",
@@ -580,6 +583,7 @@ class DockerSandboxManager:
         result = await self._run(
             "docker",
             "run",
+            "--pull=never",
             "--rm",
             "--network",
             "none",
@@ -668,6 +672,7 @@ class DockerSandboxManager:
         result = await self._run(
             "docker",
             "run",
+            "--pull=never",
             "--rm",
             "--network",
             "bridge",
@@ -1334,6 +1339,8 @@ with tempfile.TemporaryFile() as output:
     @staticmethod
     def _docker_error(detail: str) -> str:
         lowered = detail.lower()
+        if "no such image" in lowered:
+            return "沙盒镜像未在本机加载或已被清理，请管理员恢复沙盒镜像；不是模型 API 或登录问题。"
         if (
             "cannot connect to the docker daemon" in lowered
             or "failed to connect to the docker api" in lowered
