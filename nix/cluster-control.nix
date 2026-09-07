@@ -126,7 +126,15 @@
     options = {
       hostId = lib.mkOption {type = lib.types.str;};
       flakeHost = lib.mkOption {type = lib.types.str;};
-      sshTarget = lib.mkOption {type = lib.types.str;};
+      sshTarget = lib.mkOption {type = lib.types.str; default = "";};
+      opsRepository = lib.mkOption {
+        type = lib.types.str; default = "";
+        description = "Exact repository identity in the upstream Ops catalog.";
+      };
+      opsProfile = lib.mkOption {
+        type = lib.types.str; default = "";
+        description = "Exact upstream deployment profile for this target.";
+      };
       verificationUnits = lib.mkOption {
         type = lib.types.listOf lib.types.str;
         default = [];
@@ -138,6 +146,7 @@
   deploymentRepositoryType = lib.types.submodule {
     options = {
       repositoryId = lib.mkOption {type = lib.types.str;};
+      backend = lib.mkOption {type = lib.types.enum ["ssh" "ops"]; default = "ssh";};
       url = lib.mkOption {type = lib.types.str;};
       defaultBranch = lib.mkOption {type = lib.types.str; default = "main";};
       resourceVersion = lib.mkOption {type = lib.types.ints.positive; default = 1;};
@@ -400,6 +409,13 @@ in {
           && repository.allowedChanges != []
           && repository.targets != []
           && lib.all (target: builtins.elem target.hostId inventoryHostIds) repository.targets
+          && (if repository.backend == "ops" then
+            cfg.ops.management.enable && lib.all (target:
+              builtins.elem target.hostId cfg.ops.management.hosts
+              && builtins.match "^[a-z][a-z0-9_-]{0,63}$" target.opsRepository != null
+              && builtins.match "^[a-z][a-z0-9_-]{0,63}$" target.opsProfile != null
+            ) repository.targets
+          else lib.all (target: target.sshTarget != "") repository.targets)
         ) cfg.deployments.repositories;
         message = "gaoji deployment repositories require valid IDs, changes and inventory targets";
       }
@@ -408,6 +424,9 @@ in {
           builtins.match "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$" deployer.deployerId != null
           && deployer.repositoryIds != []
           && lib.all (repositoryId: builtins.elem repositoryId deploymentRepositoryIds) deployer.repositoryIds
+          && lib.all (repositoryId: lib.any (repository:
+            repository.repositoryId == repositoryId && repository.backend == "ssh"
+          ) cfg.deployments.repositories) deployer.repositoryIds
         ) cfg.deployments.deployers;
         message = "gaoji deployers may only reference configured repositories";
       }
@@ -446,6 +465,7 @@ in {
         }) cfg.workers);
         KC_DEPLOYMENT_REPOSITORIES_JSON = builtins.toJSON (map (repository: {
           repository_id = repository.repositoryId;
+          backend = repository.backend;
           url = repository.url;
           default_branch = repository.defaultBranch;
           resource_version = repository.resourceVersion;
@@ -454,6 +474,8 @@ in {
             host_id = target.hostId;
             flake_host = target.flakeHost;
             ssh_target = target.sshTarget;
+            ops_repository = target.opsRepository;
+            ops_profile = target.opsProfile;
             verification_units = target.verificationUnits;
             use_remote_sudo = target.useRemoteSudo;
             resource_version = target.resourceVersion;

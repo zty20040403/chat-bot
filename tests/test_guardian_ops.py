@@ -49,6 +49,7 @@ def manager(store):
 class GuardianOpsTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.store = Mock()
+        self.store.host_under_maintenance.return_value = False
         self.management = manager(Mock())
         self.bridge = GuardianOpsBridge(self.management, self.store, TARGETS, INVENTORY)
 
@@ -79,7 +80,7 @@ class GuardianOpsTests(unittest.IsolatedAsyncioTestCase):
         raw = policy()
         target = TARGETS[raw["target_id"]]
         guardian = {**raw, "status": "active", "starts_at": int(time.time()) - 1,
-            "actor_id": "admin:kenneth", "actions_used": 1,
+            "actor_id": "admin:kenneth", "actions_used": 1, "host_id": target["host_id"],
             "probe_policy": {"registered_target": guardian_target_snapshot(target),
                 "ops_binding": await self.bridge._binding(raw["authorized_action"], "admin:kenneth")}}
         guardian["probe_policy"]["authority_hash"] = content_hash({
@@ -89,6 +90,10 @@ class GuardianOpsTests(unittest.IsolatedAsyncioTestCase):
         operation = {"arguments": {"guardian_id": "guardian_test"}, "approval_ref": "approval_test"}
         self.store.guardian.return_value = guardian
         await self.bridge.validate_dispatch(operation)
+        self.store.host_under_maintenance.return_value = True
+        with self.assertRaises(PermissionError):
+            await self.bridge.validate_dispatch(operation)
+        self.store.host_under_maintenance.return_value = False
         guardian["status"] = "cancelled"
         with self.assertRaises(PermissionError):
             await self.bridge.validate_dispatch(operation)

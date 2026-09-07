@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import json
 import time
 import unittest
 from dataclasses import replace
@@ -12,6 +13,7 @@ from fastapi import FastAPI
 
 from src.cluster_control.api_deployments import build_deployment_router
 from src.cluster_control.auth import CredentialFileAuthenticator
+from src.cluster_control.config import _deployment_repositories
 from src.cluster_control.deployment_contracts import (
     DeploymentProposal,
     approval_contract_hash,
@@ -90,6 +92,19 @@ class FakeDeploymentService:
 
 
 class DeploymentContractTests(unittest.TestCase):
+    def test_ops_targets_do_not_require_or_grant_an_ssh_backend(self) -> None:
+        raw = repository()
+        raw["backend"] = "ops"
+        for target in raw["targets"]:
+            target.pop("ssh_target")
+            target.update(ops_repository="nix-config-" + target["host_id"], ops_profile=target["host_id"] + "-system")
+        parsed = _deployment_repositories(json.dumps([raw]))[0]
+        self.assertEqual(parsed["backend"], "ops")
+        self.assertTrue(all(not target["ssh_target"] for target in parsed["targets"]))
+        raw["targets"][0]["ops_profile"] = ""
+        with self.assertRaises(ValueError):
+            _deployment_repositories(json.dumps([raw]))
+
     def test_canary_is_first_and_contract_uses_exact_commits(self) -> None:
         proposal = DeploymentProposal.parse(
             {

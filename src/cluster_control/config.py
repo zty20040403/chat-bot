@@ -230,6 +230,9 @@ def _deployment_repositories(raw: str) -> tuple[dict[str, object], ...]:
         url = str(item.get("url") or "").strip()
         default_branch = str(item.get("default_branch") or "main").strip()
         repository_version = int(item.get("resource_version") or 1)
+        backend = str(item.get("backend") or "ssh")
+        if backend not in {"ssh", "ops"}:
+            raise ValueError("Invalid deployment backend")
         parsed = urlsplit(url)
         if (
             parsed.scheme not in {"https", "ssh"}
@@ -268,10 +271,10 @@ def _deployment_repositories(raw: str) -> tuple[dict[str, object], ...]:
                 not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", host_id)
                 or host_id in target_ids
                 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", flake_host)
-                or not re.fullmatch(
+                or (backend == "ssh" and not re.fullmatch(
                     r"(?:[A-Za-z0-9._-]+@)?[A-Za-z0-9][A-Za-z0-9.-]{0,199}",
                     ssh_target,
-                )
+                ))
                 or not isinstance(verification_units, list)
                 or target_version < 1
                 or not all(
@@ -284,6 +287,10 @@ def _deployment_repositories(raw: str) -> tuple[dict[str, object], ...]:
                 )
             ):
                 raise ValueError("Invalid deployment target")
+            ops_target = {key: str(target.get(key) or "") for key in ("ops_repository", "ops_profile")}
+            if backend == "ops" and any(not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", value)
+                                         for value in ops_target.values()):
+                raise ValueError("Ops deployment targets require an exact repository and profile")
             target_ids.add(host_id)
             normalized_targets.append(
                 {
@@ -293,6 +300,7 @@ def _deployment_repositories(raw: str) -> tuple[dict[str, object], ...]:
                     "verification_units": list(dict.fromkeys(verification_units)),
                     "use_remote_sudo": bool(target.get("use_remote_sudo", False)),
                     "resource_version": target_version,
+                    **(ops_target if backend == "ops" else {}),
                 }
             )
         seen.add(repository_id)
@@ -302,6 +310,7 @@ def _deployment_repositories(raw: str) -> tuple[dict[str, object], ...]:
                 "url": url,
                 "default_branch": default_branch,
                 "resource_version": repository_version,
+                "backend": backend,
                 "allowed_changes": list(dict.fromkeys(allowed_changes)),
                 "targets": normalized_targets,
             }
@@ -483,16 +492,22 @@ class ClusterControlSettings:
             for item in self.deployment_repositories
         }
         for repository in repositories.values():
+            if repository.get("backend") == "ops" and not self.ops_management_token_file:
+                raise ValueError("Ops deployments require the management backend")
             for target in repository["targets"]:
                 if str(target["host_id"]) not in inventory:
                     raise ValueError(
                         f"Deployment target {target['host_id']} is not in inventory"
                     )
+                if repository.get("backend") == "ops" and target["host_id"] not in self.ops_management_hosts:
+                    raise ValueError("Ops deployment target is outside the management grant")
         for deployer in self.deployer_identities:
             unknown = set(deployer["repository_ids"]) - set(repositories)
             if unknown:
                 raise ValueError(
                     f"Deployer {deployer['deployer_id']} references unknown repositories"
                 )
+            if any(repositories[key].get("backend") == "ops" for key in deployer["repository_ids"]):
+                raise ValueError("Ops deployments cannot also be assigned to an SSH deployer")
         if not self.artifact_dir:
             raise ValueError("KC_ARTIFACT_DIR is required")

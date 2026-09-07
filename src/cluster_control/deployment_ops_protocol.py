@@ -36,12 +36,13 @@ def revision(value: Any) -> int:
 
 
 async def read_job_result(read: ReadOperation, job_id: str, *, pointer: str = "",
-                          max_bytes: int = 256 * 1024) -> Any:
+                          max_bytes: int = 256 * 1024, allow_failed: bool = False) -> Any:
     """Decode bounded, byte-offset JSON pages from one completed upstream job."""
     require(1 <= max_bytes <= 2 * 1024 * 1024, "Invalid job result budget")
     status = await read("jobs.status", {"job_id": job_id})
     handle = status.get("handle", {})
-    require(handle.get("job_id") == job_id and handle.get("state") == "succeeded",
+    require(handle.get("job_id") == job_id and handle.get("state") in
+            ({"succeeded", "failed"} if allow_failed else {"succeeded"}),
             "Job is not confirmed successful; do not infer a deployment result")
     offset, total, chunks = 0, None, []
     while True:
@@ -219,9 +220,12 @@ class OpsDeploymentProtocol:
                 "Verification is for a different deployment artifact")
         state, action = ("rolled_back", "rollback") if rollback else ("succeeded", "verify")
         require(change.get("state") == state, "Deployment is not verified in the expected state")
-        job_id = change.get("jobs", {}).get(action)
+        jobs = change.get("jobs", {})
+        if rollback:
+            action = next((name for name in ("rollback", "verify", "activate") if jobs.get(name)), "rollback")
+        job_id = jobs.get(action)
         require(isinstance(job_id, str) and bool(job_id), "Deployment has no verification job receipt")
-        report = await read_job_result(self.read, job_id, pointer="/deployment")
+        report = await read_job_result(self.read, job_id, pointer="/deployment", allow_failed=rollback)
         require(isinstance(report, dict) and report.get("action") == action
                 and report.get("status") == ("rolled_back" if rollback else "verified"),
                 "Job succeeded without the required deployment verification report")

@@ -43,6 +43,16 @@ class ReliabilityStore:
     def __init__(self, database: PostgresDatabase) -> None:
         self.database = database
 
+    def host_under_maintenance(self, host_id: str) -> bool:
+        connection = self.database.store_connection()
+        cursor = connection.cursor()
+        try:
+            return cursor.execute("SELECT 1 FROM fleet_maintenance_locks WHERE host_id=? AND lease_expires_at>?",
+                                  (host_id, int(time.time()))).fetchone() is not None
+        finally:
+            cursor.close()
+            connection.close()
+
     @staticmethod
     def _incident(
         item: Mapping[str, Any], cursor: Any, *, event_limit: int = 200

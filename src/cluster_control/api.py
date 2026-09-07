@@ -19,6 +19,7 @@ from .api_reliability import build_reliability_router
 from .api_resources import build_resource_router
 from .auth import CredentialFileAuthenticator
 from .deployment_service import DeploymentService
+from .ops_deployment_runner import OpsDeploymentRunner
 from .diagnostics import IncidentDiagnosticService
 from .execution_service import ClusterExecutionService, WorkerAuthenticator
 from .guardian import GuardianService
@@ -152,6 +153,7 @@ def create_app(
     deployer_authenticator: CredentialFileAuthenticator | None = None,
     management: OpsManagementService | None = None,
     guardian_ops: GuardianOpsBridge | None = None,
+    ops_deployer: OpsDeploymentRunner | None = None,
 ) -> FastAPI:
     token_path = Path(api_token_file)
 
@@ -159,9 +161,13 @@ def create_app(
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         guardian_task = asyncio.create_task(guardian.run()) if guardian is not None else None
         management_task = asyncio.create_task(management.run()) if management is not None else None
+        deployment_task = asyncio.create_task(ops_deployer.run()) if ops_deployer is not None else None
         try:
             yield
         finally:
+            if deployment_task is not None:
+                deployment_task.cancel()
+                await asyncio.gather(deployment_task, return_exceptions=True)
             if management_task is not None:
                 management_task.cancel()
                 await asyncio.gather(management_task, return_exceptions=True)

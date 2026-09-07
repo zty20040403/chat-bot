@@ -25,10 +25,11 @@ class DeploymentService:
         self.deployer_repositories = {
             str(key): tuple(value) for key, value in deployer_repositories.items()
         }
+        self.ops_available = False
 
     def capabilities(self) -> dict[str, Any]:
         return {
-            "available": bool(self.repositories and self.deployer_repositories),
+            "available": any(self.repository_available(repository_id) for repository_id in self.repositories),
             "two_phase": True,
             "arbitrary_commands": False,
             "strategies": ["serial", "canary"],
@@ -37,6 +38,8 @@ class DeploymentService:
                 {
                     "repository_id": repository_id,
                     "resource_version": int(repository["resource_version"]),
+                    "backend": repository.get("backend", "ssh"),
+                    "available": self.repository_available(repository_id),
                     "allowed_changes": list(repository["allowed_changes"]),
                     "targets": [
                         {
@@ -50,6 +53,12 @@ class DeploymentService:
                 for repository_id, repository in sorted(self.repositories.items())
             ],
         }
+
+    def repository_available(self, repository_id: str) -> bool:
+        repository = self.repositories[repository_id]
+        if repository.get("backend") == "ops":
+            return self.ops_available
+        return any(repository_id in allowed for allowed in self.deployer_repositories.values())
 
     def _repository(self, repository_id: str) -> dict[str, object]:
         repository = self.repositories.get(repository_id)
@@ -69,6 +78,8 @@ class DeploymentService:
         now = int(time.time())
         proposal = DeploymentProposal.parse(raw, now=now)
         repository = self._repository(proposal.repository_id)
+        if repository.get("backend") == "ops" and not self.ops_available:
+            raise PermissionError("Ops deployment executor is not enabled")
         targets = {
             str(item["host_id"]): item for item in repository["targets"]
         }
@@ -89,6 +100,8 @@ class DeploymentService:
                 for host in proposal.target_hosts
             },
         )
+        if repository.get("backend") == "ops":
+            contract.update(backend="ops", execution_policy_hash=content_hash(repository))
         record = {
             **contract,
             "deployment_id": new_handle("deploy"),
@@ -130,7 +143,8 @@ class DeploymentService:
         )
 
     def claim(self, deployer_id: str) -> dict[str, Any] | None:
-        allowed = self.deployer_repositories.get(deployer_id, ())
+        allowed = tuple(repository_id for repository_id in self.deployer_repositories.get(deployer_id, ())
+            if self.repositories[repository_id].get("backend", "ssh") == "ssh")
         item = self.store.claim(deployer_id, repository_ids=allowed)
         if item is None:
             return None

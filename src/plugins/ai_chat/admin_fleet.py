@@ -399,7 +399,7 @@ def register_fleet_admin_routes(
         request: FleetDeploymentRequest,
         authorization: Optional[str] = Header(default=None),
     ) -> dict[str, object]:
-        authorize(authorization)
+        management_auth(authorization)
         try:
             return await configured_client().prepare_deployment(
                 request.model_dump(exclude_none=True),
@@ -415,7 +415,7 @@ def register_fleet_admin_routes(
         request: FleetApprovalRequest,
         authorization: Optional[str] = Header(default=None),
     ) -> dict[str, object]:
-        authorize(authorization)
+        management_auth(authorization)
         try:
             return await configured_client().approve_deployment(
                 deployment_id,
@@ -432,7 +432,7 @@ def register_fleet_admin_routes(
         deployment_id: str,
         authorization: Optional[str] = Header(default=None),
     ) -> dict[str, object]:
-        authorize(authorization)
+        management_auth(authorization)
         try:
             return await configured_client().cancel_deployment(
                 deployment_id,

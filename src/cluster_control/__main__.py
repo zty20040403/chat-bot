@@ -22,6 +22,7 @@ from .guardian_ops import GuardianOpsBridge
 from .reliability import ReliabilityStore
 from .resource_policy import ResourcePolicyStore
 from .ops_management import OpsManagementService
+from .ops_deployment_runner import OpsDeploymentRunner
 
 
 def main() -> None:
@@ -100,6 +101,7 @@ def main() -> None:
             for item in settings.deployer_identities
         },
     )
+    ops_deployer = OpsDeploymentRunner(deployments, management) if management is not None else None
     deployer_authenticator = CredentialFileAuthenticator(
         {
             str(item["deployer_id"]): str(item["token_file"])
@@ -119,6 +121,7 @@ def main() -> None:
         deployer_authenticator=deployer_authenticator,
         management=management,
         guardian_ops=guardian_ops,
+        ops_deployer=ops_deployer,
     )
     uvicorn.run(app, host=settings.host, port=settings.port, log_level="info")
 

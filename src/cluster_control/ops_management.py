@@ -26,6 +26,7 @@ class OpsManagementService:
         self.owner = uuid.uuid4().hex
         self.closed = False
         self.guardian_validator: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+        self.deployment_validator: Callable[[dict[str, Any]], Awaitable[None]] | None = None
 
     def authorize(self, actor: str) -> None:
         if actor not in self.actors:
@@ -67,7 +68,8 @@ class OpsManagementService:
             "identity": hashlib.sha256(self.client._credential()).hexdigest()})
 
     async def call(self, operation: str, params: dict[str, Any], *, actor: str,
-                   origin: str, idempotency_key: str = "", guardian_id: str = "") -> dict[str, Any]:
+                   origin: str, idempotency_key: str = "", guardian_id: str = "",
+                   deployment: dict[str, str] | None = None) -> dict[str, Any]:
         self.authorize(actor)
         definition = next((d for d in await self.definitions() if d["name"] == operation), None)
         if definition is None:
@@ -92,6 +94,12 @@ class OpsManagementService:
                      "upstream_idempotency": definition["idempotency"]}
         if guardian_id:
             arguments["guardian_id"] = guardian_id
+        if deployment:
+            if guardian_id:
+                raise ValueError("An operation cannot have two authorizing parents")
+            if deployment.get("host_id") not in self.hosts:
+                raise PermissionError("Deployment host is outside the management grant")
+            arguments["deployment"] = deployment
         intent_hash = content_hash({"actor": actor, "origin": origin, "arguments": arguments})
         existing = await asyncio.to_thread(self.store.find_operation, actor, origin, idempotency_key)
         if existing is not None:
@@ -100,7 +108,8 @@ class OpsManagementService:
             return self.proposal_result(existing)
         now = int(time.time())
         record = {"operation_id": new_handle("op"), "task_ref": "", "step_ref": "",
-            "actor_id": actor, "origin_scope": origin, "host_id": params.get("host", "scoped-resource"),
+            "actor_id": actor, "origin_scope": origin,
+            "host_id": params.get("host") or params.get("target_host") or (deployment or {}).get("host_id", "scoped-resource"),
             "resource_ref": operation, "operation": "maxops.execute", "operation_version": 1,
             "arguments": arguments, "backend_ref": "ops-management-v2", "backend_binding_version": 1,
             "expected_state": {}, "resource_version": 1, "policy_version": 1,
@@ -128,6 +137,8 @@ class OpsManagementService:
             raise LookupError("Management proposal not found")
         if record["arguments"].get("guardian_id"):
             raise PermissionError("Guardian actions must consume their bounded guardian authorization")
+        if record["arguments"].get("deployment"):
+            raise PermissionError("Deployment actions require the matching two-phase deployment contract")
         await self.validate_binding(record)
         return await asyncio.to_thread(self.store.approve_operation, operation_id, actor_id=actor,
             expected_hash=expected_hash, expected_version=expected_version, expires_at=int(time.time()) + 300)
@@ -168,6 +179,10 @@ class OpsManagementService:
                     if self.guardian_validator is None:
                         raise PermissionError("Guardian authorization backend is unavailable")
                     await self.guardian_validator(record)
+                if record["arguments"].get("deployment"):
+                    if self.deployment_validator is None:
+                        raise PermissionError("Deployment authorization backend is unavailable")
+                    await self.deployment_validator(record)
                 # Persist the claim before any effect; lost submissions are never blindly replayed.
                 response = await self.client._request("POST", "/v1/execute",
                     body=canonical_json({"op": record["arguments"]["op"],

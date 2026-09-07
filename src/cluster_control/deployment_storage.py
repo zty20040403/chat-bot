@@ -15,8 +15,8 @@ TERMINAL_DEPLOYMENT_STATES = frozenset(
 )
 
 TARGET_TRANSITIONS = {
-    "pending": frozenset({"pending", "preflighting", "failed"}),
-    "preflighting": frozenset({"preflighting", "build_ready", "failed"}),
+    "pending": frozenset({"pending", "preflighting", "failed", "skipped"}),
+    "preflighting": frozenset({"preflighting", "build_ready", "failed", "skipped"}),
     "build_ready": frozenset({"build_ready", "deploying", "skipped"}),
     "deploying": frozenset({"deploying", "verifying", "failed", "unknown"}),
     "verifying": frozenset({"verifying", "succeeded", "failed", "unknown"}),
@@ -241,12 +241,14 @@ class DeploymentStore:
 
     def _expire_stale(self, cursor: Any, now: int) -> None:
         expired = cursor.execute(
-            """SELECT deployment_id, status, phase, fence FROM fleet_deployments
+            """SELECT deployment_id, status, phase, fence, contract_json FROM fleet_deployments
                WHERE status IN ('preflighting','deploying','verifying','rolling_back')
                  AND lease_expires_at <= ? FOR UPDATE""",
             (now,),
         ).fetchall()
         for row in expired:
+            if _decode(row["contract_json"], {}).get("backend") == "ops":
+                continue
             safe_retry = row["phase"] == "preflight"
             status = "preflight_queued" if safe_retry else "needs_attention"
             cursor.execute(
@@ -303,11 +305,14 @@ class DeploymentStore:
         *,
         repository_ids: Sequence[str],
         lease_seconds: int = 120,
+        backend: str = "ssh",
     ) -> dict[str, Any] | None:
         now = int(time.time())
         allowed = tuple(dict.fromkeys(str(item) for item in repository_ids))
         if not allowed:
             return None
+        if backend not in {"ssh", "ops"}:
+            raise ValueError("invalid deployment backend")
         connection = self.database.store_connection()
         cursor = connection.cursor()
         try:
@@ -315,26 +320,30 @@ class DeploymentStore:
             placeholders = ",".join("?" for _ in allowed)
             rows = cursor.execute(
                 f"""SELECT * FROM fleet_deployments
-                    WHERE status IN ('preflight_queued','queued')
-                      AND deadline_at > ? AND repository_id IN ({placeholders})
-                    ORDER BY CASE status WHEN 'queued' THEN 0 ELSE 1 END,
-                             created_at, deployment_id
+                    WHERE ((status IN ('preflight_queued','queued') AND deadline_at > ?)
+                      OR (? = 'ops' AND status IN
+                        ('preflighting','deploying','verifying','rolling_back','cancelling')
+                        AND (deployer_id=? OR lease_expires_at <= ?)))
+                      AND repository_id IN ({placeholders})
+                      AND COALESCE(CAST(contract_json AS JSONB)->>'backend', 'ssh') = ?
+                    ORDER BY updated_at, created_at, deployment_id
                     FOR UPDATE SKIP LOCKED LIMIT 10""",
-                (now, *allowed),
+                (now, backend, deployer_id, now, *allowed, backend),
             ).fetchall()
             selected: Mapping[str, Any] | None = None
             for row in rows:
-                if row["status"] == "queued":
+                if row["phase"] == "apply":
                     hosts = _decode(row["target_hosts_json"], [])
                     host_placeholders = ",".join("?" for _ in hosts)
                     conflict = cursor.execute(
                         f"""SELECT host_id FROM fleet_maintenance_locks
                             WHERE host_id IN ({host_placeholders})
-                              AND lease_expires_at > ? LIMIT 1""",
-                        (*hosts, now),
+                              AND lease_expires_at > ? AND deployment_id <> ? LIMIT 1""",
+                        (*hosts, now, row["deployment_id"]),
                     ).fetchone()
                     if conflict is not None:
                         continue
+                if row["status"] == "queued":
                     approval = cursor.execute(
                         """SELECT * FROM fleet_deployment_approvals
                            WHERE approval_id = ? FOR UPDATE""",
@@ -374,9 +383,11 @@ class DeploymentStore:
                 connection.commit()
                 return None
             deployment_id = str(selected["deployment_id"])
-            phase = "preflight" if selected["status"] == "preflight_queued" else "apply"
-            status = "preflighting" if phase == "preflight" else "deploying"
-            fence = int(selected["fence"]) + 1
+            resuming = selected["status"] not in {"preflight_queued", "queued"}
+            phase = str(selected["phase"])
+            status = str(selected["status"]) if resuming else ("preflighting" if phase == "preflight" else "deploying")
+            new_claim = not resuming or selected["deployer_id"] != deployer_id or int(selected["lease_expires_at"] or 0) <= now
+            fence = int(selected["fence"]) + int(new_claim)
             lease_until = now + min(max(int(lease_seconds), 30), 600)
             if phase == "apply":
                 hosts = _decode(selected["target_hosts_json"], [])
@@ -392,7 +403,8 @@ class DeploymentStore:
                              fence = EXCLUDED.fence,
                              lease_expires_at = EXCLUDED.lease_expires_at,
                              updated_at = EXCLUDED.updated_at
-                           WHERE fleet_maintenance_locks.lease_expires_at <= ?""",
+                           WHERE fleet_maintenance_locks.lease_expires_at <= ?
+                              OR fleet_maintenance_locks.deployment_id = EXCLUDED.deployment_id""",
                         (
                             host,
                             deployment_id,
@@ -406,6 +418,7 @@ class DeploymentStore:
                     )
                     if cursor.rowcount != 1:
                         raise RuntimeError("maintenance lock changed during claim")
+            if phase == "apply" and not resuming:
                 cursor.execute(
                     """UPDATE fleet_deployment_approvals SET consumed_at = ?
                        WHERE approval_id = ? AND consumed_at IS NULL""",
@@ -419,16 +432,12 @@ class DeploymentStore:
                    WHERE deployment_id = ?""",
                 (status, phase, deployer_id, lease_until, fence, now, deployment_id),
             )
-            self._event(
-                cursor,
-                deployment_id,
-                event_type="claimed",
-                status=status,
-                actor_id=f"deployer:{deployer_id}",
-                fence=fence,
-                payload={"phase": phase, "lease_expires_at": lease_until},
-                now=now,
-            )
+            if new_claim:
+                self._event(
+                    cursor, deployment_id, event_type="claimed", status=status,
+                    actor_id=f"deployer:{deployer_id}", fence=fence,
+                    payload={"phase": phase, "lease_expires_at": lease_until, "resuming": resuming}, now=now,
+                )
             connection.commit()
             return self.get(deployment_id)
         except Exception:
@@ -826,6 +835,7 @@ class DeploymentStore:
         *,
         actor_id: str,
         origin_scope: str,
+        reason: str = "",
     ) -> dict[str, Any]:
         now = int(time.time())
         connection = self.database.store_connection()
@@ -844,7 +854,7 @@ class DeploymentStore:
             if row["status"] in TERMINAL_DEPLOYMENT_STATES:
                 return self._deployment(row, cursor)
             running = row["status"] in {
-                "preflighting", "deploying", "verifying", "rolling_back"
+                "preflighting", "deploying", "verifying", "rolling_back", "cancelling"
             }
             status = "cancelling" if running else "cancelled"
             phase = row["phase"] if running else "complete"
@@ -868,6 +878,7 @@ class DeploymentStore:
                 status=status,
                 actor_id=actor_id,
                 fence=int(row["fence"]),
+                payload={"reason": reason[:500]} if reason else {},
                 now=now,
             )
             connection.commit()

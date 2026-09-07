@@ -14,7 +14,7 @@ Worker resource borrowing is separate from host root permissions.
 | P4 | Each worker registers, receives a real job and serves its own expiring preview | Worker package built; three-host Nix configuration committed, encrypted credential push awaiting authorization; live acceptance pending |
 | P5 | Owner dispatch, external grant requirement, resource reservation, grant revocation and checkpoint recovery | Existing mechanisms; three-host live acceptance pending |
 | P6 | Registered targets on all three, observed incident and recovery, searchable evidence; approved bounded remediation via the single Ops backend | Ops bridge and explicit console authorization implemented; isolated PostgreSQL and desktop/mobile checks passed; production acceptance pending |
-| P7 | Fixed revision preflight, approval, serial verification and rollback contracts for three hosts through the single Ops backend | Evidence protocol tested on three-host fixtures; upstream exact-source compatibility, durable orchestration and live acceptance pending |
+| P7 | Fixed revision preflight, approval, serial verification and rollback contracts for three hosts through the single Ops backend | Durable Ops runner integrated; isolated PostgreSQL scenarios passed; upstream exact-source compatibility and live acceptance pending |
 
 Do not describe a configured host as a verified runtime. Do not perform destructive
 service or network tests on classmates' workloads. Use disposable previews and
@@ -75,9 +75,37 @@ also records our **SHA-256** lock digest; these are not interchangeable. Success
 job state alone is insufficient: a verification receipt must confirm both running
 and persistent system profiles. Job results use bounded UTF-8 byte pagination.
 
-The adapter is an evidence/protocol layer, not a deployed P7 executor. Its methods
-do not approve or execute writes. The existing P7 contract scheduler still needs
-to be connected to the Ops operation ledger and recovery policy.
+The protocol adapter itself only validates evidence. `OpsDeploymentRunner` now
+connects it to the existing deployment and operation ledgers. Repositories select
+one backend (`ops` or the existing `ssh`), never both. Ops targets bind an exact
+upstream repository and deployment profile. The Nix module and runtime both reject
+missing profiles or hosts outside the management grant.
+
+The administrator's prepare request authorizes workspace creation, preparation
+and building only. Activating requires a second approval of the full preflight
+hash. Child proposals carry the parent deployment/host/stage and cannot be approved
+through the generic operation approval endpoint. Approval locks and rechecks the
+parent's lease, fence, immutable configuration and phase in the same PostgreSQL
+transaction. Dispatch checks them again. Hosts are activated in contract order;
+each must produce matching running and boot profile receipts before the next one.
+
+The Ops runner can reclaim an expired execution lease and continue observing the
+same durable child operation. It never creates a new idempotency key to retry a
+lost submission. An unknown receipt is not evidence that nothing happened. Such
+cases stop for reconciliation; ordinary terminal failures can roll back only the
+previously verified targets, in reverse order, when the approved policy permits.
+Cancellation prevents new actions and waits for an already-started effect to
+settle. Cancelling twice does not prematurely release the execution lease.
+Bounded guardians check deployment maintenance windows before reserving and
+dispatching automatic service repairs.
+
+`tests/test_ops_deployment_runner.py` runs against a unique temporary PostgreSQL
+schema with a simulated Ops transport. It covers all three targets, preflight and
+activation restarts, wrong approval hashes, ordered success, a second-host failure
+with first-host rollback and third-host skipping, cancellation before dispatch,
+lost activation receipts, and the unpatched upstream's clean-workspace rejection.
+`tests/nix/ops-deployment.nix` evaluates the three-host module bindings without
+real credentials or a system switch. These are not production acceptance results.
 
 One upstream compatibility issue must be resolved without weakening the contract:
 `workspace.create` produces a clean workspace with `base_commit` but no

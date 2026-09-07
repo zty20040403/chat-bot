@@ -94,6 +94,8 @@ class GuardianOpsBridge:
             raise PermissionError("Guardian Ops authorization changed; review a new policy")
 
     async def submit(self, guardian: Mapping[str, Any], lease_owner: str) -> dict[str, Any]:
+        if await asyncio.to_thread(self.store.host_under_maintenance, guardian["host_id"]):
+            raise PermissionError("Host is in a deployment maintenance window")
         await self._validate(guardian)
         guardian_id = str(guardian["guardian_id"])
         if int(guardian["actions_used"]) > 0:
@@ -127,6 +129,9 @@ class GuardianOpsBridge:
         if row is None:
             raise PermissionError("Guardian was removed")
         guardian = ReliabilityStore._guardian(row)
+        if cursor.execute("SELECT 1 FROM fleet_maintenance_locks WHERE host_id=? AND lease_expires_at>?",
+                          (guardian["host_id"], now)).fetchone() is not None:
+            raise PermissionError("Host is in a deployment maintenance window")
         if (guardian["status"] != "active" or guardian["mode"] != "remediate"
                 or guardian["check_lease_owner"] != owner or int(guardian["check_lease_until"] or 0) <= now
                 or not int(guardian["starts_at"]) <= now < int(guardian["expires_at"])
@@ -157,6 +162,8 @@ class GuardianOpsBridge:
         guardian = await asyncio.to_thread(self.store.guardian, operation["arguments"]["guardian_id"])
         if guardian is None:
             raise PermissionError("Guardian was removed")
+        if await asyncio.to_thread(self.store.host_under_maintenance, guardian["host_id"]):
+            raise PermissionError("Host is in a deployment maintenance window")
         await self._validate(guardian)
         if not operation.get("approval_ref") or not int(guardian["actions_used"]) > 0:
             raise PermissionError("Guardian action was not reserved")
