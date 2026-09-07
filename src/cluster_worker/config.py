@@ -48,7 +48,7 @@ class WorkerSettings:
         if not str(token_file):
             raise ValueError("KW_TOKEN_FILE is required")
         state_dir = Path(
-            os.getenv("KW_STATE_DIR", "/var/lib/kennethbot-worker").strip()
+            os.getenv("KW_STATE_DIR", "/var/lib/gaoji-worker").strip()
         )
         return cls(
             worker_id=worker_id,

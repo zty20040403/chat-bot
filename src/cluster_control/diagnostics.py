@@ -86,7 +86,7 @@ TEMPLATES: tuple[DiagnosticTemplate, ...] = (
     DiagnosticTemplate(
         "host_unreachable",
         "主机失联",
-        "对照 MaxOps Agent、Exporter 和主机事实，避免把单一探针故障当成关机。",
+        "对照 Ops Agent、Exporter 和主机事实，避免把单一探针故障当成关机。",
     ),
     DiagnosticTemplate(
         "storage_pressure",
@@ -537,19 +537,19 @@ class IncidentDiagnosticService:
             trust_env=False,
         )
         self._run_counter = Counter(
-            "kennethbot_cluster_diagnostics_total",
+            "gaoji_cluster_diagnostics_total",
             "Experimental diagnostic runs by template and outcome.",
             ("template", "status"),
             registry=fleet.metrics_registry,
         )
         self._evidence_counter = Counter(
-            "kennethbot_cluster_diagnostic_evidence_total",
+            "gaoji_cluster_diagnostic_evidence_total",
             "Structured diagnostic evidence by check and status.",
             ("check", "status"),
             registry=fleet.metrics_registry,
         )
         self._duration = Histogram(
-            "kennethbot_cluster_diagnostic_duration_seconds",
+            "gaoji_cluster_diagnostic_duration_seconds",
             "End-to-end diagnostic run latency.",
             ("template",),
             registry=fleet.metrics_registry,
@@ -587,7 +587,7 @@ class IncidentDiagnosticService:
         host_id: str,
         target_id: str = "",
         subject: str = "",
-        requested_by: str = "kennethbot",
+        requested_by: str = "gaoji",
     ) -> dict[str, Any]:
         template = TEMPLATE_BY_KEY.get(template_key)
         if template is None:
@@ -677,7 +677,7 @@ class IncidentDiagnosticService:
         if template == "model_connectivity":
             checks = [
                 lambda: self._probe(self._target("model", target_id), phase=1),
-                lambda: self._unit(host, "qq-deepseek-bot.service", phase=1),
+                lambda: self._unit(host, "gaoji.service", phase=1),
                 lambda: self._runtime("traces", host, phase=1),
                 lambda: self._runtime("model_failures", host, phase=1),
             ]
@@ -685,14 +685,14 @@ class IncidentDiagnosticService:
             checks = [
                 lambda: self._probe(self._target("admin", target_id), phase=1),
                 lambda: self._unit(host, "nginx.service", phase=1),
-                lambda: self._unit(host, "qq-deepseek-bot.service", phase=1),
-                lambda: self._unit(host, "kennethbot-cluster-control.service", phase=1),
+                lambda: self._unit(host, "gaoji.service", phase=1),
+                lambda: self._unit(host, "gaoji-cluster-control.service", phase=1),
                 lambda: self._database(host, phase=1),
             ]
         elif template == "qq_no_reply":
             checks = [
                 lambda: self._unit(host, "docker-napcat.service", phase=1),
-                lambda: self._unit(host, "qq-deepseek-bot.service", phase=1),
+                lambda: self._unit(host, "gaoji.service", phase=1),
                 lambda: self._runtime("deliveries", host, phase=1),
                 lambda: self._runtime("traces", host, phase=1),
                 lambda: self._runtime("jobs", host, phase=1),
@@ -725,7 +725,7 @@ class IncidentDiagnosticService:
         evidence: list[EvidenceDraft],
     ) -> list[EvidenceDraft]:
         if template in {"model_connectivity", "reply_latency"}:
-            return await self._logs(host, "qq-deepseek-bot.service", phase=2)
+            return await self._logs(host, "gaoji.service", phase=2)
         if template == "admin_502":
             unit = next(
                 (
@@ -745,7 +745,7 @@ class IncidentDiagnosticService:
                     if item.check_name == "service_status"
                     and item.status in {"failed", "warning"}
                 ),
-                "qq-deepseek-bot.service",
+                "gaoji.service",
             )
             return await self._logs(host, unit, phase=2)
         return []
@@ -765,7 +765,7 @@ class IncidentDiagnosticService:
             return [
                 EvidenceDraft(
                     phase,
-                    "kennethbot-fixed-probe",
+                    "gaoji-fixed-probe",
                     "probe-v1",
                     "",
                     "probe:unconfigured",
@@ -781,7 +781,7 @@ class IncidentDiagnosticService:
             return [
                 EvidenceDraft(
                     phase,
-                    "kennethbot-fixed-probe",
+                    "gaoji-fixed-probe",
                     "probe-v1",
                     self.local_host_id,
                     f"probe:{target.target_id}",
@@ -813,7 +813,7 @@ class IncidentDiagnosticService:
             addresses = sorted({str(item[4][0]) for item in records})[:8]
             dns = EvidenceDraft(
                 phase,
-                "kennethbot-fixed-probe",
+                "gaoji-fixed-probe",
                 "probe-v1",
                 target.observer_host,
                 f"probe:{target.target_id}",
@@ -829,7 +829,7 @@ class IncidentDiagnosticService:
             return [
                 EvidenceDraft(
                     phase,
-                    "kennethbot-fixed-probe",
+                    "gaoji-fixed-probe",
                     "probe-v1",
                     target.observer_host,
                     f"probe:{target.target_id}",
@@ -877,7 +877,7 @@ class IncidentDiagnosticService:
                 status = "warning"
             http_item = EvidenceDraft(
                 phase,
-                "kennethbot-fixed-probe",
+                "gaoji-fixed-probe",
                 "probe-v1",
                 target.observer_host,
                 f"probe:{target.target_id}",
@@ -892,7 +892,7 @@ class IncidentDiagnosticService:
         except (httpx.TimeoutException, httpx.HTTPError) as exc:
             http_item = EvidenceDraft(
                 phase,
-                "kennethbot-fixed-probe",
+                "gaoji-fixed-probe",
                 "probe-v1",
                 target.observer_host,
                 f"probe:{target.target_id}",
@@ -917,7 +917,7 @@ class IncidentDiagnosticService:
             return [
                 EvidenceDraft(
                     phase,
-                    "kennethbot",
+                    "gaoji",
                     "diagnostic-v1",
                     host,
                     f"host:{host}/unit:{unit}",
@@ -943,7 +943,7 @@ class IncidentDiagnosticService:
         return [
             EvidenceDraft(
                 phase,
-                str(payload.get("source_backend") or "maxops"),
+                str(payload.get("source_backend") or "ops"),
                 "catalog-v1",
                 host,
                 f"host:{host}/unit:{unit}",
@@ -961,7 +961,7 @@ class IncidentDiagnosticService:
                 payload.get("observed_at"),
                 int(payload.get("received_at") or now),
                 30,
-                f"maxops:units.status:{host}:{unit}",
+                f"ops:units.status:{host}:{unit}",
             )
         ]
 
@@ -976,7 +976,7 @@ class IncidentDiagnosticService:
         return [
             EvidenceDraft(
                 phase,
-                str(payload.get("source_backend") or "maxops"),
+                str(payload.get("source_backend") or "ops"),
                 "catalog-v1",
                 host,
                 f"host:{host}",
@@ -991,7 +991,7 @@ class IncidentDiagnosticService:
                 payload.get("observed_at"),
                 int(payload.get("received_at") or now),
                 30,
-                f"maxops:host.facts:{host}",
+                f"ops:host.facts:{host}",
             )
         ]
 
@@ -1031,9 +1031,9 @@ class IncidentDiagnosticService:
         return [
             EvidenceDraft(
                 phase,
-                str(payload.get("source_backend") or "maxops"),
+                str(payload.get("source_backend") or "ops"),
                 "catalog-v1",
-                "maxops-hub",
+                "ops-hub",
                 f"host:{host}",
                 "fleet_observers",
                 status,
@@ -1041,7 +1041,7 @@ class IncidentDiagnosticService:
                 payload.get("observed_at"),
                 int(payload.get("received_at") or now),
                 30,
-                "maxops:fleet.overview",
+                "ops:fleet.overview",
             )
         ]
 
@@ -1051,7 +1051,7 @@ class IncidentDiagnosticService:
         return [
             EvidenceDraft(
                 phase,
-                "kennethbot-postgres",
+                "gaoji-postgres",
                 "topology-v1",
                 host,
                 "database:primary",
@@ -1077,10 +1077,10 @@ class IncidentDiagnosticService:
         return [
             EvidenceDraft(
                 phase,
-                "kennethbot-postgres",
+                "gaoji-postgres",
                 "runtime-v1",
                 host,
-                f"kennethbot:{kind}",
+                f"gaoji:{kind}",
                 f"runtime_{kind}",
                 status,
                 facts,
@@ -1099,7 +1099,7 @@ class IncidentDiagnosticService:
             return [
                 EvidenceDraft(
                     phase,
-                    "maxops",
+                    "ops",
                     "catalog-v1",
                     host,
                     f"host:{host}/unit:{unit}",
@@ -1109,7 +1109,7 @@ class IncidentDiagnosticService:
                     None,
                     now,
                     0,
-                    f"maxops:units.logs:{host}:{unit}",
+                    f"ops:units.logs:{host}:{unit}",
                 )
             ]
         data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
@@ -1135,7 +1135,7 @@ class IncidentDiagnosticService:
         return [
             EvidenceDraft(
                 phase,
-                "maxops",
+                "ops",
                 "catalog-v1",
                 host,
                 f"host:{host}/unit:{unit}",
@@ -1151,7 +1151,7 @@ class IncidentDiagnosticService:
                 payload.get("observed_at"),
                 int(payload.get("received_at") or now),
                 0,
-                f"maxops:units.logs:{host}:{unit}",
+                f"ops:units.logs:{host}:{unit}",
             )
         ]
 

@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="320" viewBox="0 0 1200 320" role="img" aria-labelledby="title desc">
-  <title id="title">Kennethbot</title>
+  <title id="title">gaoji</title>
   <desc id="desc">QQ multi-model agent banner with a robot mark and connected runtime capabilities.</desc>
   <defs>
     <pattern id="grid" width="28" height="28" patternUnits="userSpaceOnUse">
@@ -22,12 +22,12 @@
   </g>
 
   <g font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace">
-    <text x="278" y="116" fill="#fafafa" font-size="54" font-weight="700" letter-spacing="1">Kennethbot</text>
+    <text x="278" y="116" fill="#fafafa" font-size="54" font-weight="700" letter-spacing="1">gaoji</text>
     <text x="281" y="154" fill="#a1a1aa" font-size="18" letter-spacing="3">QQ MULTI-MODEL AGENT</text>
     <circle cx="289" cy="200" r="6" fill="#22c55e"/>
     <text x="306" y="207" fill="#d4d4d8" font-size="16">agent runtime online</text>
     <text x="77" y="286" fill="#71717a" font-size="14">ONEBOT V11  /  NONEBOT2  /  POSTGRESQL  /  NIXOS</text>
-    <text x="1082" y="286" fill="#71717a" font-size="14">v0.5.27</text>
+    <text x="1082" y="286" fill="#71717a" font-size="14">v0.18.0</text>
   </g>
 
   <g font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="14">

@@ -101,7 +101,7 @@ class DeployerSettings:
             token_file=Path(token_file_raw),
             control_url=control_url,
             state_dir=Path(
-                os.getenv("KD_STATE_DIR", "/var/lib/kennethbot-cluster-deployer")
+                os.getenv("KD_STATE_DIR", "/var/lib/gaoji-cluster-deployer")
             ),
             repository_id=os.getenv("KD_REPOSITORY_ID", "").strip(),
             repository_url=repository_url,

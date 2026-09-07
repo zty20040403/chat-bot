@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -58,7 +59,7 @@ class DockerSandboxCancellationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("qqbot.purpose=task", command)
 
     async def test_default_shell_reuses_the_group_sandbox(self) -> None:
-        manager = DockerSandboxManager(image="kennethbot-sandbox:latest")
+        manager = DockerSandboxManager(image="gaoji-sandbox:latest")
         manager.list = AsyncMock(  # type: ignore[method-assign]
             return_value=[
                 {
@@ -77,7 +78,7 @@ class DockerSandboxCancellationTests(unittest.IsolatedAsyncioTestCase):
         manager.create.assert_not_awaited()
 
     async def test_configured_advanced_image_runs_as_sandbox_user(self) -> None:
-        manager = DockerSandboxManager(image="kennethbot-sandbox:latest")
+        manager = DockerSandboxManager(image="gaoji-sandbox:latest")
         manager.list = AsyncMock(return_value=[])  # type: ignore[method-assign]
         manager._list_by_label = AsyncMock(  # type: ignore[method-assign]
             return_value=[]
@@ -89,16 +90,16 @@ class DockerSandboxCancellationTests(unittest.IsolatedAsyncioTestCase):
         created = await manager.create("owner", "python")
 
         command = manager._run.await_args.args
-        self.assertIn("kennethbot-sandbox:latest", command)
+        self.assertIn("gaoji-sandbox:latest", command)
         self.assertEqual(command[command.index("--user") + 1], "1000:1000")
         self.assertIn("--read-only", command)
         self.assertIn(
-            "type=volume,source=kennethbot-nix-v2,target=/nix,readonly",
+            "type=volume,source=gaoji-nix-v2,target=/nix,readonly",
             command,
         )
         self.assertTrue(
             any(
-                str(item).startswith("type=volume,source=kennethbot-work-s")
+                str(item).startswith("type=volume,source=gaoji-work-s")
                 and str(item).endswith(",target=/workspace")
                 for item in command
             )
@@ -106,13 +107,13 @@ class DockerSandboxCancellationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(created["toolset"], "advanced")
         calls = [call.args for call in manager._run.await_args_list]
         self.assertIn(
-            ("docker", "volume", "create", "kennethbot-nix-v2"),
+            ("docker", "volume", "create", "gaoji-nix-v2"),
             calls,
         )
         self.assertTrue(
             any(
                 call[:3] == ("docker", "volume", "create")
-                and str(call[3]).startswith("kennethbot-work-s")
+                and str(call[3]).startswith("gaoji-work-s")
                 for call in calls
             )
         )
@@ -128,43 +129,52 @@ class DockerSandboxCancellationTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_nix_cache_initialization_allows_slow_first_copy(self) -> None:
-        manager = DockerSandboxManager(image="kennethbot-sandbox:latest")
+        manager = DockerSandboxManager(image="gaoji-sandbox:latest")
         manager._run = AsyncMock(  # type: ignore[method-assign]
             side_effect=[
-                SandboxResult("kennethbot-nix-v2\n", "", 0),
+                SandboxResult("gaoji-nix-v2\n", "", 0),
                 SandboxResult("", "", 0),
             ]
         )
 
-        await manager._ensure_nix_volume("kennethbot-sandbox:latest")
+        await manager._ensure_nix_volume("gaoji-sandbox:latest")
 
         initialization = manager._run.await_args_list[1]
         self.assertEqual(initialization.kwargs["timeout"], 300)
-        self.assertIn(
-            "touch /nix/.kennethbot-cache-ready",
-            initialization.args[-1],
-        )
+        self.assertEqual(initialization.args[-1], "gaoji-cache-seed")
+        self.assertIn("type=volume,source=gaoji-nix-v2,target=/cache/nix", initialization.args)
+        self.assertFalse(any("rm" in call.args for call in manager._run.await_args_list))
         self.assertTrue(manager._nix_volume_ready)
 
     async def test_destroy_removes_the_owned_workspace_volume(self) -> None:
-        manager = DockerSandboxManager(image="kennethbot-sandbox:latest")
+        for prefix in ("gaoji-work", "kennethbot-work"):
+            with self.subTest(prefix=prefix):
+                manager = DockerSandboxManager(image="gaoji-sandbox:latest")
+                manager._owned_container = AsyncMock(return_value="qqbot-sabc123")  # type: ignore[method-assign]
+                volume = f"{prefix}-sabc123"
+                mounts = json.dumps([{"Type": "volume", "Destination": "/workspace", "Name": volume}])
+                manager._run = AsyncMock(side_effect=[  # type: ignore[method-assign]
+                    SandboxResult(mounts, "", 0),
+                    SandboxResult("", "", 0),
+                    SandboxResult("", "", 0),
+                ])
+                await manager.destroy("owner", "sabc123")
+                self.assertEqual(
+                    manager._run.await_args_list[2].args,
+                    ("docker", "volume", "rm", "-f", volume),
+                )
+
+    async def test_destroy_refuses_a_foreign_workspace_volume(self) -> None:
+        manager = DockerSandboxManager(image="gaoji-sandbox:latest")
         manager._owned_container = AsyncMock(return_value="qqbot-sabc123")  # type: ignore[method-assign]
-        manager._run = AsyncMock(  # type: ignore[method-assign]
-            side_effect=[
-                SandboxResult("", "", 0),
-                SandboxResult("", "", 0),
-            ]
-        )
-
-        await manager.destroy("owner", "sabc123")
-
-        self.assertEqual(
-            manager._run.await_args_list[1].args,
-            ("docker", "volume", "rm", "-f", "kennethbot-work-sabc123"),
-        )
+        mounts = json.dumps([{"Type": "volume", "Destination": "/workspace", "Name": "unrelated-data"}])
+        manager._run = AsyncMock(return_value=SandboxResult(mounts, "", 0))  # type: ignore[method-assign]
+        with self.assertRaises(SandboxError):
+            await manager.destroy("owner", "sabc123")
+        self.assertEqual(manager._run.await_count, 1)
 
     async def test_stop_preserves_the_owned_workspace_volume(self) -> None:
-        manager = DockerSandboxManager(image="kennethbot-sandbox:latest")
+        manager = DockerSandboxManager(image="gaoji-sandbox:latest")
         manager._owned_container = AsyncMock(return_value="qqbot-sabc123")  # type: ignore[method-assign]
         manager.list = AsyncMock(  # type: ignore[method-assign]
             return_value=[
@@ -192,7 +202,7 @@ class DockerSandboxCancellationTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_exec_prepares_and_wraps_requested_nix_packages(self) -> None:
-        manager = DockerSandboxManager(image="kennethbot-sandbox:latest")
+        manager = DockerSandboxManager(image="gaoji-sandbox:latest")
         manager._owned_container = AsyncMock(return_value="qqbot-sabc123")  # type: ignore[method-assign]
         manager._prepare_packages = AsyncMock(  # type: ignore[method-assign]
             return_value=("/nix/store/abc-ffmpeg",)
@@ -224,7 +234,7 @@ class DockerSandboxCancellationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("ffmpeg -version", wrapped)
 
     async def test_package_attributes_are_structured_and_reject_injection(self) -> None:
-        manager = DockerSandboxManager(image="kennethbot-sandbox:latest")
+        manager = DockerSandboxManager(image="gaoji-sandbox:latest")
         with self.assertRaises(SandboxError):
             await manager._prepare_packages(["ffmpeg;id"], timeout_seconds=30)
         expression = manager._package_expression(

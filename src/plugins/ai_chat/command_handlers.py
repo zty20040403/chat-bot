@@ -1160,7 +1160,7 @@ class CommandHandlers(HandlerService):
                 control_command,
                 self.services.replies._reply_message(
                     event,
-                    f"qq-deepseek-bot {BOT_VERSION} · NoneBot2 / OneBot V11 · "
+                    f"gaoji {BOT_VERSION} · NoneBot2 / OneBot V11 · "
                     "canonical IR + PostgreSQL ledger + durable turn journal",
                 ),
             )

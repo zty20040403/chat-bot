@@ -4,8 +4,8 @@
   pkgs,
   ...
 }: let
-  cfg = config.services.qq-deepseek-bot;
-  serviceName = "qq-deepseek-bot";
+  cfg = config.services.gaoji;
+  serviceName = "gaoji";
   statePath = "/var/lib/${cfg.stateDirectory}";
   cachePath = "/var/cache/${cfg.cacheDirectory}";
   defaultPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
@@ -73,8 +73,8 @@
     else "false";
   napcatServiceName = "docker-${cfg.napcat.containerName}";
 in {
-  options.services.qq-deepseek-bot = {
-    enable = lib.mkEnableOption "the DeepSeek-powered QQ bot";
+  options.services.gaoji = {
+    enable = lib.mkEnableOption "the gaoji multi-model bot";
 
     package = lib.mkOption {
       type = lib.types.package;
@@ -86,7 +86,7 @@ in {
     environmentFile = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default = null;
-      example = "/run/secrets/qq-deepseek-bot.env";
+      example = "/run/secrets/gaoji.env";
       description = ''
         Runtime environment file containing API keys and bot settings. Keep this
         file outside the Nix store; do not pass a Nix path containing secrets.
@@ -158,12 +158,12 @@ in {
     };
 
     cluster = {
-      enable = lib.mkEnableOption "read-only Kennethbot fleet tools";
+      enable = lib.mkEnableOption "read-only gaoji fleet tools";
 
       controlUrl = lib.mkOption {
         type = lib.types.str;
         default = "http://127.0.0.1:8091";
-        description = "Fixed Kennethbot cluster-control API URL.";
+        description = "Fixed gaoji cluster-control API URL.";
       };
 
       tokenFile = lib.mkOption {
@@ -206,13 +206,13 @@ in {
 
     sandbox.imageName = lib.mkOption {
       type = lib.types.str;
-      default = "kennethbot-sandbox:latest";
+      default = "gaoji-sandbox:latest";
       description = "Docker image name used when creating advanced sandboxes.";
     };
 
     sandbox.nixCacheVolume = lib.mkOption {
       type = lib.types.str;
-      default = "kennethbot-nix-v2";
+      default = "gaoji-nix-v2";
       description = "Docker volume shared by trusted Nix package helpers and mounted read-only in task sandboxes.";
     };
 
@@ -324,13 +324,13 @@ in {
 
       containerName = lib.mkOption {
         type = lib.types.str;
-        default = "napcat-chat-bot";
+        default = "napcat-gaoji";
         description = "OCI container name for the dedicated NapCat instance.";
       };
 
       dataDirectory = lib.mkOption {
         type = lib.types.str;
-        default = "/var/lib/napcat-chat-bot";
+        default = "/var/lib/napcat-gaoji";
         description = "Persistent NapCat data directory on the host.";
       };
 
@@ -370,15 +370,15 @@ in {
     assertions = [
       {
         assertion = builtins.match "^[A-Za-z0-9_.-]+$" cfg.stateDirectory != null;
-        message = "services.qq-deepseek-bot.stateDirectory must be a directory name, not a path";
+        message = "services.gaoji.stateDirectory must be a directory name, not a path";
       }
       {
         assertion = builtins.match "^[A-Za-z0-9_.-]+$" cfg.cacheDirectory != null;
-        message = "services.qq-deepseek-bot.cacheDirectory must be a directory name, not a path";
+        message = "services.gaoji.cacheDirectory must be a directory name, not a path";
       }
       {
         assertion = !cfg.cluster.enable || cfg.cluster.tokenFile != null;
-        message = "services.qq-deepseek-bot.cluster.tokenFile is required when cluster tools are enabled";
+        message = "services.gaoji.cluster.tokenFile is required when cluster tools are enabled";
       }
     ];
 
@@ -394,17 +394,17 @@ in {
     virtualisation.docker.enable = lib.mkDefault (cfg.sandbox.enable || cfg.napcat.enable);
 
     systemd.services.${serviceName} = {
-      description = "DeepSeek QQ bot";
+      description = "gaoji multi-model bot";
       wantedBy = ["multi-user.target"];
       wants =
         ["network-online.target"]
-        ++ lib.optional cfg.cluster.enable "kennethbot-cluster-control.service";
+        ++ lib.optional cfg.cluster.enable "gaoji-cluster-control.service";
       requires = lib.optionals cfg.sandbox.enable [
         "${serviceName}-sandbox-image.service"
       ];
       after =
         ["network-online.target"]
-        ++ lib.optional cfg.cluster.enable "kennethbot-cluster-control.service"
+        ++ lib.optional cfg.cluster.enable "gaoji-cluster-control.service"
         ++ lib.optionals cfg.sandbox.enable [
           "${serviceName}-sandbox-image.service"
         ];
@@ -477,8 +477,8 @@ in {
           SupplementaryGroups = lib.optional cfg.sandbox.enable "docker";
           StateDirectory = cfg.stateDirectory;
           CacheDirectory = cfg.cacheDirectory;
-          WorkingDirectory = "${cfg.package}/share/qq-deepseek-bot";
-          ExecStartPre = "${cfg.package}/bin/qq-deepseek-bot-db ${
+          WorkingDirectory = "${cfg.package}/share/gaoji";
+          ExecStartPre = "${cfg.package}/bin/gaoji-db ${
             if cfg.database.migrateOnStart
             then "upgrade"
             else "check"
@@ -504,7 +504,7 @@ in {
     };
 
     systemd.services."${serviceName}-sandbox-image" = lib.mkIf cfg.sandbox.enable {
-      description = "Load the Kennethbot advanced sandbox image";
+      description = "Load the gaoji advanced sandbox image";
       wantedBy = ["multi-user.target"];
       requires = ["docker.service"];
       after = ["docker.service"];
@@ -512,35 +512,12 @@ in {
         ${pkgs.docker}/bin/docker load --input ${cfg.sandbox.imageArchive}
 
         volume=${lib.escapeShellArg cfg.sandbox.nixCacheVolume}
-        for container in $(${pkgs.docker}/bin/docker ps -aq --filter volume="$volume"); do
-          managed=$(${pkgs.docker}/bin/docker inspect \
-            --format '{{ index .Config.Labels "qqbot.managed" }}' "$container" 2>/dev/null || true)
-          initializer=$(${pkgs.docker}/bin/docker inspect \
-            --format '{{ index .Config.Labels "io.kennethbot.cache-initializer" }}' "$container" 2>/dev/null || true)
-          if [ "$initializer" = true ] || [ "$managed" != true ]; then
-            ${pkgs.docker}/bin/docker rm -f "$container" >/dev/null
-          fi
-        done
-        if ${pkgs.docker}/bin/docker volume inspect "$volume" >/dev/null 2>&1; then
-          if ! ${pkgs.docker}/bin/docker run --rm \
-            --network none \
-            --user 0:0 \
-            --label io.kennethbot.cache-initializer=true \
-            --cap-drop ALL \
-            --security-opt no-new-privileges \
-            --read-only \
-            --mount type=volume,source="$volume",target=/nix \
-            ${lib.escapeShellArg cfg.sandbox.imageName} \
-            test -f /nix/.kennethbot-cache-ready; then
-            ${pkgs.docker}/bin/docker volume rm -f "$volume"
-          fi
-        fi
         ${pkgs.docker}/bin/docker volume create \
-          --label io.kennethbot.nix-cache=true "$volume" >/dev/null
+          --label io.gaoji.nix-cache=true "$volume" >/dev/null
         ${pkgs.docker}/bin/docker run --rm \
           --network none \
           --user 0:0 \
-          --label io.kennethbot.cache-initializer=true \
+          --label io.gaoji.cache-initializer=true \
           --cap-drop ALL \
           --security-opt no-new-privileges \
           --memory 2g \
@@ -548,13 +525,13 @@ in {
           --read-only \
           --tmpfs /tmp:rw,nosuid,nodev,size=256m,mode=1777 \
           --tmpfs /root:rw,nosuid,nodev,size=64m,mode=700 \
-          --mount type=volume,source="$volume",target=/nix \
+          --mount type=volume,source="$volume",target=/cache/nix \
           ${lib.escapeShellArg cfg.sandbox.imageName} \
-          sh -lc 'nix-store --verify && touch /nix/.kennethbot-cache-ready'
+          gaoji-cache-seed
 
         ${pkgs.docker}/bin/docker image ls --quiet \
           --filter dangling=true \
-          --filter label=io.kennethbot.sandbox=advanced \
+          --filter label=io.gaoji.sandbox=advanced \
           | ${pkgs.findutils}/bin/xargs --no-run-if-empty ${pkgs.docker}/bin/docker image rm || true
       '';
       serviceConfig = {
@@ -565,7 +542,7 @@ in {
     };
 
     systemd.services."${serviceName}-sandbox-nix-gc" = lib.mkIf cfg.sandbox.enable {
-      description = "Collect expired Kennethbot on-demand Nix packages";
+      description = "Collect expired gaoji on-demand Nix packages";
       requires = ["docker.service" "${serviceName}-sandbox-image.service"];
       after = ["docker.service" "${serviceName}-sandbox-image.service"];
       script = ''
@@ -583,10 +560,12 @@ in {
           ${lib.escapeShellArg cfg.sandbox.imageName} \
           sh -lc ${lib.escapeShellArg ''
             set -eu
-            roots=/nix/var/nix/gcroots/kennethbot-packages
-            mkdir -p "$roots"
-            find "$roots" -mindepth 1 -maxdepth 1 -type d \
-              -mtime +${toString cfg.sandbox.nixCacheRetentionDays} -exec rm -rf -- {} +
+            for roots in /nix/var/nix/gcroots/gaoji-packages /nix/var/nix/gcroots/kennethbot-packages; do
+              if [ -d "$roots" ]; then
+                find "$roots" -mindepth 1 -maxdepth 1 -type d \
+                  -mtime +${toString cfg.sandbox.nixCacheRetentionDays} -exec rm -rf -- {} +
+              fi
+            done
             nix-store --gc
           ''}
       '';
@@ -594,7 +573,7 @@ in {
     };
 
     systemd.timers."${serviceName}-sandbox-nix-gc" = lib.mkIf cfg.sandbox.enable {
-      description = "Schedule Kennethbot sandbox Nix cache collection";
+      description = "Schedule gaoji sandbox Nix cache collection";
       wantedBy = ["timers.target"];
       timerConfig = {
         OnCalendar = "weekly";

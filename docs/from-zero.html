@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="面向零基础读者的 QQ DeepSeek Bot 从零搭建教程。">
-  <title>QQ DeepSeek Bot 从零搭建指南</title>
+  <meta name="description" content="面向零基础读者的 gaoji 从零搭建教程。">
+  <title>gaoji 从零搭建指南</title>
   <style>
     :root {
       --ink: #1f2933;
@@ -715,7 +715,7 @@
   <header class="hero">
     <div class="hero-inner">
       <div>
-        <p class="eyebrow">QQ DeepSeek Bot · 从零开始</p>
+        <p class="eyebrow">gaoji · 从零开始</p>
         <h1>第一次写机器人，也能一步一步搭起来</h1>
         <p class="hero-copy">
           这份教程不假设你熟悉 Python、网络服务或大模型。我们先做出一个能回答问题的最小机器人，
@@ -881,8 +881,8 @@ pip3 --version</code></pre>
           <p class="section-kicker">第 1 步</p>
           <h2>创建项目目录</h2>
           <p>先创建最小目录，不要一次把所有高级模块都建出来：</p>
-          <pre><code>mkdir qq-deepseek-bot
-cd qq-deepseek-bot
+          <pre><code>mkdir gaoji
+cd gaoji
 mkdir -p src/plugins/ai_chat
 touch bot.py
 touch src/__init__.py
@@ -898,8 +898,8 @@ touch src/plugins/ai_chat/deepseek.py</code></pre>
                 <table class="line-table">
                   <thead><tr><th>命令</th><th>详细解释</th></tr></thead>
                   <tbody>
-                    <tr><td><code>mkdir qq-deepseek-bot</code></td><td><code>mkdir</code> 是 make directory，创建项目最外层文件夹。已经存在同名目录时会报错，不会覆盖内容。</td></tr>
-                    <tr><td><code>cd qq-deepseek-bot</code></td><td><code>cd</code> 是 change directory。后面的命令都会相对这个目录执行，所以这一步不能漏。</td></tr>
+                    <tr><td><code>mkdir gaoji</code></td><td><code>mkdir</code> 是 make directory，创建项目最外层文件夹。已经存在同名目录时会报错，不会覆盖内容。</td></tr>
+                    <tr><td><code>cd gaoji</code></td><td><code>cd</code> 是 change directory。后面的命令都会相对这个目录执行，所以这一步不能漏。</td></tr>
                     <tr><td><code>mkdir -p src/plugins/ai_chat</code></td><td><code>-p</code> 会把中间不存在的 <code>src</code>、<code>plugins</code> 一起创建；目录已存在时也不会报错。</td></tr>
                     <tr><td><code>touch bot.py</code></td><td>创建空入口文件。文件已经存在时只更新时间，不清空原内容。</td></tr>
                     <tr><td><code>touch .../__init__.py</code></td><td>创建 Python 包标记。Python 才能用 <code>src.plugins.ai_chat</code> 这种点号路径导入插件。</td></tr>
@@ -912,7 +912,7 @@ touch src/plugins/ai_chat/deepseek.py</code></pre>
           </details>
 
           <p>此时目录应该是：</p>
-          <pre class="file-tree"><code>qq-deepseek-bot/
+          <pre class="file-tree"><code>gaoji/
 ├── bot.py                         # 程序入口
 └── src/
     ├── __init__.py                # 让 src 成为 Python 包
@@ -1020,7 +1020,7 @@ PORT=8080
 LOG_LEVEL=INFO
 
 COMMAND_START=["/"]
-NICKNAME=["DeepSeek Bot"]
+NICKNAME=["gaoji"]
 
 DEEPSEEK_API_KEY=在这里填写你自己的Key
 DEEPSEEK_BASE_URL=https://api.deepseek.com
@@ -1040,7 +1040,7 @@ AI_SYSTEM_PROMPT=你是QQ群里的友好中文助手，回答简洁、准确、�
                     <tr><td><code>PORT=8080</code></td><td>Web 服务监听的端口号，可以理解成这项服务在电脑上的“门牌号”。</td><td>NapCat 的反向 WebSocket 地址也必须写 8080；若端口被占用，可两边一起换成别的端口。</td></tr>
                     <tr><td><code>LOG_LEVEL=INFO</code></td><td>日志详细程度。常见级别有 <code>DEBUG</code>、<code>INFO</code>、<code>WARNING</code> 和 <code>ERROR</code>。</td><td><code>INFO</code> 会显示启动、连接和普通运行信息，适合平时使用；排错时可临时改成 <code>DEBUG</code>。</td></tr>
                     <tr><td><code>COMMAND_START=["/"]</code></td><td>命令开头列表。这里使用类似 JSON 的列表写法，列表中只有一个斜杠。</td><td><code>on_command("ai")</code> 因而由 <code>/ai</code> 触发，而不是普通聊天中出现“ai”就触发。</td></tr>
-                    <tr><td><code>NICKNAME=["DeepSeek Bot"]</code></td><td>机器人可以被识别的称呼列表，不是 QQ 群名片的强制修改项。</td><td>某些 <code>to_me</code> 规则可以把这些称呼当成“正在叫机器人”；真实 @仍由 OneBot 的 at 消息段识别。</td></tr>
+                    <tr><td><code>NICKNAME=["gaoji"]</code></td><td>机器人可以被识别的称呼列表，不是 QQ 群名片的强制修改项。</td><td>某些 <code>to_me</code> 规则可以把这些称呼当成“正在叫机器人”；真实 @仍由 OneBot 的 at 消息段识别。</td></tr>
                     <tr><td><code>DEEPSEEK_API_KEY=...</code></td><td>DeepSeek 发给你的秘密凭证，相当于 API 账户的密码。</td><td>每次调用模型都要带上它。缺失时请求无法认证；泄漏后别人可能消耗你的额度。</td></tr>
                     <tr><td><code>DEEPSEEK_BASE_URL=...</code></td><td>DeepSeek API 的根地址。客户端会在这个地址后访问聊天接口。</td><td>使用兼容 OpenAI 协议的其他服务时，通常就是修改这里和模型名。</td></tr>
                     <tr><td><code>DEEPSEEK_MODEL=deepseek-chat</code></td><td>本次请求使用的模型标识，不是展示给群友看的机器人昵称。</td><td><code>deepseek.py</code> 会把它原样放入请求的 <code>model</code> 参数。</td></tr>
@@ -1469,7 +1469,7 @@ async def handle_mention_ai(event: MessageEvent) -&gt; None:
           <p class="section-kicker">第 9 步</p>
           <h2>第一次完整运行</h2>
           <p>进入项目目录、激活虚拟环境并启动：</p>
-          <pre><code>cd /你的路径/qq-deepseek-bot
+          <pre><code>cd /你的路径/gaoji
 source .venv/bin/activate
 python bot.py</code></pre>
 
@@ -1480,7 +1480,7 @@ python bot.py</code></pre>
                 <table class="line-table">
                   <thead><tr><th>命令</th><th>作用</th></tr></thead>
                   <tbody>
-                    <tr><td><code>cd /你的路径/qq-deepseek-bot</code></td><td><code>cd</code> 是 change directory，进入项目根目录。示例中的中文路径要替换成你电脑上的真实路径。</td></tr>
+                    <tr><td><code>cd /你的路径/gaoji</code></td><td><code>cd</code> 是 change directory，进入项目根目录。示例中的中文路径要替换成你电脑上的真实路径。</td></tr>
                     <tr><td><code>source .venv/bin/activate</code></td><td>在当前终端激活虚拟环境，让后面的 <code>python</code> 和包都来自 <code>.venv</code>。关闭终端后需要重新激活。</td></tr>
                     <tr><td><code>python bot.py</code></td><td>让当前 Python 执行入口文件。它加载配置和插件，然后启动持续运行的 Uvicorn 服务。</td></tr>
                   </tbody>

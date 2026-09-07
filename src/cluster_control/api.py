@@ -38,7 +38,7 @@ class DiagnosticRunRequest(BaseModel):
     host_id: str = Field(default="h610", min_length=1, max_length=64)
     target_id: str = Field(default="", max_length=64)
     subject: str = Field(default="", max_length=1000)
-    requested_by: str = Field(default="kennethbot", min_length=1, max_length=200)
+    requested_by: str = Field(default="gaoji", min_length=1, max_length=200)
 
 
 class OperationPrepareRequest(BaseModel):
@@ -157,7 +157,7 @@ def create_app(
             await service.close()
 
     app = FastAPI(
-        title="Kennethbot Cluster Control",
+        title="gaoji Cluster Control",
         version="1",
         docs_url=None,
         redoc_url=None,

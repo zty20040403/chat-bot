@@ -1,4 +1,4 @@
-# Kennethbot Subagent V2：独立上下文与任务感知模型路由整合方案
+# gaoji Subagent V2：独立上下文与任务感知模型路由整合方案
 
 调研日期：2026-09-05。项目基线：`ab94544`，版本 `0.10.2`。
 
@@ -23,11 +23,11 @@
 
 关键回归覆盖入口合同、直接回答一次调用、计划复用、同角色真实并行、独立会话恢复、范围拒绝、投递缺失及非 Sol 降级。`tests/fixtures/subagent_entry_cases.json` 保存 8 个成对语义案例；`python tools/evaluate_subagent_entry.py` 仅检查案例，不调用模型。上线前可显式执行 `python tools/evaluate_subagent_entry.py --live --profile gpt-5.6-terra --limit 8` 做小样本验证，只判断入口、不会执行任务工具。本轮未消耗模型额度跑语义评测，不将模拟回归结果当成实际入口命中率。
 
-本文合并上游编排设计、Kennethbot 现有实现和 2026-09-05 的运行中模型目录检查。最终目标是：主控自然接收请求，按需派出使用合适模型的专家；专家各自保留工作记录，完成后经过验收和可靠投递，而不是只显示几块正在运行的方框。
+本文合并上游编排设计、gaoji 现有实现和 2026-09-05 的运行中模型目录检查。最终目标是：主控自然接收请求，按需派出使用合适模型的专家；专家各自保留工作记录，完成后经过验收和可靠投递，而不是只显示几块正在运行的方框。
 
 ## 1. 结论
 
-保留 Kennethbot 的 NoneBot、模型网关、PostgreSQL、工具权限、沙盒和 React 控制台。在现有协调器上逐步补齐，不同时引入六套框架。
+保留 gaoji 的 NoneBot、模型网关、PostgreSQL、工具权限、沙盒和 React 控制台。在现有协调器上逐步补齐，不同时引入六套框架。
 
 推荐的组合是：
 
@@ -46,7 +46,7 @@
 
 Agents SDK 区分两种模式：`agents as tools` 让主控调用专家后继续组织最终答案；`handoffs` 则把当前轮的主动对话权交给专家。官方同时支持模型决定分工和代码决定流程。
 
-Kennethbot 应主要采用第一种：搜索、代码、文件等子任务交给专家，Kenneth 继续理解群聊、维持人设、统一回复。工具授权仍由宿主执行，不能认为选了某个编排模式就自动获得完整安全边界。
+gaoji 应主要采用第一种：搜索、代码、文件等子任务交给专家，Kenneth 继续理解群聊、维持人设、统一回复。工具授权仍由宿主执行，不能认为选了某个编排模式就自动获得完整安全边界。
 
 来源：[官方多 Agent 设计说明](https://github.com/openai/openai-agents-python/blob/main/docs/multi_agent.md)。
 
@@ -54,7 +54,7 @@ Kennethbot 应主要采用第一种：搜索、代码、文件等子任务交给
 
 Claude Agent SDK 的子 Agent 默认具有独立上下文，可以配置说明、提示词、工具和模型；主控通常收到最终结果，而不是全部中间工具记录。官方文档还说明了利用会话及 Agent 标识继续原有子会话的方式。
 
-Kennethbot 值得借鉴的是“继续同一个任务”的语义：第二次修改 PDF 时，让文件 Agent 在自己已读的资料和已做的操作上继续，而不是重新开一张白纸。SDK 示例及文档不等于公开了 Claude 的全部调度源码。
+gaoji 值得借鉴的是“继续同一个任务”的语义：第二次修改 PDF 时，让文件 Agent 在自己已读的资料和已做的操作上继续，而不是重新开一张白纸。SDK 示例及文档不等于公开了 Claude 的全部调度源码。
 
 来源：[官方角色配置示例](https://github.com/anthropics/claude-agent-sdk-python/blob/main/examples/agents.py)、[官方子 Agent 文档](https://code.claude.com/docs/en/agent-sdk/subagents)。
 
@@ -62,7 +62,7 @@ Kennethbot 值得借鉴的是“继续同一个任务”的语义：第二次修
 
 Google ADK 的并行实现为不同分支标记执行上下文并汇合事件；官方仓库的 Workflow 指南进一步描述了节点、边、结构化输入输出、汇合节点、动态调度和重试。分支标识本身不等于租户数据权限隔离。
 
-Kennethbot 应保留已有的“某个步骤依赖满足就立即启动”调度，借鉴显式结果结构和事件化状态更新。不要退回“这一批全部结束才开始下一批”。具体 Workflow 接口以采用的发布版为准。
+gaoji 应保留已有的“某个步骤依赖满足就立即启动”调度，借鉴显式结果结构和事件化状态更新。不要退回“这一批全部结束才开始下一批”。具体 Workflow 接口以采用的发布版为准。
 
 来源：[并行 Agent 源码](https://github.com/google/adk-python/blob/main/src/google/adk/agents/parallel_agent.py)、[官方 Workflow 指南](https://github.com/google/agents-cli/blob/main/skills/google-agents-cli-adk-code/references/adk-workflows.md)。
 
@@ -70,7 +70,7 @@ Kennethbot 应保留已有的“某个步骤依赖满足就立即启动”调度
 
 Agent Framework 的检查点包括工作流身份、图结构签名、前一检查点、已提交状态、消息、待处理请求和格式版本。恢复时需要知道执行到了哪里，也需要确认新版程序还能读懂旧任务。
 
-Kennethbot 应借鉴完整状态和版本校验，用现有 PostgreSQL 实现。保存检查点与“进程重启后自动继续”是两件事，后者还需要执行进程接管任务；检查点也不能保证外部发送恰好执行一次。
+gaoji 应借鉴完整状态和版本校验，用现有 PostgreSQL 实现。保存检查点与“进程重启后自动继续”是两件事，后者还需要执行进程接管任务；检查点也不能保证外部发送恰好执行一次。
 
 来源：[检查点源码](https://github.com/microsoft/agent-framework/blob/main/python/packages/core/agent_framework/_workflows/_checkpoint.py)、[工作流示例目录](https://github.com/microsoft/agent-framework/blob/main/python/samples/03-workflows/README.md)。
 
@@ -78,7 +78,7 @@ Kennethbot 应借鉴完整状态和版本校验，用现有 PostgreSQL 实现。
 
 Deep Agents 的子 Agent 中间件默认以委派说明作为子 Agent 的起始消息，明确排除部分父状态，例如原始消息和待办；结果返回也有状态过滤。源码另有实验性的 fork 模式，不能把它和默认隔离模式混为一谈。
 
-Kennethbot 应借鉴受控交接：默认传任务、必要证据和上游摘要，不广播所有 Agent 的完整对话。完整资料保存在宿主，需要时按引用读取，而不是将巨大 JSON 硬截断后拼给模型。
+gaoji 应借鉴受控交接：默认传任务、必要证据和上游摘要，不广播所有 Agent 的完整对话。完整资料保存在宿主，需要时按引用读取，而不是将巨大 JSON 硬截断后拼给模型。
 
 来源：[Subagent 中间件源码](https://github.com/langchain-ai/deepagents/blob/main/libs/deepagents/deepagents/middleware/subagents.py)。
 
@@ -86,11 +86,11 @@ Kennethbot 应借鉴受控交接：默认传任务、必要证据和上游摘要
 
 AgentTeams 是比单个 Agent SDK 更高一层的协作系统：Manager 组织 Worker，通过即时通信呈现协作；网关管理模型和工具访问，存储保存工作资料，控制器管理运行环境。Worker 可以具有不同角色和运行配置。
 
-Kennethbot 应借鉴职责分离及可见进度，但无需搬入它整套 Matrix、网关和容器控制平台。已有 QQ、模型网关和控制台可以承接这些职责。不要把 AgentTeams 的能力直接当成所有 AgentScope 版本的能力。
+gaoji 应借鉴职责分离及可见进度，但无需搬入它整套 Matrix、网关和容器控制平台。已有 QQ、模型网关和控制台可以承接这些职责。不要把 AgentTeams 的能力直接当成所有 AgentScope 版本的能力。
 
 来源：[AgentTeams 官方架构概览](https://github.com/agentscope-ai/AgentTeams/blob/main/docs/overview.md)。
 
-## 3. Kennethbot 已有什么，真正差在哪里
+## 3. gaoji 已有什么，真正差在哪里
 
 已经存在的能力应保留：固定专家角色、自动委派入口、依赖图、并行执行、角色工具白名单、独立上下文快照、结构化结果、任务事件、检查点、有限修复，以及控制台任务图。
 
@@ -107,7 +107,7 @@ Kennethbot 应借鉴职责分离及可见进度，但无需搬入它整套 Matri
 
 这里不是说现有系统完全没有隔离、重试、检查点或产物处理。问题是它们还没有组成一致的任务完成协议。单独委派入口已使用角色超时，不能笼统说所有角色限制都没生效。
 
-代码依据：[结果与上下文合同](https://github.com/zty20040403/chat-bot/blob/ab94544/src/plugins/ai_chat/agent/contracts.py#L174)、[结果状态处理](https://github.com/zty20040403/chat-bot/blob/ab94544/src/plugins/ai_chat/agent/contracts.py#L315)、[worker 执行](https://github.com/zty20040403/chat-bot/blob/ab94544/src/plugins/ai_chat/subagents.py#L2132)、[工作流和发送顺序](https://github.com/zty20040403/chat-bot/blob/ab94544/src/plugins/ai_chat/subagents.py#L1692)、[重启处理](https://github.com/zty20040403/chat-bot/blob/ab94544/src/plugins/ai_chat/subagents.py#L876)。
+代码依据：[结果与上下文合同](https://github.com/zty20040403/gaojibot/blob/ab94544/src/plugins/ai_chat/agent/contracts.py#L174)、[结果状态处理](https://github.com/zty20040403/gaojibot/blob/ab94544/src/plugins/ai_chat/agent/contracts.py#L315)、[worker 执行](https://github.com/zty20040403/gaojibot/blob/ab94544/src/plugins/ai_chat/subagents.py#L2132)、[工作流和发送顺序](https://github.com/zty20040403/gaojibot/blob/ab94544/src/plugins/ai_chat/subagents.py#L1692)、[重启处理](https://github.com/zty20040403/gaojibot/blob/ab94544/src/plugins/ai_chat/subagents.py#L876)。
 
 ### 3.1 模型目录检查快照
 
@@ -314,7 +314,7 @@ Kenneth 最终答复
 
 各子 Agent 独立选型，不修改主控或群的默认模型。一个任务里可以同时有三个不同模型工作；复用同一 provider/模型客户端时也不共享不同子会话的消息历史。
 
-#### Kennethbot 的初始任务偏好
+#### gaoji 的初始任务偏好
 
 下表是候选模型通过渠道及能力验证后的目标分配，不是立即切换生产配置，也不是固定品牌排名。同一个角色可因任务不同采用不同配置。
 

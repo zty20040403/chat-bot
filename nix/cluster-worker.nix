@@ -4,11 +4,16 @@
   pkgs,
   ...
 }: let
-  cfg = config.services.kennethbot-cluster-worker;
+  cfg = config.services.gaoji-cluster-worker;
   defaultPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
 in {
-  options.services.kennethbot-cluster-worker = {
-    enable = lib.mkEnableOption "an isolated Kennethbot compute and preview worker";
+  options.services.gaoji-cluster-worker = {
+    enable = lib.mkEnableOption "an isolated gaoji compute and preview worker";
+    stateDirectory = lib.mkOption {
+      type = lib.types.strMatching "[A-Za-z0-9][A-Za-z0-9_-]*";
+      default = "gaoji-cluster-worker";
+      description = "Persistent directory under /var/lib; preserve it when renaming an existing service.";
+    };
     package = lib.mkOption {
       type = lib.types.package;
       default = defaultPackage;
@@ -30,22 +35,22 @@ in {
     assertions = [
       {
         assertion = builtins.match "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$" cfg.workerId != null;
-        message = "Kennethbot workerId is invalid";
+        message = "gaoji workerId is invalid";
       }
       {
         assertion = lib.hasPrefix "http://" cfg.controlUrl || lib.hasPrefix "https://" cfg.controlUrl;
-        message = "Kennethbot worker controlUrl must be HTTP(S)";
+        message = "gaoji worker controlUrl must be HTTP(S)";
       }
       {
         assertion = lib.hasPrefix "http://" cfg.publicBaseUrl || lib.hasPrefix "https://" cfg.publicBaseUrl;
-        message = "Kennethbot worker publicBaseUrl must be HTTP(S)";
+        message = "gaoji worker publicBaseUrl must be HTTP(S)";
       }
     ];
-    systemd.services.kennethbot-cluster-worker = {
-      description = "Kennethbot isolated cluster worker";
+    systemd.services.gaoji-cluster-worker = {
+      description = "gaoji isolated cluster worker";
       wantedBy = ["multi-user.target"];
-      wants = ["network-online.target" "kennethbot-cluster-control.service"];
-      after = ["network-online.target" "kennethbot-cluster-control.service"];
+      wants = ["network-online.target" "gaoji-cluster-control.service"];
+      after = ["network-online.target" "gaoji-cluster-control.service"];
       path = [pkgs.poppler-utils pkgs.ffmpeg-headless];
       environment = {
         KW_WORKER_ID = cfg.workerId;
@@ -54,7 +59,7 @@ in {
         KW_LISTEN_HOST = cfg.listenAddress;
         KW_LISTEN_PORT = toString cfg.port;
         KW_PUBLIC_BASE_URL = cfg.publicBaseUrl;
-        KW_STATE_DIR = "/var/lib/kennethbot-cluster-worker";
+        KW_STATE_DIR = "/var/lib/${cfg.stateDirectory}";
         KW_CPU_MILLIS = toString cfg.cpuMillis;
         KW_MEMORY_BYTES = toString cfg.memoryBytes;
         KW_GPU_SLOTS = toString cfg.gpuSlots;
@@ -64,10 +69,10 @@ in {
       serviceConfig = {
         Type = "simple";
         DynamicUser = true;
-        StateDirectory = "kennethbot-cluster-worker";
-        WorkingDirectory = "${cfg.package}/share/qq-deepseek-bot";
+        StateDirectory = cfg.stateDirectory;
+        WorkingDirectory = "${cfg.package}/share/gaoji";
         LoadCredential = "worker-token:${cfg.tokenFile}";
-        ExecStart = "${cfg.package}/bin/kennethbot-cluster-worker";
+        ExecStart = "${cfg.package}/bin/gaoji-cluster-worker";
         Restart = "on-failure";
         RestartSec = 5;
         UMask = "0077";

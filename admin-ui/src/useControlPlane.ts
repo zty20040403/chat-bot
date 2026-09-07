@@ -33,8 +33,8 @@ const INITIAL_RESOURCES: ResourceName[] = [
   'versions',
 ]
 
-export function useControlPlane(runtime: KennethbotAdminRuntime) {
-  const [token, setTokenState] = useState(() => localStorage.getItem('kennethbot.admin.token') ?? '')
+export function useControlPlane(runtime: GaojiAdminRuntime) {
+  const [token, setTokenState] = useState(() => localStorage.getItem('gaoji.admin.token') ?? '')
   const [data, setData] = useState<Partial<Record<ResourceName, JsonObject>>>({})
   const [versions, setVersions] = useState<Record<string, number>>({})
   const [loading, setLoading] = useState<Set<ResourceName>>(new Set())
@@ -47,8 +47,8 @@ export function useControlPlane(runtime: KennethbotAdminRuntime) {
 
   const setToken = useCallback((value: string) => {
     const normalized = value.trim()
-    if (normalized) localStorage.setItem('kennethbot.admin.token', normalized)
-    else localStorage.removeItem('kennethbot.admin.token')
+    if (normalized) localStorage.setItem('gaoji.admin.token', normalized)
+    else localStorage.removeItem('gaoji.admin.token')
     setTokenState(normalized)
     setData({})
     setVersions({})

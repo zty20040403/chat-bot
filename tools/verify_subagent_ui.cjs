@@ -68,7 +68,7 @@ const server = http.createServer((req, res) => {
       await page.setViewportSize({ width, height: 1000 });
       await page.evaluate(() => scrollTo(0, 0));
       if (width < 700) await page.waitForFunction(() => document.querySelector('.sidebar').getBoundingClientRect().right <= 1);
-      await page.screenshot({ path: `/tmp/kennethbot-subagents-${width}.png`, fullPage: true, animations: 'disabled' });
+      await page.screenshot({ path: `/tmp/gaoji-subagents-${width}.png`, fullPage: true, animations: 'disabled' });
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1);
       assert.equal(overflow, false, `page overflow at ${width}`);
       const nodes = await page.locator('.agent-flow-node').count();

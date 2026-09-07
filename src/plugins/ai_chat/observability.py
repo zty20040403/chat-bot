@@ -32,89 +32,89 @@ class BotTelemetry:
     def __init__(self) -> None:
         self.registry = CollectorRegistry(auto_describe=True)
         self.turns = Counter(
-            "kennethbot_ai_turns_total",
+            "gaoji_ai_turns_total",
             "AI turns handled by the bot.",
             ("platform", "kind", "status"),
             registry=self.registry,
         )
         self.turn_duration = Histogram(
-            "kennethbot_ai_turn_duration_seconds",
+            "gaoji_ai_turn_duration_seconds",
             "End-to-end AI turn duration before final delivery.",
             ("platform", "kind", "status"),
             buckets=TURN_BUCKETS,
             registry=self.registry,
         )
         self.stage_duration = Histogram(
-            "kennethbot_stage_duration_seconds",
+            "gaoji_stage_duration_seconds",
             "Duration of bounded processing stages.",
             ("stage", "status"),
             buckets=STAGE_BUCKETS,
             registry=self.registry,
         )
         self.model_requests = Counter(
-            "kennethbot_model_requests_total",
+            "gaoji_model_requests_total",
             "Requests attempted against model profiles.",
             ("profile", "provider", "status"),
             registry=self.registry,
         )
         self.model_duration = Histogram(
-            "kennethbot_model_request_duration_seconds",
+            "gaoji_model_request_duration_seconds",
             "Model request latency, including provider transport.",
             ("profile", "provider", "status"),
             buckets=TURN_BUCKETS,
             registry=self.registry,
         )
         self.model_fallbacks = Counter(
-            "kennethbot_model_fallbacks_total",
+            "gaoji_model_fallbacks_total",
             "Successful model requests routed to a fallback profile.",
             ("requested_profile", "actual_profile"),
             registry=self.registry,
         )
         self.tool_calls = Counter(
-            "kennethbot_tool_calls_total",
+            "gaoji_tool_calls_total",
             "Tool calls completed by the Agent loop.",
             ("tool", "status"),
             registry=self.registry,
         )
         self.tool_duration = Histogram(
-            "kennethbot_tool_call_duration_seconds",
+            "gaoji_tool_call_duration_seconds",
             "Tool execution latency.",
             ("tool", "status"),
             buckets=TURN_BUCKETS,
             registry=self.registry,
         )
         self.deliveries = Counter(
-            "kennethbot_deliveries_total",
+            "gaoji_deliveries_total",
             "Outbound delivery attempts.",
             ("platform", "status"),
             registry=self.registry,
         )
         self.delivery_duration = Histogram(
-            "kennethbot_delivery_duration_seconds",
+            "gaoji_delivery_duration_seconds",
             "Outbound platform delivery latency.",
             ("platform", "status"),
             buckets=STAGE_BUCKETS,
             registry=self.registry,
         )
         self.tokens = Counter(
-            "kennethbot_model_tokens_total",
+            "gaoji_model_tokens_total",
             "Tokens reported by model providers.",
             ("profile", "direction"),
             registry=self.registry,
         )
         self.runtime_tasks = Gauge(
-            "kennethbot_runtime_tasks",
+            "gaoji_runtime_tasks",
             "Currently active in-process AI tasks.",
             registry=self.registry,
         )
         self.outbox = Gauge(
-            "kennethbot_outbox_deliveries",
+            "gaoji_outbox_deliveries",
             "Current durable outbox deliveries by status.",
             ("status",),
             registry=self.registry,
         )
         self._configured = False
-        self._tracer = trace.get_tracer("kennethbot")
+        self._tracer = trace.get_tracer("gaoji")
 
     def configure(
         self,
@@ -127,7 +127,7 @@ class BotTelemetry:
             return
         resource = Resource.create(
             {
-                "service.name": service_name or "kennethbot",
+                "service.name": service_name or "gaoji",
                 "service.version": service_version,
                 "deployment.environment": os.getenv("ENVIRONMENT", "prod"),
             }
@@ -143,7 +143,7 @@ class BotTelemetry:
         except Exception:
             # Another host integration may already own the global provider.
             pass
-        self._tracer = trace.get_tracer("kennethbot")
+        self._tracer = trace.get_tracer("gaoji")
         self._configured = True
 
     @contextmanager
@@ -178,7 +178,7 @@ class BotTelemetry:
         started = time.monotonic()
         status = "succeeded"
         try:
-            with self._tracer.start_as_current_span(f"kennethbot.{stage}"):
+            with self._tracer.start_as_current_span(f"gaoji.{stage}"):
                 yield
         except BaseException:
             status = "failed"
@@ -194,7 +194,7 @@ class BotTelemetry:
         status = "succeeded"
         try:
             with self._tracer.start_as_current_span(
-                "kennethbot.tool",
+                "gaoji.tool",
                 attributes={"tool.name": name},
             ):
                 yield
@@ -244,7 +244,7 @@ class BotTelemetry:
         status = "committed"
         try:
             with self._tracer.start_as_current_span(
-                "kennethbot.delivery",
+                "gaoji.delivery",
                 attributes={"messaging.system": platform},
             ):
                 yield
@@ -291,71 +291,71 @@ class BotTelemetry:
 
         models = _counter_breakdown(
             samples,
-            "kennethbot_model_requests_total",
+            "gaoji_model_requests_total",
             ("profile", "provider"),
             status_label="status",
         )
         _attach_histogram_percentile(
             models,
             samples,
-            "kennethbot_model_request_duration_seconds",
+            "gaoji_model_request_duration_seconds",
             ("profile", "provider"),
         )
         tools = _counter_breakdown(
             samples,
-            "kennethbot_tool_calls_total",
+            "gaoji_tool_calls_total",
             ("tool",),
             status_label="status",
         )
         _attach_histogram_percentile(
             tools,
             samples,
-            "kennethbot_tool_call_duration_seconds",
+            "gaoji_tool_call_duration_seconds",
             ("tool",),
         )
         deliveries = _counter_breakdown(
             samples,
-            "kennethbot_deliveries_total",
+            "gaoji_deliveries_total",
             ("platform",),
             status_label="status",
         )
         _attach_histogram_percentile(
             deliveries,
             samples,
-            "kennethbot_delivery_duration_seconds",
+            "gaoji_delivery_duration_seconds",
             ("platform",),
         )
         stages = _histogram_breakdown(
             samples,
-            "kennethbot_stage_duration_seconds",
+            "gaoji_stage_duration_seconds",
             ("stage", "status"),
         )
         turns = _counter_breakdown(
             samples,
-            "kennethbot_ai_turns_total",
+            "gaoji_ai_turns_total",
             ("platform", "kind"),
             status_label="status",
         )
         _attach_histogram_percentile(
             turns,
             samples,
-            "kennethbot_ai_turn_duration_seconds",
+            "gaoji_ai_turn_duration_seconds",
             ("platform", "kind"),
         )
         tokens = _plain_counter_breakdown(
             samples,
-            "kennethbot_model_tokens_total",
+            "gaoji_model_tokens_total",
             ("profile", "direction"),
         )
         fallbacks = _plain_counter_breakdown(
             samples,
-            "kennethbot_model_fallbacks_total",
+            "gaoji_model_fallbacks_total",
             ("requested_profile", "actual_profile"),
         )
         outbox = {
             str(sample.labels.get("status", "unknown")): int(sample.value)
             for sample in samples
-            if sample.name == "kennethbot_outbox_deliveries"
+            if sample.name == "gaoji_outbox_deliveries"
         }
 
         model_requests = sum(int(item["total"]) for item in models)
@@ -387,7 +387,7 @@ class BotTelemetry:
                 "turn_failures": turn_failures,
                 "turn_p95_seconds": _overall_histogram_p95(
                     samples,
-                    "kennethbot_ai_turn_duration_seconds",
+                    "gaoji_ai_turn_duration_seconds",
                 ),
                 "model_requests": model_requests,
                 "model_failures": model_failures,
@@ -399,7 +399,7 @@ class BotTelemetry:
                 "deliveries": delivery_attempts,
                 "delivery_failures": delivery_failures,
                 "running_tasks": int(
-                    _sample_value(samples, "kennethbot_runtime_tasks")
+                    _sample_value(samples, "gaoji_runtime_tasks")
                 ),
                 "outbox_pending": int(outbox.get("pending", 0)),
                 "outbox_ambiguous": int(outbox.get("ambiguous", 0)),
@@ -415,7 +415,7 @@ class BotTelemetry:
         }
 
 
-_trace_id: ContextVar[str] = ContextVar("kennethbot_trace_id", default="")
+_trace_id: ContextVar[str] = ContextVar("gaoji_trace_id", default="")
 telemetry = BotTelemetry()
 
 
@@ -461,7 +461,7 @@ def observed_ai_turn(
         started = time.monotonic()
         status = "crashed"
         with telemetry.span(
-            "kennethbot.ai_turn",
+            "gaoji.ai_turn",
             attributes={
                 "messaging.system": platform,
                 "messaging.conversation.type": kind,

@@ -177,7 +177,7 @@ def summarize_fleet(
         )
     return {
         "ok": bool(summaries) and any(item["status"] == "online" for item in summaries),
-        "source": "maxops",
+        "source": "ops",
         "status": payload.get("status", "unavailable"),
         "observed_at": payload.get("observed_at"),
         "received_at": payload.get("received_at"),
@@ -271,7 +271,7 @@ async def model_status(context: Any, profile_name: str = "") -> dict[str, Any]:
         summary += "；本进程暂无实际请求成功记录，尚不能确认生成回复正常"
     return {
         "ok": True,
-        "source": "kennethbot-model-runtime",
+        "source": "gaoji-model-runtime",
         "profile": name,
         "model": profile.model,
         "checked_at": int(time.time()),

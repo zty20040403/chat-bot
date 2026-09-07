@@ -28,7 +28,7 @@ from .runtime import (
 )
 
 
-logger = logging.getLogger("kennethbot.cluster_deployer")
+logger = logging.getLogger("gaoji.cluster_deployer")
 DEPLOYMENT_ID_RE = re.compile(r"deploy_[a-f0-9]{32}")
 
 

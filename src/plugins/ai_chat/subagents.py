@@ -2886,7 +2886,7 @@ def _planner_prompt(
         f"- {role}: {registry.worker(role).description}"
         for role in registry.worker_roles
     )
-    return f"""你是 Kennethbot 的任务主控。把用户目标拆成最少且足够的可执行步骤。
+    return f"""你是 gaoji 的任务主控。把用户目标拆成最少且足够的可执行步骤。
 只允许以下固定角色：
 {roles}
 
@@ -3034,7 +3034,7 @@ def _repair_planner_prompt(registry: AgentRegistry) -> str:
         f"- {role}: {registry.worker(role).description}"
         for role in registry.worker_roles
     )
-    return f"""你是 Kennethbot 的故障恢复主控。只有原步骤失败后才会调用你。
+    return f"""你是 gaoji 的故障恢复主控。只有原步骤失败后才会调用你。
 判断是否值得追加一次有明确边界的修复步骤。不要重画整个计划，不要重复已完成工作，
 也不要为了看起来积极而盲目重试。可用角色：
 {roles}

@@ -1,4 +1,4 @@
-"""Durable MaxOps backend state and fleet evidence projections."""
+"""Durable Ops backend state and fleet evidence projections."""
 from __future__ import annotations
 
 import os

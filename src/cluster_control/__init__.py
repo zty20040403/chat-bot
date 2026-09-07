@@ -1,12 +1,12 @@
-"""Kennethbot fleet control plane.
+"""gaoji fleet control plane.
 
 The control plane owns user-facing orchestration and evidence projections. It
-does not replace MaxOps, Prometheus, or host-local authorization.
+does not replace Ops, Prometheus, or host-local authorization.
 """
 
 from .contracts import FleetQueryResult, FleetStatus
 from .diagnostics import IncidentDiagnosticService
-from .adapters.maxops import MaxOpsClient, MaxOpsError, MaxOpsOperation
+from .adapters.ops import OpsClient, OpsError, OpsOperation
 from .service import FleetControlService
 
 __all__ = [
@@ -14,7 +14,7 @@ __all__ = [
     "FleetQueryResult",
     "FleetStatus",
     "IncidentDiagnosticService",
-    "MaxOpsClient",
-    "MaxOpsError",
-    "MaxOpsOperation",
+    "OpsClient",
+    "OpsError",
+    "OpsOperation",
 ]

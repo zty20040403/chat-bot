@@ -4,7 +4,7 @@
   pkgs,
   ...
 }: let
-  cfg = config.services.kennethbot-cluster-control;
+  cfg = config.services.gaoji-cluster-control;
   defaultPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
   inventoryHostIds = map (host: host.host_id) cfg.inventory;
   diagnosticTargetIds = map (target: target.target_id) cfg.diagnostics.targets;
@@ -15,7 +15,7 @@
     options = {
       host_id = lib.mkOption {
         type = lib.types.str;
-        description = "Stable host identifier shared with the Nix registry and MaxOps.";
+        description = "Stable host identifier shared with the Nix registry and Ops.";
       };
       label = lib.mkOption {
         type = lib.types.str;
@@ -50,7 +50,7 @@
       observe = lib.mkOption {
         type = lib.types.bool;
         default = false;
-        description = "Allow Kennethbot to request read-only observations for this host.";
+        description = "Allow gaoji to request read-only observations for this host.";
       };
       operate = lib.mkOption {
         type = lib.types.bool;
@@ -65,7 +65,7 @@
       readable_units = lib.mkOption {
         type = lib.types.listOf lib.types.str;
         default = [];
-        description = "Exact systemd services Kennethbot may query on this host.";
+        description = "Exact systemd services gaoji may query on this host.";
       };
       operable_units = lib.mkOption {
         type = lib.types.listOf lib.types.str;
@@ -148,14 +148,19 @@
     };
   };
 in {
-  options.services.kennethbot-cluster-control = {
-    enable = lib.mkEnableOption "Kennethbot's authenticated cluster control service";
+  options.services.gaoji-cluster-control = {
+    enable = lib.mkEnableOption "gaoji's authenticated cluster control service";
+    stateDirectory = lib.mkOption {
+      type = lib.types.strMatching "[A-Za-z0-9][A-Za-z0-9_-]*";
+      default = "gaoji-cluster-control";
+      description = "Persistent directory under /var/lib; preserve it when renaming an existing service.";
+    };
 
     package = lib.mkOption {
       type = lib.types.package;
       default = defaultPackage;
       defaultText = lib.literalExpression "inputs.qq-bot.packages.${pkgs.stdenv.hostPlatform.system}.default";
-      description = "Kennethbot package containing the cluster-control executable.";
+      description = "gaoji package containing the cluster-control executable.";
     };
 
     listenAddress = lib.mkOption {
@@ -195,26 +200,26 @@ in {
       description = "Credential shared only with the bot-side internal API client.";
     };
 
-    maxops = {
-      enable = lib.mkEnableOption "the MaxOps read-only adapter";
+    ops = {
+      enable = lib.mkEnableOption "the Ops read-only adapter";
 
       baseUrl = lib.mkOption {
         type = lib.types.str;
         default = "";
         example = "http://100.64.0.3:9721";
-        description = "Fixed MaxOps hub URL; it cannot be supplied by a model tool call.";
+        description = "Fixed Ops hub URL; it cannot be supplied by a model tool call.";
       };
 
       tokenFile = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = null;
-        description = "Dedicated MaxOps credential for Kennethbot.";
+        description = "Dedicated Ops credential for gaoji.";
       };
 
       timeoutSeconds = lib.mkOption {
         type = lib.types.ints.between 1 30;
         default = 15;
-        description = "Total budget for catalog validation and one MaxOps query.";
+        description = "Total budget for catalog validation and one Ops query.";
       };
     };
 
@@ -274,15 +279,15 @@ in {
     assertions = [
       {
         assertion = cfg.apiTokenFile != null;
-        message = "services.kennethbot-cluster-control.apiTokenFile is required";
+        message = "services.gaoji-cluster-control.apiTokenFile is required";
       }
       {
         assertion = cfg.environmentFile != null;
-        message = "services.kennethbot-cluster-control.environmentFile is required for PostgreSQL";
+        message = "services.gaoji-cluster-control.environmentFile is required for PostgreSQL";
       }
       {
-        assertion = !cfg.maxops.enable || (cfg.maxops.baseUrl != "" && cfg.maxops.tokenFile != null);
-        message = "MaxOps baseUrl and tokenFile are required when the adapter is enabled";
+        assertion = !cfg.ops.enable || (cfg.ops.baseUrl != "" && cfg.ops.tokenFile != null);
+        message = "Ops baseUrl and tokenFile are required when the adapter is enabled";
       }
       {
         assertion = cfg.listenAddress == "127.0.0.1" || cfg.listenAddress == "::1" || cfg.openFirewall;
@@ -290,41 +295,41 @@ in {
       }
       {
         assertion = builtins.length inventoryHostIds == builtins.length (lib.unique inventoryHostIds);
-        message = "Kennethbot cluster inventory contains duplicate host_id values";
+        message = "gaoji cluster inventory contains duplicate host_id values";
       }
       {
         assertion = lib.all (host: builtins.match "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$" host.host_id != null) cfg.inventory;
-        message = "Kennethbot cluster inventory contains an invalid host_id";
+        message = "gaoji cluster inventory contains an invalid host_id";
       }
       {
         assertion = lib.all (host: lib.all (unit: builtins.match "^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,119}\\.service$" unit != null) host.readable_units) cfg.inventory;
-        message = "Kennethbot cluster inventory contains an invalid readable systemd unit";
+        message = "gaoji cluster inventory contains an invalid readable systemd unit";
       }
       {
         assertion = lib.all (host: lib.all (unit: builtins.elem unit host.readable_units) host.operable_units) cfg.inventory;
-        message = "Kennethbot operable units must also be readable units";
+        message = "gaoji operable units must also be readable units";
       }
       {
         assertion = lib.all (worker: builtins.elem worker.hostId inventoryHostIds) cfg.workers;
-        message = "Every Kennethbot worker host must exist in inventory";
+        message = "Every gaoji worker host must exist in inventory";
       }
       {
         assertion = builtins.length workerIds == builtins.length (lib.unique workerIds);
-        message = "Kennethbot worker identities must be unique";
+        message = "gaoji worker identities must be unique";
       }
       {
         assertion = lib.all (worker: builtins.match "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$" worker.workerId != null) cfg.workers;
-        message = "Kennethbot worker identity is invalid";
+        message = "gaoji worker identity is invalid";
       }
       {
         assertion = lib.all (worker:
           lib.any (host: host.host_id == worker.hostId && host.compute) cfg.inventory
         ) cfg.workers;
-        message = "Every Kennethbot worker host must be compute-enabled in inventory";
+        message = "Every gaoji worker host must be compute-enabled in inventory";
       }
       {
         assertion = builtins.length diagnosticTargetIds == builtins.length (lib.unique diagnosticTargetIds);
-        message = "Kennethbot diagnostics contains duplicate target_id values";
+        message = "gaoji diagnostics contains duplicate target_id values";
       }
       {
         assertion = lib.all (target:
@@ -349,11 +354,11 @@ in {
       }
       {
         assertion = builtins.length deploymentRepositoryIds == builtins.length (lib.unique deploymentRepositoryIds);
-        message = "Kennethbot deployment repository identities must be unique";
+        message = "gaoji deployment repository identities must be unique";
       }
       {
         assertion = builtins.length deployerIds == builtins.length (lib.unique deployerIds);
-        message = "Kennethbot deployer identities must be unique";
+        message = "gaoji deployer identities must be unique";
       }
       {
         assertion = lib.all (repository:
@@ -362,7 +367,7 @@ in {
           && repository.targets != []
           && lib.all (target: builtins.elem target.hostId inventoryHostIds) repository.targets
         ) cfg.deployments.repositories;
-        message = "Kennethbot deployment repositories require valid IDs, changes and inventory targets";
+        message = "gaoji deployment repositories require valid IDs, changes and inventory targets";
       }
       {
         assertion = lib.all (deployer:
@@ -370,14 +375,14 @@ in {
           && deployer.repositoryIds != []
           && lib.all (repositoryId: builtins.elem repositoryId deploymentRepositoryIds) deployer.repositoryIds
         ) cfg.deployments.deployers;
-        message = "Kennethbot deployers may only reference configured repositories";
+        message = "gaoji deployers may only reference configured repositories";
       }
     ];
 
     networking.firewall.allowedTCPPorts = lib.optionals cfg.openFirewall [cfg.port];
 
-    systemd.services.kennethbot-cluster-control = {
-      description = "Kennethbot authenticated cluster control service";
+    systemd.services.gaoji-cluster-control = {
+      description = "gaoji authenticated cluster control service";
       wantedBy = ["multi-user.target"];
       wants = ["network-online.target"];
       after = ["network-online.target"];
@@ -386,10 +391,10 @@ in {
         KC_PORT = toString cfg.port;
         KC_LOCAL_HOST_ID = cfg.localHostId;
         KC_API_TOKEN_FILE = "%d/api-token";
-        KC_MAXOPS_ENABLED = if cfg.maxops.enable then "true" else "false";
-        KC_MAXOPS_BASE_URL = cfg.maxops.baseUrl;
-        KC_MAXOPS_TOKEN_FILE = if cfg.maxops.enable then "%d/maxops-token" else "";
-        KC_MAXOPS_TIMEOUT_SECONDS = toString cfg.maxops.timeoutSeconds;
+        KC_OPS_ENABLED = if cfg.ops.enable then "true" else "false";
+        KC_OPS_BASE_URL = cfg.ops.baseUrl;
+        KC_OPS_TOKEN_FILE = if cfg.ops.enable then "%d/ops-token" else "";
+        KC_OPS_TIMEOUT_SECONDS = toString cfg.ops.timeoutSeconds;
         KC_CACHE_SECONDS = toString cfg.cacheSeconds;
         KC_INVENTORY_JSON = builtins.toJSON cfg.inventory;
         KC_DIAGNOSTIC_TARGETS_JSON = builtins.toJSON cfg.diagnostics.targets;
@@ -418,24 +423,24 @@ in {
           token_file = "%d/deployer-${deployer.deployerId}";
           repository_ids = deployer.repositoryIds;
         }) cfg.deployments.deployers);
-        KC_ARTIFACT_DIR = "/var/lib/kennethbot-cluster-control/artifacts";
+        KC_ARTIFACT_DIR = "/var/lib/${cfg.stateDirectory}/artifacts";
         PYTHONUNBUFFERED = "1";
       } // cfg.environment;
       serviceConfig =
         {
           Type = "simple";
           DynamicUser = true;
-          StateDirectory = "kennethbot-cluster-control";
-          WorkingDirectory = "${cfg.package}/share/qq-deepseek-bot";
+          StateDirectory = cfg.stateDirectory;
+          WorkingDirectory = "${cfg.package}/share/gaoji";
           LoadCredential =
             lib.optional (cfg.apiTokenFile != null) "api-token:${cfg.apiTokenFile}"
-            ++ lib.optional (cfg.maxops.enable && cfg.maxops.tokenFile != null) "maxops-token:${cfg.maxops.tokenFile}"
+            ++ lib.optional (cfg.ops.enable && cfg.ops.tokenFile != null) "ops-token:${cfg.ops.tokenFile}"
             ++ map (worker: "worker-${worker.workerId}:${worker.tokenFile}") cfg.workers
             ++ map (deployer: "deployer-${deployer.deployerId}:${deployer.tokenFile}") cfg.deployments.deployers;
           # The bot starts after this service, so the control plane owns the
           # idempotent schema upgrade and avoids a startup dependency cycle.
-          ExecStartPre = "${cfg.package}/bin/qq-deepseek-bot-db upgrade";
-          ExecStart = "${cfg.package}/bin/kennethbot-cluster-control";
+          ExecStartPre = "${cfg.package}/bin/gaoji-db upgrade";
+          ExecStart = "${cfg.package}/bin/gaoji-cluster-control";
           Restart = "on-failure";
           RestartSec = 5;
           UMask = "0077";

@@ -348,10 +348,10 @@ class ClusterControlSettings:
     port: int
     local_host_id: str
     api_token_file: str
-    maxops_enabled: bool
-    maxops_base_url: str
-    maxops_token_file: str
-    maxops_timeout_seconds: int
+    ops_enabled: bool
+    ops_base_url: str
+    ops_token_file: str
+    ops_timeout_seconds: int
     cache_seconds: int
     inventory: tuple[dict[str, object], ...]
     diagnostic_targets: tuple[dict[str, str], ...]
@@ -380,12 +380,12 @@ class ClusterControlSettings:
             port=_int("KC_PORT", 8091, 1, 65535),
             local_host_id=local_host_id,
             api_token_file=os.getenv("KC_API_TOKEN_FILE", "").strip(),
-            maxops_enabled=_bool("KC_MAXOPS_ENABLED", False),
-            maxops_base_url=_validate_url(
-                os.getenv("KC_MAXOPS_BASE_URL", ""), "KC_MAXOPS_BASE_URL"
+            ops_enabled=_bool("KC_OPS_ENABLED", False),
+            ops_base_url=_validate_url(
+                os.getenv("KC_OPS_BASE_URL", ""), "KC_OPS_BASE_URL"
             ),
-            maxops_token_file=os.getenv("KC_MAXOPS_TOKEN_FILE", "").strip(),
-            maxops_timeout_seconds=_int("KC_MAXOPS_TIMEOUT_SECONDS", 15, 1, 30),
+            ops_token_file=os.getenv("KC_OPS_TOKEN_FILE", "").strip(),
+            ops_timeout_seconds=_int("KC_OPS_TIMEOUT_SECONDS", 15, 1, 30),
             cache_seconds=_int("KC_CACHE_SECONDS", 20, 1, 300),
             inventory=_inventory(os.getenv("KC_INVENTORY_JSON", "")),
             diagnostic_targets=_diagnostic_targets(
@@ -401,7 +401,7 @@ class ClusterControlSettings:
                 os.getenv("KC_DEPLOYER_IDENTITIES_JSON", "")
             ),
             artifact_dir=os.getenv(
-                "KC_ARTIFACT_DIR", "/var/lib/kennethbot-cluster-control/artifacts"
+                "KC_ARTIFACT_DIR", "/var/lib/gaoji-cluster-control/artifacts"
             ).strip(),
             postgres_dsn=os.getenv("AI_POSTGRES_DSN", "").strip(),
             postgres_schema=schema,
@@ -417,12 +417,12 @@ class ClusterControlSettings:
             raise ValueError("KC_API_TOKEN_FILE is required")
         if not self.postgres_dsn:
             raise ValueError("AI_POSTGRES_DSN is required")
-        if self.maxops_enabled and (
-            not self.maxops_base_url or not self.maxops_token_file
+        if self.ops_enabled and (
+            not self.ops_base_url or not self.ops_token_file
         ):
             raise ValueError(
-                "KC_MAXOPS_BASE_URL and KC_MAXOPS_TOKEN_FILE are required "
-                "when MaxOps is enabled"
+                "KC_OPS_BASE_URL and KC_OPS_TOKEN_FILE are required "
+                "when Ops is enabled"
             )
         if self.inventory and self.local_host_id not in {
             str(item.get("host_id") or "") for item in self.inventory

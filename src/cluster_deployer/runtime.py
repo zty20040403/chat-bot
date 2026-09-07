@@ -11,7 +11,7 @@ from .client import DeploymentControlClient
 from .config import DeployerSettings
 
 
-logger = logging.getLogger("kennethbot.cluster_deployer")
+logger = logging.getLogger("gaoji.cluster_deployer")
 MAX_OUTPUT_BYTES = 32_000
 
 

@@ -38,13 +38,13 @@ def repository() -> dict[str, object]:
         "url": "https://github.com/example/nix-config.git",
         "default_branch": "main",
         "resource_version": 3,
-        "allowed_changes": ["kennethbot", "system"],
+        "allowed_changes": ["gaoji", "system"],
         "targets": [
             {
                 "host_id": "h610",
                 "flake_host": "h610",
                 "ssh_target": "kenneth@h610",
-                "verification_units": ["qq-deepseek-bot.service"],
+                "verification_units": ["gaoji.service"],
                 "use_remote_sudo": True,
                 "resource_version": 4,
             },
@@ -97,7 +97,7 @@ class DeploymentContractTests(unittest.TestCase):
                 "source_revision": REVISION,
                 "expected_remote_revision": REMOTE_REVISION,
                 "target_hosts": ["h610", "tank"],
-                "requested_changes": ["kennethbot"],
+                "requested_changes": ["gaoji"],
                 "strategy": "canary",
                 "canary_host_id": "tank",
                 "failure_policy": "pause",
@@ -134,7 +134,7 @@ class DeploymentContractTests(unittest.TestCase):
             "repository_id": "nix_config",
             "source_revision": REVISION,
             "target_hosts": ["h610"],
-            "requested_changes": ["kennethbot"],
+            "requested_changes": ["gaoji"],
             "idempotency_key": "deploy-policy-0001",
         }
         with self.assertRaises(PermissionError):

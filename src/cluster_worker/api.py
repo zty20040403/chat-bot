@@ -22,7 +22,7 @@ def create_app(worker: ClusterWorker) -> FastAPI:
             await asyncio.gather(task, return_exceptions=True)
 
     app = FastAPI(
-        title="Kennethbot Worker Preview",
+        title="gaoji Worker Preview",
         version="1",
         docs_url=None,
         redoc_url=None,

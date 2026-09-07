@@ -73,13 +73,13 @@ class ClusterContractTests(unittest.TestCase):
         proposal = OperationProposal.parse(
             {
                 "host_id": "h610",
-                "resource_ref": "qq-deepseek-bot.service",
+                "resource_ref": "gaoji.service",
                 "operation": "service.restart",
                 "idempotency_key": "restart-0001",
             },
             now=100,
         )
-        self.assertEqual(proposal.resource_ref, "qq-deepseek-bot.service")
+        self.assertEqual(proposal.resource_ref, "gaoji.service")
         with self.assertRaises(ValueError):
             OperationProposal.parse(
                 {
@@ -203,7 +203,7 @@ class SignedActorApiTests(unittest.IsolatedAsyncioTestCase):
                 result = await client.prepare_operation(
                     {
                         "host_id": "h610",
-                        "resource_ref": "qq-deepseek-bot.service",
+                        "resource_ref": "gaoji.service",
                         "operation": "service.restart",
                         "idempotency_key": "restart-0001",
                     },
@@ -229,7 +229,7 @@ class SignedActorApiTests(unittest.IsolatedAsyncioTestCase):
                     headers={"Authorization": f"Bearer {'y' * 48}"},
                     json={
                         "host_id": "h610",
-                        "resource_ref": "qq-deepseek-bot.service",
+                        "resource_ref": "gaoji.service",
                         "operation": "service.restart",
                         "idempotency_key": "restart-0001",
                     },
@@ -262,7 +262,7 @@ class WorkerSafetyTests(unittest.TestCase):
             worker = ClusterWorker(self._settings(root))
             archive = root / "site.zip"
             with zipfile.ZipFile(archive, "w") as output:
-                output.writestr("index.html", "<h1>Kennethbot</h1>")
+                output.writestr("index.html", "<h1>gaoji</h1>")
                 output.writestr("assets/app.css", "body{}")
             payload = {
                 "preview_id": "preview_" + "a" * 32,
@@ -275,6 +275,11 @@ class WorkerSafetyTests(unittest.TestCase):
             self.assertTrue(second["reconciled"])
             self.assertIsNotNone(worker.preview_file(payload["preview_id"], "index.html"))
             self.assertIsNone(worker.preview_file(payload["preview_id"], "../../token"))
+            root = worker.previews / payload["preview_id"]
+            (root / ".gaoji-preview.json").rename(root / ".kennethbot-preview.json")
+            self.assertIsNotNone(worker.preview_file(payload["preview_id"], "index.html"))
+            self.assertIsNone(worker.preview_file(payload["preview_id"], ".kennethbot-preview.json"))
+            self.assertTrue(worker._publish_preview(archive, payload)["reconciled"])
             asyncio.run(worker.client.close())
 
     def test_preview_rejects_archive_path_traversal(self) -> None:

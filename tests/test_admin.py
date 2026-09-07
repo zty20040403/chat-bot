@@ -425,7 +425,7 @@ class FleetClient:
         }
 
     async def backends(self):
-        return {"items": [{"backend_name": "maxops", "state": "online"}]}
+        return {"items": [{"backend_name": "ops", "state": "online"}]}
 
     async def capabilities(self):
         return {"capabilities": [{"name": "fleet.read", "available": True}]}
@@ -540,7 +540,7 @@ class AdminTests(unittest.TestCase):
                         "items": [{"media_id": 1, "summary": "测试图片"}],
                         "jobs": [],
                         "vision_profile": "gpt-5.6-luna",
-                        "root": "/var/lib/qq-deepseek-bot/media",
+                        "root": "/var/lib/gaoji/media",
                     }
                 ),
                 source_store=SimpleNamespace(
@@ -715,7 +715,7 @@ class AdminTests(unittest.TestCase):
             alerts,
         ) = asyncio.run(run())
         self.assertEqual(page.status_code, 200)
-        self.assertIn("window.__KENNETHBOT_ADMIN__", page.text)
+        self.assertIn("window.__GAOJI_ADMIN__", page.text)
         self.assertIn('"apiBase":"/bot-admin/api/v1"', page.text)
         self.assertIn('id="root"', page.text)
         self.assertEqual(favicon.status_code, 200)
@@ -724,7 +724,7 @@ class AdminTests(unittest.TestCase):
         self.assertTrue(favicon.headers["content-type"].startswith("image/svg+xml"))
         self.assertIn("<svg", favicon.text)
         self.assertIn("#22c55e", favicon.text)
-        self.assertIn("Kennethbot", page.text)
+        self.assertIn("gaoji", page.text)
         self.assertEqual(denied.status_code, 401)
         self.assertEqual(allowed.status_code, 200)
         self.assertEqual(v1_allowed.status_code, 200)
@@ -740,7 +740,7 @@ class AdminTests(unittest.TestCase):
         self.assertEqual(allowed.json()["models"]["default"], "main")
         self.assertTrue(allowed.json()["models"]["profiles"][0]["configured"])
         self.assertNotIn("never-return-this-secret", allowed.text)
-        self.assertIn("Kennethbot Control", page.text)
+        self.assertIn("gaoji Control", page.text)
         self.assertIn('/bot-admin/favicon.svg?v=test', page.text)
         self.assertNotIn("unpkg.com", page.text)
         self.assertEqual(sandboxes.json()["active_commands"], 1)

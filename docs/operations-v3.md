@@ -6,7 +6,7 @@
 ## 1. 安装新增依赖
 
 ```bash
-cd /path/to/chat-bot
+cd /path/to/gaojibot
 source .venv/bin/activate
 pip install -r requirements.txt
 playwright install chromium
@@ -82,7 +82,7 @@ profile 若声明不支持工具，机器人仍能普通回答，但不会给该
 
 ```text
 AI_MEDIA_ENABLED=true
-AI_MEDIA_ROOT=/var/lib/qq-deepseek-bot/media
+AI_MEDIA_ROOT=/var/lib/gaoji/media
 AI_VISION_PROFILE=gpt-5.6-luna
 AI_VISION_AUTO_DESCRIBE=false
 AI_MEDIA_MAX_SOURCE_MB=100

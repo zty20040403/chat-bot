@@ -587,7 +587,7 @@ class ToolExecutor(HandlerService):
         except (OSError, RuntimeError, ValueError, sqlite3.Error, DatabaseError) as exc:
             self.context.logger.warning(f"Group reference resolution failed softly: {exc}")
         with telemetry.stage("context.route"):
-            # MAX-style context keeps the live conversation chronological.  The
+            # Keep the live conversation chronological. The
             # lightweight route is retained for memory budgets and observability,
             # but it must never pre-select or remove recent group messages.
             recall_decision = rule_recall_route(
@@ -1682,7 +1682,7 @@ class ToolExecutor(HandlerService):
                                     "gpu_slots": int(arguments.get("gpu_slots") or 0),
                                     "priority": str(arguments.get("priority") or "normal"),
                                     "borrow_required": arguments.get("borrow_required", False),
-                                    "checkpoint_format": "kennethbot-result-v1",
+                                    "checkpoint_format": "gaoji-result-v1",
                                     "executor_version": "worker-v2",
                                     "expected_cost_microunits": expected_cost,
                                     "max_cost_microunits": max_cost,
@@ -2294,7 +2294,7 @@ class ToolExecutor(HandlerService):
                     "参数失败只说明本次参数错误，不推翻另一项成功观测。"
                     "问千问是否启动或能否使用时调用 model_status，它读取实际模型探测"
                     "和请求成败；/models 在线、生成回复成功、宿主机在线是三项不同事实。"
-                    "返回数据会标明来源、时间和 fresh/stale/unavailable。MaxOps 或控制"
+                    "返回数据会标明来源、时间和 fresh/stale/unavailable。Ops 或控制"
                     "服务不可用不等于所有机器已关机。"
                     "遇到模型连不上、控制台 502、QQ 不回复、回复变慢、主机失联或"
                     "存储告警时，优先调用 diagnose_incident 取得一组可审计证据；"

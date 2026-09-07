@@ -74,7 +74,7 @@ class ObservabilityTests(unittest.TestCase):
         self.assertEqual(snapshot["outbox"]["pending"], 2)
 
     def test_trace_id_is_attached_to_archived_model_trace(self) -> None:
-        telemetry.configure("kennethbot-test", service_version="test")
+        telemetry.configure("gaoji-test", service_version="test")
         with telemetry.span("test.turn") as trace_id:
             self.assertEqual(current_trace_id(), trace_id)
             payload = DeepSeekTrace(profile="test").to_payload()
@@ -86,7 +86,7 @@ class ObservabilityTests(unittest.TestCase):
         register_metrics_endpoint(
             app,
             path="/metrics",
-            service_name="kennethbot-test",
+            service_name="gaoji-test",
             service_version="test",
             running_tasks=EmptyTasks(),
             delivery_store=EmptyDeliveries(),
@@ -104,9 +104,9 @@ class ObservabilityTests(unittest.TestCase):
 
         response = asyncio.run(run())
         self.assertEqual(response.status_code, 200)
-        self.assertIn("kennethbot_runtime_tasks 0.0", response.text)
+        self.assertIn("gaoji_runtime_tasks 0.0", response.text)
         self.assertIn(
-            'kennethbot_outbox_deliveries{status="pending"} 2.0',
+            'gaoji_outbox_deliveries{status="pending"} 2.0',
             response.text,
         )
 

@@ -119,7 +119,7 @@ def main():
         if not args.profile or args.limit < 1:
             parser.error("--live requires --profile and a positive --limit")
         cases = cases[:args.limit]
-        with tempfile.TemporaryDirectory(prefix="kennethbot-context-eval-") as temporary:
+        with tempfile.TemporaryDirectory(prefix="gaoji-context-eval-") as temporary:
             os.chdir(temporary)
             os.environ.update(AI_POSTGRES_DSN="", AI_ALLOW_LEGACY_SQLITE="true", AI_STATE_DIR=temporary, AI_CACHE_DIR=temporary)
             predictions = asyncio.run(live_predictions(cases, args.profile, args.embeddings))

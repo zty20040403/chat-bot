@@ -42,7 +42,7 @@ import {
   UsageView,
 } from './views'
 
-const runtime = window.__KENNETHBOT_ADMIN__ ?? {
+const runtime = window.__GAOJI_ADMIN__ ?? {
   prefix: '/bot-admin',
   apiBase: '/bot-admin/api/v1',
   version: 'dev',
@@ -63,7 +63,7 @@ const NAVIGATION: Array<{ id: ViewId; label: string; description: string; group:
   { id: 'groups', label: '模型与群友', description: '配置群开关、统一模型和个人模型', group: '配置', icon: Users },
   { id: 'tools', label: '工具权限', description: '控制 Agent 可见工具与执行策略', group: '配置', icon: Wrench },
   { id: 'databases', label: '数据库', description: '主备节点、连接池与复制状态', group: '基础设施', icon: Database },
-  { id: 'fleet', label: '服务器集群', description: 'MaxOps 只读状态、能力与观测证据', group: '基础设施', icon: ServerCog },
+  { id: 'fleet', label: '服务器集群', description: 'Ops 只读状态、能力与观测证据', group: '基础设施', icon: ServerCog },
   { id: 'audit', label: '审计记录', description: '查询所有控制面修改及资源版本', group: '基础设施', icon: FileClock },
   { id: 'help', label: '使用说明', description: '每个功能的用途、操作方法和影响', group: '帮助', icon: BookOpen },
 ]
@@ -138,7 +138,7 @@ export function App() {
       <aside className={`sidebar ${sidebarOpen ? 'open' : ''}`}>
         <div className="brand">
           <span className="brand-icon"><Bot size={21} /></span>
-          <div><strong>QQ Bot</strong><span>Control Center</span></div>
+          <div><strong>gaoji</strong><span>Control Center</span></div>
           <button className="mobile-close" title="关闭导航" onClick={() => setSidebarOpen(false)}><PanelLeftClose size={18} /></button>
         </div>
         <button className="quick-refresh" type="button" onClick={() => void plane.refreshAll()}><RefreshCw className={plane.loading.size ? 'spin' : ''} size={16} /><span>刷新数据</span></button>
@@ -196,7 +196,7 @@ function TokenGate({ onSubmit }: { onSubmit: (token: string) => void }) {
     <main className="token-gate">
       <form onSubmit={(event) => { event.preventDefault(); if (value.trim()) onSubmit(value) }}>
         <div className="token-mark"><KeyRound size={22} /></div>
-        <h1>Kennethbot Control</h1>
+        <h1>gaoji Control</h1>
         <p>输入管理 Token 以连接内网控制面。</p>
         <label><span>管理 Token</span><input type="password" autoFocus autoComplete="current-password" value={value} onChange={(event) => setValue(event.target.value)} /></label>
         <button className="primary-button" type="submit" disabled={!value.trim()}>进入控制台</button>

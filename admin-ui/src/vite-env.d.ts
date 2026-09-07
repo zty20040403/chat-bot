@@ -1,6 +1,6 @@
 /// <reference types="vite/client" />
 
-interface KennethbotAdminRuntime {
+interface GaojiAdminRuntime {
   prefix: string
   apiBase: string
   version: string
@@ -8,5 +8,5 @@ interface KennethbotAdminRuntime {
 }
 
 interface Window {
-  __KENNETHBOT_ADMIN__: KennethbotAdminRuntime
+  __GAOJI_ADMIN__: GaojiAdminRuntime
 }

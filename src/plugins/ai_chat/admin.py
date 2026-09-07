@@ -2278,7 +2278,7 @@ async def _prometheus_health(base_url: str) -> dict[str, object]:
         async with httpx.AsyncClient(timeout=3.0) as client:
             response = await client.get(
                 f"{base_url.rstrip('/')}/api/v1/query",
-                params={"query": 'up{job="kennethbot"}'},
+                params={"query": 'up{job="gaoji"}'},
             )
             response.raise_for_status()
             payload = response.json()

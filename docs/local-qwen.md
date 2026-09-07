@@ -79,12 +79,12 @@ inputs.qq-bot.nixosModules.qwen-control
 WSL 配置：
 
 ```nix
-services.kennethbot-qwen-control = {
+services.gaoji-qwen-control = {
   enable = true;
   listenAddress = "100.64.0.14";
   port = 8001;
   allowedPeers = [ "100.64.0.3" ]; # h610，部署前确认地址
-  tokenFile = "/var/lib/kennethbot-secrets/qwen-control-token";
+  tokenFile = "/var/lib/gaoji-secrets/qwen-control-token";
 };
 ```
 

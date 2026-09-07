@@ -15,7 +15,7 @@ from .capabilities import (
     operation_compatible,
 )
 from .contracts import FleetError, FleetQueryResult, FleetStatus
-from .adapters.maxops import MaxOpsClient, MaxOpsError, MaxOpsOperation
+from .adapters.ops import OpsClient, OpsError, OpsOperation
 from .storage import FleetProjectionStore
 
 
@@ -31,13 +31,13 @@ class _CacheEntry:
 class FleetControlService:
     def __init__(
         self,
-        maxops: MaxOpsClient | None,
+        ops: OpsClient | None,
         *,
         store: FleetProjectionStore | None = None,
         inventory: tuple[dict[str, object], ...] = (),
         cache_seconds: int = 20,
     ) -> None:
-        self.maxops = maxops
+        self.ops = ops
         self.store = store
         self.inventory = inventory
         self._inventory_by_host = {
@@ -51,13 +51,13 @@ class FleetControlService:
         self._last_success_at: int | None = None
         self.metrics_registry = CollectorRegistry(auto_describe=True)
         self._query_counter = Counter(
-            "kennethbot_cluster_queries_total",
+            "gaoji_cluster_queries_total",
             "Read-only cluster queries handled by the control service.",
             ("capability", "status", "source"),
             registry=self.metrics_registry,
         )
         self._query_duration = Histogram(
-            "kennethbot_cluster_query_duration_seconds",
+            "gaoji_cluster_query_duration_seconds",
             "End-to-end latency of read-only cluster queries.",
             ("capability",),
             registry=self.metrics_registry,
@@ -65,8 +65,8 @@ class FleetControlService:
         )
 
     async def close(self) -> None:
-        if self.maxops is not None:
-            await self.maxops.close()
+        if self.ops is not None:
+            await self.ops.close()
         if self.store is not None:
             await asyncio.to_thread(self.store.close)
 
@@ -120,7 +120,7 @@ class FleetControlService:
                 error_code=error_code,
             )
         except Exception as exc:
-            logger.warning("Could not persist MaxOps backend state: %s", exc)
+            logger.warning("Could not persist Ops backend state: %s", exc)
 
     async def _record_observation(
         self,
@@ -170,7 +170,7 @@ class FleetControlService:
         result = FleetQueryResult(
             operation=operation,
             status=FleetStatus.FRESH,
-            source_backend="maxops",
+            source_backend="ops",
             received_at=int(stored["received_at"]),
             observed_at=(
                 int(stored["observed_at"])
@@ -191,9 +191,9 @@ class FleetControlService:
         )
         return _CacheEntry(result=result, stored_at=0.0)
 
-    async def operations(self) -> dict[str, MaxOpsOperation]:
+    async def operations(self) -> dict[str, OpsOperation]:
         checked_at = int(time.time())
-        if self.maxops is None:
+        if self.ops is None:
             await self._record_backend(
                 state="disabled",
                 catalog_version=0,
@@ -202,11 +202,11 @@ class FleetControlService:
             )
             return {}
         try:
-            catalog = await self.maxops.operations()
-        except MaxOpsError as exc:
+            catalog = await self.ops.operations()
+        except OpsError as exc:
             await self._record_backend(
                 state="unavailable",
-                catalog_version=self._maxops_catalog_version(),
+                catalog_version=self._ops_catalog_version(),
                 operations=[],
                 checked_at=checked_at,
                 error_code=exc.code,
@@ -217,23 +217,23 @@ class FleetControlService:
         self._last_success_at = checked_at
         await self._record_backend(
             state="online",
-            catalog_version=self._maxops_catalog_version(),
+            catalog_version=self._ops_catalog_version(),
             operations=sorted(names),
             checked_at=checked_at,
         )
         return operations
 
-    def _maxops_catalog_version(self) -> int:
-        if self.maxops is None:
+    def _ops_catalog_version(self) -> int:
+        if self.ops is None:
             return 0
-        value = getattr(self.maxops, "catalog_version", None)
+        value = getattr(self.ops, "catalog_version", None)
         return value if isinstance(value, int) and not isinstance(value, bool) else 1
 
     async def capabilities(self) -> dict[str, Any]:
         try:
             operations = await self.operations()
             error = None
-        except MaxOpsError as exc:
+        except OpsError as exc:
             operations = {}
             error = {
                 "code": exc.code,
@@ -241,8 +241,8 @@ class FleetControlService:
                 "retryable": exc.retryable,
             }
         return {
-            "backend": "maxops",
-            "catalog_version": self._maxops_catalog_version(),
+            "backend": "ops",
+            "catalog_version": self._ops_catalog_version(),
             "checked_at": int(time.time()),
             "capabilities": capability_manifest(operations),
             "error": error,
@@ -325,44 +325,44 @@ class FleetControlService:
         payload: Any,
     ) -> dict[str, Any]:
         if not isinstance(payload, dict):
-            raise MaxOpsError(
+            raise OpsError(
                 "invalid_response",
-                "MaxOps returned an invalid operation result",
+                "Ops returned an invalid operation result",
             )
         if operation in {"fleet.overview", "units.failed"}:
             if not isinstance(payload.get("hosts"), list):
-                raise MaxOpsError(
+                raise OpsError(
                     "invalid_response",
-                    "MaxOps returned an invalid host collection",
+                    "Ops returned an invalid host collection",
                 )
         elif operation == "alerts.active":
             if not isinstance(payload.get("alerts"), list):
-                raise MaxOpsError(
+                raise OpsError(
                     "invalid_response",
-                    "MaxOps returned an invalid alert collection",
+                    "Ops returned an invalid alert collection",
                 )
         else:
             expected_host = str(params.get("host") or "")
             if payload.get("host") != expected_host:
-                raise MaxOpsError(
+                raise OpsError(
                     "invalid_response",
-                    "MaxOps returned data for a different host",
+                    "Ops returned data for a different host",
                 )
             if operation == "units.status":
                 unit = payload.get("unit")
                 if not isinstance(unit, dict) or unit.get("unit") != params.get("unit"):
-                    raise MaxOpsError(
+                    raise OpsError(
                         "invalid_response",
-                        "MaxOps returned data for a different service",
+                        "Ops returned data for a different service",
                     )
             elif operation == "units.logs":
                 if (
                     payload.get("unit") != params.get("unit")
                     or not isinstance(payload.get("entries"), list)
                 ):
-                    raise MaxOpsError(
+                    raise OpsError(
                         "invalid_response",
-                        "MaxOps returned invalid service logs",
+                        "Ops returned invalid service logs",
                     )
         return self._scope_payload(operation, payload)
 
@@ -377,7 +377,7 @@ class FleetControlService:
             result = FleetQueryResult(
                 operation=capability,
                 status=FleetStatus.UNSUPPORTED,
-                source_backend="kennethbot",
+                source_backend="gaoji",
                 received_at=now,
                 error=FleetError("unsupported", "Fleet capability is unavailable"),
             )
@@ -388,19 +388,19 @@ class FleetControlService:
             result = FleetQueryResult(
                 operation=binding.operation,
                 status=FleetStatus.FORBIDDEN,
-                source_backend="kennethbot",
+                source_backend="gaoji",
                 received_at=now,
                 error=target_error,
             )
             self._record_metrics(capability, result, source="local")
             return result
-        if self.maxops is None:
+        if self.ops is None:
             result = FleetQueryResult(
                 operation=binding.operation,
                 status=FleetStatus.UNAVAILABLE,
-                source_backend="maxops",
+                source_backend="ops",
                 received_at=now,
-                error=FleetError("not_configured", "MaxOps is not configured"),
+                error=FleetError("not_configured", "Ops is not configured"),
             )
             self._record_metrics(capability, result, source="local")
             return result
@@ -472,29 +472,29 @@ class FleetControlService:
         params: dict[str, Any],
         cached: _CacheEntry | None,
     ) -> FleetQueryResult:
-        assert self.maxops is not None
+        assert self.ops is not None
         received_at = int(time.time())
         try:
             catalog = await self.operations()
             upstream_operation = catalog.get(operation)
             if upstream_operation is None:
-                raise MaxOpsError(
+                raise OpsError(
                     "unsupported",
-                    "MaxOps operation is unavailable or not read-only",
+                    "Ops operation is unavailable or not read-only",
                 )
             if not operation_compatible(upstream_operation):
-                raise MaxOpsError(
+                raise OpsError(
                     "incompatible_catalog",
-                    "MaxOps operation schema is incompatible",
+                    "Ops operation schema is incompatible",
                 )
-            response = await self.maxops.execute(operation, params)
+            response = await self.ops.execute(operation, params)
             response_data = self._validated_payload(operation, params, response.data)
-        except MaxOpsError as exc:
+        except OpsError as exc:
             if cached is not None and exc.retryable:
                 return FleetQueryResult(
                     operation=operation,
                     status=FleetStatus.STALE,
-                    source_backend="maxops",
+                    source_backend="ops",
                     received_at=received_at,
                     observed_at=cached.result.observed_at,
                     expires_at=cached.result.expires_at,
@@ -513,7 +513,7 @@ class FleetControlService:
             return FleetQueryResult(
                 operation=operation,
                 status=status,
-                source_backend="maxops",
+                source_backend="ops",
                 received_at=received_at,
                 error=FleetError(exc.code, str(exc), exc.retryable),
             )
@@ -521,7 +521,7 @@ class FleetControlService:
         return FleetQueryResult(
             operation=operation,
             status=FleetStatus.FRESH,
-            source_backend="maxops",
+            source_backend="ops",
             received_at=received_at,
             observed_at=self._observed_at(response.data),
             expires_at=received_at + self.cache_seconds,
@@ -582,9 +582,9 @@ class FleetControlService:
     def backend_snapshot(self) -> dict[str, Any]:
         stored = self.store.backend_snapshot() if self.store is not None else None
         return stored or {
-            "backend_name": "maxops",
-            "state": "disabled" if self.maxops is None else "unknown",
-            "catalog_version": self._maxops_catalog_version(),
+            "backend_name": "ops",
+            "state": "disabled" if self.ops is None else "unknown",
+            "catalog_version": self._ops_catalog_version(),
             "operations": [],
             "error_code": "",
             "last_success_at": self._last_success_at,

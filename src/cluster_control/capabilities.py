@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .adapters.maxops import MaxOpsOperation
+from .adapters.ops import OpsOperation
 
 
 @dataclass(frozen=True)
@@ -48,7 +48,7 @@ _EXPECTED_PARAMS: dict[str, tuple[dict[str, str], set[str]]] = {
 }
 
 
-def operation_compatible(operation: MaxOpsOperation) -> bool:
+def operation_compatible(operation: OpsOperation) -> bool:
     expected_properties, expected_required = _EXPECTED_PARAMS.get(
         operation.name, ({}, set())
     )
@@ -69,7 +69,7 @@ def operation_compatible(operation: MaxOpsOperation) -> bool:
 
 
 def capability_manifest(
-    operations: dict[str, MaxOpsOperation],
+    operations: dict[str, OpsOperation],
 ) -> list[dict[str, Any]]:
     manifest: list[dict[str, Any]] = []
     for binding in BINDINGS:
@@ -77,7 +77,7 @@ def capability_manifest(
         compatible = operation is not None and operation_compatible(operation)
         manifest.append({
             "name": binding.name,
-            "backend": "maxops",
+            "backend": "ops",
             "operation": binding.operation,
             "available": compatible,
             "read_only": True,

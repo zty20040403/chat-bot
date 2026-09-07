@@ -70,7 +70,7 @@ class ClusterExecutionService:
                 "compute_hosts": compute_hosts,
                 "job_kinds": sorted(WORKER_JOB_KINDS),
                 "borrow_scheduling": self.resource_policies is not None,
-                "checkpoint_format": "kennethbot-result-v1",
+                "checkpoint_format": "gaoji-result-v1",
             },
             "guardians": {
                 "available": bool(self.diagnostic_targets),
@@ -85,7 +85,7 @@ class ClusterExecutionService:
     ) -> tuple[str, str]:
         host = self.inventory.get(proposal.host_id)
         if host is None or not host.get("operate"):
-            return "forbidden", "该主机没有授予 Kennethbot 宿主操作权限"
+            return "forbidden", "该主机没有授予 gaoji 宿主操作权限"
         if proposal.resource_ref not in set(host.get("operable_units", [])):
             return "forbidden", "该服务不在可操作白名单中"
         if not self.write_backend.available:

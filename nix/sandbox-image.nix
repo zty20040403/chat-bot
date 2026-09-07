@@ -1,6 +1,6 @@
 {pkgs, lib}:
 let
-  sandboxToolchainVersion = "toolchain-v2-compact-nix";
+  sandboxToolchainVersion = "toolchain-v3-gaoji";
   python = pkgs.python312.withPackages (ps:
     with ps; [
       aiohttp
@@ -28,7 +28,7 @@ let
   # Keep the pinned package catalog in the image without merging the nixpkgs
   # source tree into /. Package preparation can therefore evaluate offline and
   # only needs the network to fetch missing binary closures.
-  nixpkgsPin = pkgs.runCommand "kennethbot-nixpkgs-pin" {} ''
+  nixpkgsPin = pkgs.runCommand "gaoji-nixpkgs-pin" {} ''
     mkdir -p "$out/share"
     ln -s ${pkgs.path} "$out/share/nixpkgs"
   '';
@@ -42,20 +42,30 @@ let
     keep-derivations = true
   '';
 
+  cacheSeed = pkgs.writeShellScriptBin "gaoji-cache-seed" ''
+    set -euo pipefail
+    ${pkgs.nix}/bin/nix --extra-experimental-features read-only-local-store \
+      copy --from 'local?read-only=true' \
+      --to 'local?root=/cache' --all --no-check-sigs
+    ${pkgs.coreutils}/bin/mkdir -p /cache/nix/var/nix/gcroots
+    ${pkgs.coreutils}/bin/cp -a /nix/var/nix/gcroots/. /cache/nix/var/nix/gcroots/
+    ${pkgs.coreutils}/bin/touch /cache/nix/.gaoji-cache-ready
+  '';
+
   sandboxFontConfig = pkgs.makeFontsConf {
     fontDirectories = [
       pkgs.wqy_microhei
     ];
   };
 
-  sandboxFontConfigPackage = pkgs.runCommand "kennethbot-fontconfig" {} ''
-    mkdir -p $out/etc/kennethbot
-    cp ${sandboxFontConfig} $out/etc/kennethbot/fonts.conf
+  sandboxFontConfigPackage = pkgs.runCommand "gaoji-fontconfig" {} ''
+    mkdir -p $out/etc/gaoji
+    cp ${sandboxFontConfig} $out/etc/gaoji/fonts.conf
   '';
 
   cjkPdfTool = pkgs.writeTextFile {
-    name = "kennethbot-pdf";
-    destination = "/bin/kennethbot-pdf";
+    name = "gaoji-pdf";
+    destination = "/bin/gaoji-pdf";
     executable = true;
     text = ''
       #!${python}/bin/python
@@ -84,14 +94,14 @@ let
       )
 
       REGULAR_FONT = "${pkgs.wqy_microhei}/share/fonts/truetype/wqy-microhei.ttc"
-      FONT_NAME = "KennethbotCJK"
+      FONT_NAME = "gaojiCJK"
       BOLD_NAME = FONT_NAME
 
 
       def inline_markup(value: str) -> str:
           escaped = html.escape(value.strip())
           escaped = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", escaped)
-          escaped = re.sub(r"`([^`]+)`", r"<font name='KennethbotCJK'>\1</font>", escaped)
+          escaped = re.sub(r"`([^`]+)`", r"<font name='gaojiCJK'>\1</font>", escaped)
           return escaped
 
 
@@ -351,16 +361,17 @@ let
     fontconfig
     wqy_microhei
     cjkPdfTool
+    cacheSeed
   ];
 
   baseEnvironment = pkgs.buildEnv {
-    name = "kennethbot-sandbox-base";
+    name = "gaoji-sandbox-base";
     paths = tools;
     pathsToLink = ["/bin" "/share"];
   };
 in
 pkgs.dockerTools.buildLayeredImageWithNixDb {
-  name = "kennethbot-sandbox";
+  name = "gaoji-sandbox";
   tag = "latest";
   maxLayers = 120;
   contents = [
@@ -373,24 +384,24 @@ pkgs.dockerTools.buildLayeredImageWithNixDb {
   ];
 
   extraCommands = ''
-    mkdir -p workspace home/sandbox tmp etc nix/var/nix/gcroots/kennethbot-packages
+    mkdir -p workspace home/sandbox tmp etc nix/var/nix/gcroots/gaoji-packages
     # Nix builders cannot materialize arbitrary numeric ownership in every
     # sandbox backend. The container is isolated and runs as uid 1000, so make
     # its private workspace and home writable without a build-time chown.
     chmod 0777 workspace home/sandbox
     chmod 1777 tmp
-    printf 'sandbox:x:1000:1000:Kennethbot sandbox:/home/sandbox:/bin/sh\n' > etc/passwd
+    printf 'sandbox:x:1000:1000:gaoji sandbox:/home/sandbox:/bin/sh\n' > etc/passwd
     printf 'sandbox:x:1000:\n' > etc/group
     printf 'hosts: files dns\n' > etc/nsswitch.conf
-    ln -s ${baseEnvironment} nix/var/nix/gcroots/kennethbot-base
+    ln -s ${baseEnvironment} nix/var/nix/gcroots/gaoji-base
     printf '%s\n' \
       'Languages: Python 3.12 with pip, Node.js 22 with npm' \
       'Development: git, gcc, make, pkg-config, shellcheck' \
       'Documents: poppler, qpdf, Python PDF and Office libraries' \
-      'CJK PDF: kennethbot-pdf input.md output.pdf (embedded Chinese font)' \
+      'CJK PDF: gaoji-pdf input.md output.pdf (embedded Chinese font)' \
       'Data: SQLite, JSON/YAML/XML parsers' \
       'On demand: pass nixpkgs attributes in sandbox_exec.packages' \
-      > etc/kennethbot-sandbox-tools
+      > etc/gaoji-sandbox-tools
   '';
 
   config = {
@@ -405,7 +416,7 @@ pkgs.dockerTools.buildLayeredImageWithNixDb {
       "LC_ALL=C.UTF-8"
       "NIX_PATH=nixpkgs=${nixpkgsPin}/share/nixpkgs"
       "NIX_PAGER=cat"
-      "FONTCONFIG_FILE=/etc/kennethbot/fonts.conf"
+      "FONTCONFIG_FILE=/etc/gaoji/fonts.conf"
       "PDF_CJK_FONT=${pkgs.wqy_microhei}/share/fonts/truetype/wqy-microhei.ttc"
       "PDF_CJK_BOLD_FONT=${pkgs.wqy_microhei}/share/fonts/truetype/wqy-microhei.ttc"
       "PYTHONUNBUFFERED=1"
@@ -414,11 +425,11 @@ pkgs.dockerTools.buildLayeredImageWithNixDb {
       "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
     ];
     Labels = {
-      "org.opencontainers.image.title" = "Kennethbot advanced sandbox";
+      "org.opencontainers.image.title" = "gaoji advanced sandbox";
       # Keep this independent from the Bot release. Bump it only when the
       # sandbox toolchain itself has a compatibility-breaking change.
       "org.opencontainers.image.version" = sandboxToolchainVersion;
-      "io.kennethbot.sandbox" = "advanced";
+      "io.gaoji.sandbox" = "advanced";
     };
   };
 }

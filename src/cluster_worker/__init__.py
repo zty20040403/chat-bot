@@ -1,1 +1,1 @@
-"""Isolated Kennethbot compute worker."""
+"""Isolated gaoji compute worker."""

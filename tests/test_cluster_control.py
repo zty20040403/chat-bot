@@ -25,11 +25,11 @@ from src.cluster_control.diagnostics import (
     IncidentDiagnosticService,
     _summarize_model_routes,
 )
-from src.cluster_control.adapters.maxops import (
-    MaxOpsClient,
-    MaxOpsError,
-    MaxOpsOperation,
-    MaxOpsResponse,
+from src.cluster_control.adapters.ops import (
+    OpsClient,
+    OpsError,
+    OpsOperation,
+    OpsResponse,
 )
 from src.cluster_control.service import FleetControlService
 from src.plugins.ai_chat.fleet_client import FleetControlClient
@@ -82,16 +82,16 @@ class FakeStore:
         self.closed = True
 
 
-class FakeMaxOps:
+class FakeOps:
     def __init__(self) -> None:
         self.fail = False
         self.execute_calls = 0
         self.closed = False
         self.failure_code = "timeout"
 
-    async def operations(self) -> tuple[MaxOpsOperation, ...]:
+    async def operations(self) -> tuple[OpsOperation, ...]:
         if self.fail:
-            raise MaxOpsError(
+            raise OpsError(
                 self.failure_code,
                 "upstream request failed",
                 retryable=self.failure_code == "timeout",
@@ -110,7 +110,7 @@ class FakeMaxOps:
             },
         }
         return tuple(
-            MaxOpsOperation(
+            OpsOperation(
                 name=name,
                 params_schema={
                     "type": "object",
@@ -129,10 +129,10 @@ class FakeMaxOps:
         self,
         operation: str,
         params: dict[str, object],
-    ) -> MaxOpsResponse:
+    ) -> OpsResponse:
         self.execute_calls += 1
         if self.fail:
-            raise MaxOpsError(
+            raise OpsError(
                 self.failure_code,
                 "upstream request failed",
                 retryable=self.failure_code == "timeout",
@@ -156,21 +156,21 @@ class FakeMaxOps:
                 "entries": [],
                 "observed_at": 123,
             }
-        return MaxOpsResponse(data=data, elapsed_ms=1)
+        return OpsResponse(data=data, elapsed_ms=1)
 
     async def close(self) -> None:
         self.closed = True
 
 
-class HealthyMaxOps(FakeMaxOps):
+class HealthyOps(FakeOps):
     async def execute(
         self,
         operation: str,
         params: dict[str, object],
-    ) -> MaxOpsResponse:
+    ) -> OpsResponse:
         if operation == "units.status":
             self.execute_calls += 1
-            return MaxOpsResponse(
+            return OpsResponse(
                 data={
                     "host": params["host"],
                     "unit": {
@@ -225,7 +225,7 @@ class FakeDiagnosticStore:
         return {"status": "passed", "facts": {"overall": "healthy"}}
 
 
-class MaxOpsClientTests(unittest.IsolatedAsyncioTestCase):
+class OpsClientTests(unittest.IsolatedAsyncioTestCase):
     async def test_catalog_filters_mutations_and_execute_checks_catalog(self) -> None:
         with TemporaryDirectory() as tmp:
             token_file = Path(tmp) / "token"
@@ -258,8 +258,8 @@ class MaxOpsClientTests(unittest.IsolatedAsyncioTestCase):
                 )
                 return httpx.Response(200, json={"hosts": []})
 
-            client = MaxOpsClient(
-                "http://maxops.test",
+            client = OpsClient(
+                "http://ops.test",
                 token_file,
                 transport=httpx.MockTransport(handler),
             )
@@ -269,7 +269,7 @@ class MaxOpsClientTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(client.catalog_version, 2)
                 response = await client.execute("fleet.overview", {})
                 self.assertEqual(response.data, {"hosts": []})
-                with self.assertRaises(MaxOpsError) as caught:
+                with self.assertRaises(OpsError) as caught:
                     await client.execute("units.restart", {})
                 self.assertEqual(caught.exception.code, "unsupported")
             finally:
@@ -347,12 +347,12 @@ class ClusterControlConfigTests(unittest.TestCase):
     def test_settings_reject_unreadable_diagnostic_service(self) -> None:
         environment = {
             "KC_API_TOKEN_FILE": "/run/credentials/control-token",
-            "AI_POSTGRES_DSN": "postgresql://localhost/kennethbot",
+            "AI_POSTGRES_DSN": "postgresql://localhost/gaoji",
             "KC_INVENTORY_JSON": json.dumps([
                 {
                     "host_id": "h610",
                     "observe": True,
-                    "readable_units": ["kennethbot.service"],
+                    "readable_units": ["gaoji.service"],
                 }
             ]),
             "KC_DIAGNOSTIC_TARGETS_JSON": json.dumps([
@@ -371,9 +371,9 @@ class ClusterControlConfigTests(unittest.TestCase):
             settings.validate()
 
 
-class MaxOpsCompatibilityTests(unittest.IsolatedAsyncioTestCase):
+class OpsCompatibilityTests(unittest.IsolatedAsyncioTestCase):
     async def test_incompatible_upstream_schema_is_not_advertised(self) -> None:
-        operation = MaxOpsOperation(
+        operation = OpsOperation(
             name="host.facts",
             params_schema={
                 "type": "object",
@@ -395,16 +395,16 @@ class MaxOpsCompatibilityTests(unittest.IsolatedAsyncioTestCase):
             token_file = Path(tmp) / "token"
             token_file.write_text("short", encoding="ascii")
             with self.assertRaises(ValueError):
-                MaxOpsClient("file:///tmp/socket", token_file)
-            client = MaxOpsClient(
-                "http://maxops.test",
+                OpsClient("file:///tmp/socket", token_file)
+            client = OpsClient(
+                "http://ops.test",
                 token_file,
                 transport=httpx.MockTransport(
                     lambda _request: httpx.Response(500)
                 ),
             )
             try:
-                with self.assertRaises(MaxOpsError) as caught:
+                with self.assertRaises(OpsError) as caught:
                     await client.operations()
                 self.assertEqual(caught.exception.code, "credential_invalid")
             finally:
@@ -420,7 +420,7 @@ class FleetControlServiceTests(unittest.IsolatedAsyncioTestCase):
         },
     )
 
-    def test_observed_at_accepts_maxops_rfc3339_timestamp(self) -> None:
+    def test_observed_at_accepts_ops_rfc3339_timestamp(self) -> None:
         self.assertEqual(
             FleetControlService._observed_at(
                 {"observed_at": "2026-09-06T07:00:00Z"}
@@ -432,10 +432,10 @@ class FleetControlServiceTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_deduplicates_fresh_queries_and_uses_stale_evidence(self) -> None:
-        maxops = FakeMaxOps()
+        ops = FakeOps()
         store = FakeStore()
         service = FleetControlService(
-            maxops,
+            ops,
             store=store,
             inventory=self.inventory,
             cache_seconds=20,
@@ -444,14 +444,14 @@ class FleetControlServiceTests(unittest.IsolatedAsyncioTestCase):
         second = await service.query_capability("fleet.read", {})
         self.assertEqual(first.status.value, "fresh")
         self.assertTrue(second.cached)
-        self.assertEqual(maxops.execute_calls, 1)
+        self.assertEqual(ops.execute_calls, 1)
 
         key = service._cache_key("fleet.overview", {})
         service._cache[key] = service._cache[key].__class__(
             result=service._cache[key].result,
             stored_at=time.monotonic() - 30,
         )
-        maxops.fail = True
+        ops.fail = True
         stale = await service.query_capability("fleet.read", {})
         self.assertEqual(stale.status.value, "stale")
         self.assertEqual(stale.data, first.data)
@@ -459,13 +459,13 @@ class FleetControlServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(store.observations), 2)
 
         await service.close()
-        self.assertTrue(maxops.closed)
+        self.assertTrue(ops.closed)
         self.assertTrue(store.closed)
 
     async def test_authorization_failure_never_returns_stale_data(self) -> None:
-        maxops = FakeMaxOps()
+        ops = FakeOps()
         service = FleetControlService(
-            maxops,
+            ops,
             store=FakeStore(),
             inventory=self.inventory,
             cache_seconds=20,
@@ -476,8 +476,8 @@ class FleetControlServiceTests(unittest.IsolatedAsyncioTestCase):
             result=service._cache[key].result,
             stored_at=time.monotonic() - 30,
         )
-        maxops.fail = True
-        maxops.failure_code = "forbidden"
+        ops.fail = True
+        ops.failure_code = "forbidden"
         denied = await service.query_capability("fleet.read", {})
         self.assertEqual(denied.status.value, "forbidden")
         self.assertIsNone(denied.data)
@@ -485,32 +485,32 @@ class FleetControlServiceTests(unittest.IsolatedAsyncioTestCase):
         await service.close()
 
     async def test_sensitive_log_is_marked_before_persistence(self) -> None:
-        maxops = FakeMaxOps()
+        ops = FakeOps()
         store = FakeStore()
-        service = FleetControlService(maxops, store=store, inventory=self.inventory)
+        service = FleetControlService(ops, store=store, inventory=self.inventory)
         result = await service.unit_logs("h610", "nginx.service", 20)
         self.assertTrue(result["ok"])
         self.assertTrue(store.observations[-1]["sensitive"])
         await service.close()
 
     async def test_local_inventory_denies_unregistered_hosts_and_units(self) -> None:
-        maxops = FakeMaxOps()
-        service = FleetControlService(maxops, inventory=self.inventory)
+        ops = FakeOps()
+        service = FleetControlService(ops, inventory=self.inventory)
         host = await service.host_facts("tank")
         unit = await service.unit_status("h610", "postgresql.service")
         self.assertEqual(host["status"], "forbidden")
         self.assertEqual(unit["status"], "forbidden")
-        self.assertEqual(maxops.execute_calls, 0)
+        self.assertEqual(ops.execute_calls, 0)
         await service.close()
 
     async def test_aggregate_results_are_scoped_to_local_inventory(self) -> None:
-        class AggregateMaxOps(FakeMaxOps):
+        class AggregateOps(FakeOps):
             async def execute(
                 self, operation: str, params: dict[str, object]
-            ) -> MaxOpsResponse:
+            ) -> OpsResponse:
                 self.execute_calls += 1
                 if operation in {"fleet.overview", "units.failed"}:
-                    return MaxOpsResponse(
+                    return OpsResponse(
                         data={
                             "hosts": [
                                 {"host": "h610", "state": "available"},
@@ -519,7 +519,7 @@ class FleetControlServiceTests(unittest.IsolatedAsyncioTestCase):
                         },
                         elapsed_ms=1,
                     )
-                return MaxOpsResponse(
+                return OpsResponse(
                     data={
                         "alerts": [
                             {"labels": {"instance": "h610"}},
@@ -529,7 +529,7 @@ class FleetControlServiceTests(unittest.IsolatedAsyncioTestCase):
                     elapsed_ms=1,
                 )
 
-        service = FleetControlService(AggregateMaxOps(), inventory=self.inventory)
+        service = FleetControlService(AggregateOps(), inventory=self.inventory)
         fleet = await service.fleet_overview()
         self.assertEqual(
             [item["host"] for item in fleet["data"]["hosts"]], ["h610"]
@@ -544,35 +544,35 @@ class FleetControlServiceTests(unittest.IsolatedAsyncioTestCase):
         await service.close()
 
     async def test_incompatible_schema_is_blocked_before_execution(self) -> None:
-        class IncompatibleMaxOps(FakeMaxOps):
-            async def operations(self) -> tuple[MaxOpsOperation, ...]:
+        class IncompatibleOps(FakeOps):
+            async def operations(self) -> tuple[OpsOperation, ...]:
                 operations = list(await super().operations())
-                operations[0] = MaxOpsOperation(
+                operations[0] = OpsOperation(
                     name="fleet.overview",
                     params_schema={"type": "array"},
                 )
                 return tuple(operations)
 
-        maxops = IncompatibleMaxOps()
-        service = FleetControlService(maxops, inventory=self.inventory)
+        ops = IncompatibleOps()
+        service = FleetControlService(ops, inventory=self.inventory)
         result = await service.query_capability("fleet.read", {})
         self.assertEqual(result.status.value, "unsupported")
         self.assertEqual(result.error.code, "incompatible_catalog")
-        self.assertEqual(maxops.execute_calls, 0)
+        self.assertEqual(ops.execute_calls, 0)
         await service.close()
 
     async def test_cross_host_response_is_rejected(self) -> None:
-        class CrossHostMaxOps(FakeMaxOps):
+        class CrossHostOps(FakeOps):
             async def execute(
                 self, operation: str, params: dict[str, object]
-            ) -> MaxOpsResponse:
+            ) -> OpsResponse:
                 self.execute_calls += 1
-                return MaxOpsResponse(
+                return OpsResponse(
                     data={"host": "tank", "facts": {}, "observed_at": 123},
                     elapsed_ms=1,
                 )
 
-        service = FleetControlService(CrossHostMaxOps(), inventory=self.inventory)
+        service = FleetControlService(CrossHostOps(), inventory=self.inventory)
         result = await service.query_capability("host.facts.read", {"host": "h610"})
         self.assertEqual(result.status.value, "unavailable")
         self.assertEqual(result.error.code, "invalid_response")
@@ -581,13 +581,13 @@ class FleetControlServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_restart_can_use_durable_non_sensitive_projection(self) -> None:
         store = FakeStore()
         first_service = FleetControlService(
-            FakeMaxOps(), store=store, inventory=self.inventory
+            FakeOps(), store=store, inventory=self.inventory
         )
         original = await first_service.query_capability("fleet.read", {})
         first_service.store = None
         await first_service.close()
 
-        unavailable = FakeMaxOps()
+        unavailable = FakeOps()
         unavailable.fail = True
         restarted = FleetControlService(
             unavailable, store=store, inventory=self.inventory
@@ -604,10 +604,10 @@ class IncidentDiagnosticServiceTests(unittest.IsolatedAsyncioTestCase):
             "host_id": "h610",
             "observe": True,
             "readable_units": [
-                "qq-deepseek-bot.service",
+                "gaoji.service",
                 "docker-napcat.service",
                 "nginx.service",
-                "kennethbot-cluster-control.service",
+                "gaoji-cluster-control.service",
             ],
         },
     )
@@ -643,7 +643,7 @@ class IncidentDiagnosticServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(facts["parameter_incompatible"], 1)
 
     async def test_qq_diagnostic_uses_bounded_independent_checks(self) -> None:
-        fleet = FleetControlService(HealthyMaxOps(), inventory=self.inventory)
+        fleet = FleetControlService(HealthyOps(), inventory=self.inventory)
         store = FakeDiagnosticStore()
         diagnostics = IncidentDiagnosticService(fleet, store)  # type: ignore[arg-type]
         try:
@@ -661,7 +661,7 @@ class IncidentDiagnosticServiceTests(unittest.IsolatedAsyncioTestCase):
             await fleet.close()
 
     async def test_unconfigured_model_target_stays_unknown_and_adds_one_log_check(self) -> None:
-        fleet = FleetControlService(HealthyMaxOps(), inventory=self.inventory)
+        fleet = FleetControlService(HealthyOps(), inventory=self.inventory)
         store = FakeDiagnosticStore()
         diagnostics = IncidentDiagnosticService(fleet, store)  # type: ignore[arg-type]
         try:
@@ -679,7 +679,7 @@ class IncidentDiagnosticServiceTests(unittest.IsolatedAsyncioTestCase):
             await fleet.close()
 
     async def test_fixed_probe_records_dns_and_http_without_accepting_a_url(self) -> None:
-        fleet = FleetControlService(HealthyMaxOps(), inventory=self.inventory)
+        fleet = FleetControlService(HealthyOps(), inventory=self.inventory)
         store = FakeDiagnosticStore()
         targets = _diagnostic_targets(
             json.dumps(
@@ -718,7 +718,7 @@ class IncidentDiagnosticServiceTests(unittest.IsolatedAsyncioTestCase):
             await fleet.close()
 
     async def test_diagnostic_rejects_hosts_outside_inventory(self) -> None:
-        fleet = FleetControlService(HealthyMaxOps(), inventory=self.inventory)
+        fleet = FleetControlService(HealthyOps(), inventory=self.inventory)
         diagnostics = IncidentDiagnosticService(
             fleet,
             FakeDiagnosticStore(),  # type: ignore[arg-type]
@@ -734,7 +734,7 @@ class IncidentDiagnosticServiceTests(unittest.IsolatedAsyncioTestCase):
             await fleet.close()
 
     async def test_probe_does_not_claim_a_different_observer_host(self) -> None:
-        fleet = FleetControlService(HealthyMaxOps(), inventory=self.inventory)
+        fleet = FleetControlService(HealthyOps(), inventory=self.inventory)
         store = FakeDiagnosticStore()
         targets = _diagnostic_targets(
             json.dumps(
@@ -800,7 +800,7 @@ class ClusterControlApiTests(unittest.IsolatedAsyncioTestCase):
                 metrics = await client.get("/metrics/")
                 self.assertEqual(metrics.status_code, 200)
                 self.assertIn(
-                    "kennethbot_cluster_queries_total",
+                    "gaoji_cluster_queries_total",
                     metrics.text,
                 )
 

@@ -142,7 +142,7 @@ class PostgresDatabase:
         max_size: int = 10,
         timeout_seconds: float = 10.0,
         health_check_interval_seconds: float = 5.0,
-        application_name: str = "qq-deepseek-bot",
+        application_name: str = "gaoji",
         node_names: Sequence[str] = (),
         topology_cache_seconds: float = 10.0,
     ) -> None:

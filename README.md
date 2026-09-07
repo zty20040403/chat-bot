@@ -1,15 +1,16 @@
 <p align="center">
-  <img src="docs/assets/kennethbot-banner.svg" width="100%" alt="Kennethbot - QQ multi-model agent">
+  <img src="docs/assets/gaoji-banner.svg" width="100%" alt="gaoji - QQ multi-model agent">
 </p>
 
-<h1 align="center">Kennethbot</h1>
+<h1 align="center">gaoji</h1>
 
 <p align="center">
   一个能理解群聊上下文、调用工具并完成真实任务的 QQ 多模型 Agent
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.17.3-22c55e?style=for-the-badge">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.18.0-22c55e?style=for-the-badge">
+  <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-18181b?style=for-the-badge"></a>
   <img alt="Python" src="https://img.shields.io/badge/Python-3.12-3776ab?style=for-the-badge&amp;logo=python&amp;logoColor=white">
   <img alt="NoneBot2" src="https://img.shields.io/badge/NoneBot2-OneBot_V11-ea5252?style=for-the-badge">
   <img alt="PostgreSQL" src="https://img.shields.io/badge/PostgreSQL-Durable-4169e1?style=for-the-badge&amp;logo=postgresql&amp;logoColor=white">
@@ -26,7 +27,7 @@
 
 ---
 
-Kennethbot 通过 NapCatQQ 接收 OneBot V11 事件，使用 NoneBot2 处理消息，并把对话、
+gaoji 通过 NapCatQQ 接收 OneBot V11 事件，使用 NoneBot2 处理消息，并把对话、
 工具调用、长期记忆、媒体任务与投递状态保存到 PostgreSQL。它不只是聊天接口：模型会在
 宿主管控的 Agent Loop 中读取证据、选择工具、执行任务，再把适合 QQ 的结果发回群聊。
 
@@ -51,7 +52,7 @@ Kennethbot 通过 NapCatQQ 接收 OneBot V11 事件，使用 NoneBot2 处理消�
   </tr>
   <tr>
     <td><strong>集群只读控制面</strong><br>独立服务查询获准节点、systemd 状态与有限日志，保留来源、时间、过期状态和审计投影。</td>
-    <td><strong>双层权限边界</strong><br>会话、主机与服务先由 Kennethbot 收窄，再由运维后端复核；模型不能提交地址、凭据或任意命令。</td>
+    <td><strong>双层权限边界</strong><br>会话、主机与服务先由 gaoji 收窄，再由运维后端复核；模型不能提交地址、凭据或任意命令。</td>
   </tr>
   <tr>
     <td><strong>实验式排障</strong><br>六类固定流程组合 DNS、HTTP、服务、Trace、Outbox 与数据库证据，最多两层六项检查。</td>
@@ -82,7 +83,7 @@ flowchart LR
     QQ[QQ Client] --> NC[NapCatQQ]
     NC -->|OneBot V11 WS| NB[NoneBot2 Gateway]
 
-    subgraph Runtime[Kennethbot Runtime]
+    subgraph Runtime[gaoji Runtime]
         NB --> IR[Message IR + Ledger]
         IR --> CTX[Context Planner]
         CTX --> AGENT[Agent Loop]
@@ -214,8 +215,8 @@ bot/
 ### 1. 安装依赖
 
 ```bash
-git clone https://github.com/zty20040403/chat-bot.git
-cd chat-bot
+git clone https://github.com/zty20040403/gaojibot.git
+cd gaojibot
 python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -234,7 +235,7 @@ nix develop
 
 ```bash
 docker run -d \
-  --name kennethbot-postgres \
+  --name gaoji-postgres \
   -e POSTGRES_USER=qq_bot \
   -e POSTGRES_PASSWORD=change-me \
   -e POSTGRES_DB=qq_bot \
@@ -539,7 +540,7 @@ nix flake check
 
 ```nix
 inputs.qq-bot = {
-  url = "github:zty20040403/chat-bot";
+  url = "github:zty20040403/gaojibot";
   inputs.nixpkgs.follows = "nixpkgs";
 };
 ```
@@ -547,11 +548,11 @@ inputs.qq-bot = {
 把模块加入目标主机：
 
 ```nix
-imports = [inputs.qq-bot.nixosModules.qq-deepseek-bot];
+imports = [inputs.qq-bot.nixosModules.gaoji];
 
-services.qq-deepseek-bot = {
+services.gaoji = {
   enable = true;
-  environmentFile = "/run/secrets/qq-deepseek-bot.env";
+  environmentFile = "/run/secrets/gaoji.env";
   host = "127.0.0.1";
   port = 18080;
 
@@ -625,5 +626,11 @@ git status -sb
 - [从零搭建教程](docs/from-zero.html)
 - [生产运维与配置](docs/operations-v3.md)
 - [PostgreSQL 迁移](docs/postgresql-migration.md)
-- [上下文、消息 IR 与连续任务架构](docs/architecture-five-adrs.md)
+- [系统架构](docs/architecture.md)
+- [架构决策记录 ADR](docs/adr/README.md)
+- [0.18 命名与升级说明](docs/rebranding.md)
 - [第三方组件声明](THIRD_PARTY_NOTICES.md)
+
+## 许可证
+
+MIT License · Copyright (c) 2026 Kenneth。详见 [LICENSE](LICENSE)。

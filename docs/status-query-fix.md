@@ -9,10 +9,10 @@ fallback fleet query succeeded, but its raw multi-host filesystem payload was
 larger than the tool-result budget. Logging a Tool Call was incorrectly treated
 as proof that the underlying host query had succeeded during the first diagnosis.
 
-Direct MaxOps `GET /v1/operations` and `POST /v1/execute` with
+Direct Ops `GET /v1/operations` and `POST /v1/execute` with
 `{"op":"host.facts","params":{"host":"tank"}}` still work. The six
 existing control-service bindings passed runtime catalog compatibility checks.
-This was not a breaking change in the MaxOps API.
+This was not a breaking change in the Ops API.
 
 Turns 1160 and 1161 asked whether Qwen was available but did not use the fleet
 inspection/diagnostic tools. The model described an unverified failure.

@@ -12,7 +12,7 @@ from .config import ClusterControlSettings
 from .deployment_service import DeploymentService
 from .deployment_storage import DeploymentStore
 from .diagnostics import DiagnosticStore, IncidentDiagnosticService
-from .adapters.maxops import MaxOpsClient
+from .adapters.ops import OpsClient
 from .service import FleetControlService
 from .storage import FleetProjectionStore
 from .execution_service import ClusterExecutionService, WorkerAuthenticator
@@ -31,20 +31,20 @@ def main() -> None:
         min_size=settings.postgres_pool_min_size,
         max_size=settings.postgres_pool_max_size,
         timeout_seconds=settings.postgres_pool_timeout_seconds,
-        application_name="kennethbot-cluster-control",
+        application_name="gaoji-cluster-control",
     )
     database.require_revision(HEAD_REVISION)
-    maxops = (
-        MaxOpsClient(
-            settings.maxops_base_url,
-            settings.maxops_token_file,
-            timeout_seconds=settings.maxops_timeout_seconds,
+    ops = (
+        OpsClient(
+            settings.ops_base_url,
+            settings.ops_token_file,
+            timeout_seconds=settings.ops_timeout_seconds,
         )
-        if settings.maxops_enabled
+        if settings.ops_enabled
         else None
     )
     service = FleetControlService(
-        maxops,
+        ops,
         store=FleetProjectionStore(database),
         inventory=settings.inventory,
         cache_seconds=settings.cache_seconds,

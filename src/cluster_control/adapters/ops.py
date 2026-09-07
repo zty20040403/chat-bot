@@ -17,7 +17,7 @@ MAX_TOKEN_FILE_BYTES = 515
 SUPPORTED_CATALOG_VERSIONS = frozenset({1, 2})
 
 
-class MaxOpsError(RuntimeError):
+class OpsError(RuntimeError):
     def __init__(self, code: str, message: str, *, retryable: bool = False) -> None:
         super().__init__(message)
         self.code = code
@@ -25,19 +25,19 @@ class MaxOpsError(RuntimeError):
 
 
 @dataclass(frozen=True)
-class MaxOpsOperation:
+class OpsOperation:
     name: str
     params_schema: dict[str, Any]
     read_only: bool = True
 
 
 @dataclass(frozen=True)
-class MaxOpsResponse:
+class OpsResponse:
     data: Any
     elapsed_ms: int
 
 
-class MaxOpsClient:
+class OpsClient:
     def __init__(
         self,
         base_url: str,
@@ -50,13 +50,13 @@ class MaxOpsClient:
         self.base_url = base_url.strip().rstrip("/")
         parsed = urlsplit(self.base_url)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            raise ValueError("MaxOps URL must be absolute HTTP(S)")
+            raise ValueError("Ops URL must be absolute HTTP(S)")
         if parsed.username or parsed.password or parsed.query or parsed.fragment:
-            raise ValueError("MaxOps URL contains unsupported components")
+            raise ValueError("Ops URL contains unsupported components")
         self.token_file = Path(token_file)
         self.timeout_seconds = min(max(float(timeout_seconds), 1.0), 30.0)
         self.catalog_cache_seconds = min(max(float(catalog_cache_seconds), 1.0), 30.0)
-        self._catalog: tuple[MaxOpsOperation, ...] | None = None
+        self._catalog: tuple[OpsOperation, ...] | None = None
         self._catalog_version: int | None = None
         self._catalog_at = 0.0
         self._catalog_lock = asyncio.Lock()
@@ -78,8 +78,8 @@ class MaxOpsClient:
         try:
             raw = self.token_file.read_bytes()
         except OSError as exc:
-            raise MaxOpsError(
-                "credential_unavailable", "MaxOps credential is unavailable"
+            raise OpsError(
+                "credential_unavailable", "Ops credential is unavailable"
             ) from exc
         token = raw.rstrip(b"\r\n")
         if (
@@ -87,7 +87,7 @@ class MaxOpsClient:
             or not 32 <= len(token) <= 512
             or any(byte < 33 or byte > 126 for byte in token)
         ):
-            raise MaxOpsError("credential_invalid", "MaxOps credential is invalid")
+            raise OpsError("credential_invalid", "Ops credential is invalid")
         return token
 
     async def _request(
@@ -97,14 +97,14 @@ class MaxOpsClient:
         *,
         body: bytes | None = None,
         deadline: float | None = None,
-    ) -> MaxOpsResponse:
+    ) -> OpsResponse:
         token = self._credential()
         started = monotonic()
         remaining = self.timeout_seconds
         if deadline is not None:
             remaining = min(remaining, deadline - started)
             if remaining <= 0:
-                raise MaxOpsError("timeout", "MaxOps request timed out", retryable=True)
+                raise OpsError("timeout", "Ops request timed out", retryable=True)
         try:
             async with self._client.stream(
                 method,
@@ -122,52 +122,52 @@ class MaxOpsClient:
                 async for chunk in response.aiter_bytes():
                     size += len(chunk)
                     if size > MAX_RESPONSE_BYTES:
-                        raise MaxOpsError(
+                        raise OpsError(
                             "response_too_large",
-                            "MaxOps response exceeds 2 MiB",
+                            "Ops response exceeds 2 MiB",
                         )
                     chunks.append(chunk)
                 payload = b"".join(chunks)
                 if response.status_code == 401:
-                    raise MaxOpsError("unauthorized", "MaxOps rejected the credential")
+                    raise OpsError("unauthorized", "Ops rejected the credential")
                 if response.status_code == 403:
-                    raise MaxOpsError("forbidden", "MaxOps denied this operation")
+                    raise OpsError("forbidden", "Ops denied this operation")
                 if response.status_code == 404:
-                    raise MaxOpsError("unsupported", "MaxOps operation is unavailable")
+                    raise OpsError("unsupported", "Ops operation is unavailable")
                 if response.status_code in {408, 429}:
-                    raise MaxOpsError(
+                    raise OpsError(
                         "upstream_busy",
-                        "MaxOps is temporarily busy",
+                        "Ops is temporarily busy",
                         retryable=True,
                     )
                 if response.status_code >= 500:
-                    raise MaxOpsError(
+                    raise OpsError(
                         "upstream_error",
-                        f"MaxOps returned HTTP {response.status_code}",
+                        f"Ops returned HTTP {response.status_code}",
                         retryable=True,
                     )
                 if response.status_code >= 400:
-                    raise MaxOpsError(
+                    raise OpsError(
                         "invalid_request",
-                        f"MaxOps returned HTTP {response.status_code}",
+                        f"Ops returned HTTP {response.status_code}",
                     )
-        except MaxOpsError:
+        except OpsError:
             raise
         except httpx.TimeoutException as exc:
-            raise MaxOpsError(
-                "timeout", "MaxOps request timed out", retryable=True
+            raise OpsError(
+                "timeout", "Ops request timed out", retryable=True
             ) from exc
         except httpx.HTTPError as exc:
-            raise MaxOpsError(
+            raise OpsError(
                 "transport_unavailable",
-                "MaxOps transport is unavailable",
+                "Ops transport is unavailable",
                 retryable=True,
             ) from exc
         try:
             decoded = json.loads(payload)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise MaxOpsError("invalid_response", "MaxOps returned invalid JSON") from exc
-        return MaxOpsResponse(
+            raise OpsError("invalid_response", "Ops returned invalid JSON") from exc
+        return OpsResponse(
             data=decoded,
             elapsed_ms=max(int((monotonic() - started) * 1000), 0),
         )
@@ -176,7 +176,7 @@ class MaxOpsClient:
         self,
         *,
         deadline: float | None = None,
-    ) -> tuple[MaxOpsOperation, ...]:
+    ) -> tuple[OpsOperation, ...]:
         if (
             self._catalog is not None
             and monotonic() - self._catalog_at < self.catalog_cache_seconds
@@ -196,10 +196,10 @@ class MaxOpsClient:
             return operations
 
     @staticmethod
-    def _decode_catalog(payload: Any) -> tuple[int, tuple[MaxOpsOperation, ...]]:
+    def _decode_catalog(payload: Any) -> tuple[int, tuple[OpsOperation, ...]]:
         if not isinstance(payload, dict):
-            raise MaxOpsError(
-                "incompatible_catalog", "MaxOps returned an unsupported catalog"
+            raise OpsError(
+                "incompatible_catalog", "Ops returned an unsupported catalog"
             )
         version = payload.get("version")
         if (
@@ -207,40 +207,40 @@ class MaxOpsClient:
             or not isinstance(version, int)
             or version not in SUPPORTED_CATALOG_VERSIONS
         ):
-            raise MaxOpsError(
-                "incompatible_catalog", "MaxOps returned an unsupported catalog"
+            raise OpsError(
+                "incompatible_catalog", "Ops returned an unsupported catalog"
             )
         raw_operations = payload.get("operations")
         if not isinstance(raw_operations, list):
-            raise MaxOpsError("invalid_catalog", "MaxOps returned an invalid catalog")
-        operations: list[MaxOpsOperation] = []
+            raise OpsError("invalid_catalog", "Ops returned an invalid catalog")
+        operations: list[OpsOperation] = []
         for item in raw_operations:
             if not isinstance(item, dict) or item.get("read_only") is not True:
                 continue
             name = item.get("name")
             schema = item.get("params_schema")
             if not isinstance(name, str) or not name or not isinstance(schema, dict):
-                raise MaxOpsError("invalid_catalog", "MaxOps returned an invalid catalog")
-            operations.append(MaxOpsOperation(name=name, params_schema=schema))
+                raise OpsError("invalid_catalog", "Ops returned an invalid catalog")
+            operations.append(OpsOperation(name=name, params_schema=schema))
         return version, tuple(operations)
 
-    async def execute(self, operation: str, params: dict[str, Any]) -> MaxOpsResponse:
+    async def execute(self, operation: str, params: dict[str, Any]) -> OpsResponse:
         if not isinstance(params, dict):
-            raise MaxOpsError("invalid_request", "MaxOps params must be an object")
+            raise OpsError("invalid_request", "Ops params must be an object")
         request = {"op": str(operation), "params": params}
         body = json.dumps(
             request, ensure_ascii=False, separators=(",", ":")
         ).encode("utf-8")
         if len(body) > MAX_REQUEST_BYTES:
-            raise MaxOpsError(
-                "request_too_large", "MaxOps request exceeds 4096 bytes"
+            raise OpsError(
+                "request_too_large", "Ops request exceeds 4096 bytes"
             )
         deadline = monotonic() + self.timeout_seconds
         catalog = await self.operations(deadline=deadline)
         if operation not in {item.name for item in catalog}:
-            raise MaxOpsError(
+            raise OpsError(
                 "unsupported",
-                "MaxOps operation is unavailable or not read-only",
+                "Ops operation is unavailable or not read-only",
             )
         return await self._request(
             "POST", "/v1/execute", body=body, deadline=deadline

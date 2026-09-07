@@ -1,9 +1,9 @@
 { config, lib, pkgs, ... }:
 let
-  cfg = config.services.kennethbot-qwen-control;
+  cfg = config.services.gaoji-qwen-control;
 in {
-  options.services.kennethbot-qwen-control = {
-    enable = lib.mkEnableOption "restricted Kennethbot WSL Qwen controller";
+  options.services.gaoji-qwen-control = {
+    enable = lib.mkEnableOption "restricted gaoji WSL Qwen controller";
     listenAddress = lib.mkOption { type = lib.types.str; default = "127.0.0.1"; };
     port = lib.mkOption { type = lib.types.port; default = 8001; };
     allowedPeers = lib.mkOption {
@@ -38,7 +38,7 @@ in {
         }
       });
     '';
-    systemd.services.kennethbot-qwen-control = {
+    systemd.services.gaoji-qwen-control = {
       description = "Restricted Qwen lifecycle API (never starts Qwen on boot)";
       wantedBy = [ "multi-user.target" ];
       after = [ "network-online.target" "tailscaled.service" ];
@@ -52,12 +52,12 @@ in {
           "--host" (lib.escapeShellArg cfg.listenAddress)
           "--port" (toString cfg.port)
           "--token-file" "%d/token"
-          "--database" "/var/lib/kennethbot-qwen-control/requests.sqlite3"
+          "--database" "/var/lib/gaoji-qwen-control/requests.sqlite3"
           "--systemctl" "${pkgs.systemd}/bin/systemctl"
           "--nvidia-smi" (lib.escapeShellArg cfg.nvidiaSmiPath)
         ] ++ lib.concatMap (peer: [ "--allow-peer" (lib.escapeShellArg peer) ]) cfg.allowedPeers);
         LoadCredential = [ "token:${cfg.tokenFile}" ];
-        StateDirectory = "kennethbot-qwen-control";
+        StateDirectory = "gaoji-qwen-control";
         StateDirectoryMode = "0700";
         Restart = "on-failure";
         RestartSec = 5;

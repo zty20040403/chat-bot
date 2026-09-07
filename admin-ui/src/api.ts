@@ -93,7 +93,7 @@ export class AdminApiError extends Error {
 
 export class AdminClient {
   constructor(
-    private readonly runtime: KennethbotAdminRuntime,
+    private readonly runtime: GaojiAdminRuntime,
     private readonly token: string,
   ) {}
 
@@ -113,7 +113,7 @@ export class AdminClient {
   ): Promise<JsonObject> {
     const headers = this.headers()
     headers.set('Content-Type', 'application/json')
-    headers.set('X-Admin-Actor', 'kennethbot-react-console')
+    headers.set('X-Admin-Actor', 'gaoji-react-console')
     if (expectedVersion !== undefined) {
       headers.set('If-Match', `"${expectedVersion}"`)
     }

@@ -42,7 +42,7 @@ class ResourceRequest:
     borrow_required: bool = False
     safe_rerun: bool = False
     checkpointable: bool = False
-    checkpoint_format: str = "kennethbot-result-v1"
+    checkpoint_format: str = "gaoji-result-v1"
     executor_version: str = "worker-v2"
     expected_cost_microunits: int = 0
     max_cost_microunits: int = 0
@@ -69,7 +69,7 @@ class ResourceRequest:
         if expected_cost > max_cost:
             raise ValueError("expected cost exceeds the task cost limit")
         checkpoint_format = str(
-            raw.get("checkpoint_format") or "kennethbot-result-v1"
+            raw.get("checkpoint_format") or "gaoji-result-v1"
         ).strip()
         executor_version = str(raw.get("executor_version") or "worker-v2").strip()
         if not checkpoint_format or len(checkpoint_format) > 80:

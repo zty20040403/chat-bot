@@ -1,5 +1,5 @@
 {
-  description = "Reproducible package and NixOS module for the QQ DeepSeek bot";
+  description = "gaoji: reproducible agent runtime, sandbox and NixOS services";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
@@ -53,6 +53,7 @@
         ./requirements.txt
         ./uv.lock
         ./README.md
+        ./LICENSE
         ./THIRD_PARTY_NOTICES.md
         (lib.fileset.fileFilter (file: file.hasExt "md" || file.hasExt "html") ./docs)
         (lib.fileset.fileFilter (file: file.hasExt "md") ./skills)
@@ -96,12 +97,12 @@
     mkPackage = system: let
       pkgs = nixpkgs.legacyPackages.${system};
       pythonSet = mkPythonSet system;
-      virtualenv = pythonSet.mkVirtualEnv "qq-deepseek-bot-env" workspace.deps.default;
+      virtualenv = pythonSet.mkVirtualEnv "gaoji-env" workspace.deps.default;
       adminUi = pkgs.buildNpmPackage {
-        pname = "kennethbot-admin-ui";
+        pname = "gaoji-admin-ui";
         version = project.project.version;
         src = ./admin-ui;
-        npmDepsHash = "sha256-ebPldhzdSsSdWXA/EaR5dmFak3NPoS8KTxFrK4N9kRQ=";
+        npmDepsHash = "sha256-S1TnE1IDXR/dZJrXmnyGkFvksmlmlzblAdphAyvr9NA=";
         npmBuildScript = "build";
         installPhase = ''
           runHook preInstall
@@ -121,39 +122,39 @@
         installPhase = ''
           runHook preInstall
 
-          mkdir -p "$out/bin" "$out/share/qq-deepseek-bot"
-          cp -R . "$out/share/qq-deepseek-bot"
-          mkdir -p "$out/share/qq-deepseek-bot/src/plugins/ai_chat/admin_ui_dist"
+          mkdir -p "$out/bin" "$out/share/gaoji"
+          cp -R . "$out/share/gaoji"
+          mkdir -p "$out/share/gaoji/src/plugins/ai_chat/admin_ui_dist"
           cp -R ${adminUi}/dist/. \
-            "$out/share/qq-deepseek-bot/src/plugins/ai_chat/admin_ui_dist/"
-          makeWrapper ${virtualenv}/bin/python "$out/bin/qq-deepseek-bot" \
-            --add-flags "$out/share/qq-deepseek-bot/bot.py" \
-            --chdir "$out/share/qq-deepseek-bot" \
+            "$out/share/gaoji/src/plugins/ai_chat/admin_ui_dist/"
+          makeWrapper ${virtualenv}/bin/python "$out/bin/gaoji" \
+            --add-flags "$out/share/gaoji/bot.py" \
+            --chdir "$out/share/gaoji" \
             --set PYTHONDONTWRITEBYTECODE 1 \
             --set PYTHONUNBUFFERED 1 \
             --run 'state_home="''${XDG_STATE_HOME:-''${HOME:-/tmp}/.local/state}"' \
             --run 'cache_home="''${XDG_CACHE_HOME:-''${HOME:-/tmp}/.cache}"' \
-            --run 'export AI_STATE_DIR="''${AI_STATE_DIR:-$state_home/qq-deepseek-bot}"' \
-            --run 'export AI_CACHE_DIR="''${AI_CACHE_DIR:-$cache_home/qq-deepseek-bot}"' \
+            --run 'export AI_STATE_DIR="''${AI_STATE_DIR:-$state_home/gaoji}"' \
+            --run 'export AI_CACHE_DIR="''${AI_CACHE_DIR:-$cache_home/gaoji}"' \
             --run '${pkgs.coreutils}/bin/mkdir -p "$AI_STATE_DIR" "$AI_CACHE_DIR"'
-          makeWrapper ${virtualenv}/bin/python "$out/bin/qq-deepseek-bot-db" \
+          makeWrapper ${virtualenv}/bin/python "$out/bin/gaoji-db" \
             --add-flags "-m src.bot_storage.cli" \
-            --chdir "$out/share/qq-deepseek-bot" \
+            --chdir "$out/share/gaoji" \
             --set PYTHONDONTWRITEBYTECODE 1 \
             --set PYTHONUNBUFFERED 1
-          makeWrapper ${virtualenv}/bin/python "$out/bin/kennethbot-cluster-control" \
+          makeWrapper ${virtualenv}/bin/python "$out/bin/gaoji-cluster-control" \
             --add-flags "-m src.cluster_control" \
-            --chdir "$out/share/qq-deepseek-bot" \
+            --chdir "$out/share/gaoji" \
             --set PYTHONDONTWRITEBYTECODE 1 \
             --set PYTHONUNBUFFERED 1
-          makeWrapper ${virtualenv}/bin/python "$out/bin/kennethbot-cluster-worker" \
+          makeWrapper ${virtualenv}/bin/python "$out/bin/gaoji-cluster-worker" \
             --add-flags "-m src.cluster_worker" \
-            --chdir "$out/share/qq-deepseek-bot" \
+            --chdir "$out/share/gaoji" \
             --set PYTHONDONTWRITEBYTECODE 1 \
             --set PYTHONUNBUFFERED 1
-          makeWrapper ${virtualenv}/bin/python "$out/bin/kennethbot-cluster-deployer" \
+          makeWrapper ${virtualenv}/bin/python "$out/bin/gaoji-cluster-deployer" \
             --add-flags "-m src.cluster_deployer" \
-            --chdir "$out/share/qq-deepseek-bot" \
+            --chdir "$out/share/gaoji" \
             --set PYTHONDONTWRITEBYTECODE 1 \
             --set PYTHONUNBUFFERED 1
 
@@ -163,8 +164,9 @@
         passthru = {inherit virtualenv;};
         meta = {
           description = project.project.description;
-          homepage = "https://github.com/zty20040403/chat-bot";
-          mainProgram = "qq-deepseek-bot";
+          homepage = "https://github.com/zty20040403/gaojibot";
+          license = lib.licenses.mit;
+          mainProgram = "gaoji";
           platforms = supportedSystems;
         };
       };
@@ -180,7 +182,7 @@
     in
       {
         default = mkPackage system;
-        qq-deepseek-bot = mkPackage system;
+        gaoji = mkPackage system;
       }
       // lib.optionalAttrs pkgs.stdenv.isLinux {
         sandbox-image = mkSandboxImage system;
@@ -193,15 +195,15 @@
       };
       cluster-control = {
         type = "app";
-        program = "${self.packages.${system}.default}/bin/kennethbot-cluster-control";
+        program = "${self.packages.${system}.default}/bin/gaoji-cluster-control";
       };
       cluster-worker = {
         type = "app";
-        program = "${self.packages.${system}.default}/bin/kennethbot-cluster-worker";
+        program = "${self.packages.${system}.default}/bin/gaoji-cluster-worker";
       };
       cluster-deployer = {
         type = "app";
-        program = "${self.packages.${system}.default}/bin/kennethbot-cluster-deployer";
+        program = "${self.packages.${system}.default}/bin/gaoji-cluster-deployer";
       };
     });
 
@@ -211,8 +213,8 @@
       virtualenv = package.passthru.virtualenv;
     in {
       inherit package;
-      imports = pkgs.runCommand "qq-deepseek-bot-import-check" {} ''
-        cd ${package}/share/qq-deepseek-bot
+      imports = pkgs.runCommand "gaoji-import-check" {} ''
+        cd ${package}/share/gaoji
         ${virtualenv}/bin/python -c 'import alembic, edge_tts, httpx, miniaudio, nonebot, openai, opentelemetry.sdk, playwright, prometheus_client, psycopg, psycopg_pool, pygments, pysilk, sqlalchemy'
         ${virtualenv}/bin/python -c 'import ast, pathlib; [ast.parse(path.read_text(encoding="utf-8"), filename=str(path)) for path in pathlib.Path("src").rglob("*.py")]'
         touch "$out"
@@ -222,7 +224,7 @@
     devShells = forAllSystems (system: let
       pkgs = nixpkgs.legacyPackages.${system};
       pythonSet = mkPythonSet system;
-      virtualenv = pythonSet.mkVirtualEnv "qq-deepseek-bot-dev-env" workspace.deps.default;
+      virtualenv = pythonSet.mkVirtualEnv "gaoji-dev-env" workspace.deps.default;
     in {
       default = pkgs.mkShell {
         packages = [virtualenv pkgs.uv pkgs.nodejs_22];
@@ -236,7 +238,7 @@
 
     nixosModules = {
       default = import ./nix/module.nix {inherit self;};
-      qq-deepseek-bot = self.nixosModules.default;
+      gaoji = self.nixosModules.default;
       qwen-control = import ./nix/qwen-control.nix;
       cluster-control = import ./nix/cluster-control.nix {inherit self;};
       cluster-worker = import ./nix/cluster-worker.nix {inherit self;};

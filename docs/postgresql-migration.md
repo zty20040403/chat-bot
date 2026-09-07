@@ -6,7 +6,7 @@
 QQ / NapCat
     |
     v
-h610: qq-deepseek-bot
+h610: gaoji
     |
     | libpq 自动选择当前 read-write 节点
     v
@@ -35,9 +35,9 @@ systemd `EnvironmentFile`，不能写进 Git、Nix store 或命令行历史。Al
 以下命令都读取 `AI_POSTGRES_DSN` 和 `AI_POSTGRES_SCHEMA`：
 
 ```bash
-qq-deepseek-bot-db upgrade
-qq-deepseek-bot-db current
-qq-deepseek-bot-db check
+gaoji-db upgrade
+gaoji-db current
+gaoji-db check
 ```
 
 运行时本身不建表、不改表。NixOS module 默认在启动 Bot 前执行 `upgrade`；数据库
@@ -48,27 +48,27 @@ qq-deepseek-bot-db check
 迁移必须在 Bot 停止后进行，避免扫描完成后又产生新消息。
 
 ```bash
-sudo systemctl stop qq-deepseek-bot
-sudo cp -a /var/lib/qq-deepseek-bot/state \
-  /var/lib/qq-deepseek-bot/state.pre-postgres
+sudo systemctl stop gaoji
+sudo cp -a /var/lib/gaoji/state \
+  /var/lib/gaoji/state.pre-postgres
 ```
 
 先升级空的 PostgreSQL schema，再只读扫描旧目录：
 
 ```bash
-qq-deepseek-bot-db upgrade
-qq-deepseek-bot-db inspect-legacy \
-  --state-dir /var/lib/qq-deepseek-bot/state \
+gaoji-db upgrade
+gaoji-db inspect-legacy \
+  --state-dir /var/lib/gaoji/state \
   --report /tmp/qq-bot-legacy.json
 ```
 
 不带 `--apply` 的 `migrate-legacy` 也是 dry-run。确认表数和总行数后执行原子回填：
 
 ```bash
-qq-deepseek-bot-db migrate-legacy \
-  --state-dir /var/lib/qq-deepseek-bot/state \
+gaoji-db migrate-legacy \
+  --state-dir /var/lib/gaoji/state \
   --apply \
-  --report /var/lib/qq-deepseek-bot/postgres-migration.json
+  --report /var/lib/gaoji/postgres-migration.json
 ```
 
 回填会完成这些工作：
@@ -83,11 +83,11 @@ qq-deepseek-bot-db migrate-legacy \
 再单独复核并启动：
 
 ```bash
-qq-deepseek-bot-db verify-legacy \
-  --state-dir /var/lib/qq-deepseek-bot/state \
+gaoji-db verify-legacy \
+  --state-dir /var/lib/gaoji/state \
   --report /tmp/qq-bot-verify.json
-sudo systemctl start qq-deepseek-bot
-sudo journalctl -u qq-deepseek-bot -n 100 --no-pager
+sudo systemctl start gaoji
+sudo journalctl -u gaoji -n 100 --no-pager
 ```
 
 ## 回滚

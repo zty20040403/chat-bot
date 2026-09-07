@@ -358,7 +358,7 @@ class Settings:
             ),
             system_prompt=os.getenv(
                 "AI_SYSTEM_PROMPT",
-                "你是QQ群里的友好助手。回答要简洁、准确、有帮助；不知道就说不知道。",
+                "你是 gaoji，QQ群里的友好群友。回答要简洁、准确、有帮助；不知道就说不知道。",
             ).strip(),
             max_context_turns=_get_int("AI_MAX_CONTEXT_TURNS", 6),
             group_context_messages=_get_int("AI_GROUP_CONTEXT_MESSAGES", 40),
@@ -846,8 +846,8 @@ class Settings:
                 "AI_FLEET_LOG_ALLOWED_GROUPS"
             ),
             otel_service_name=(
-                os.getenv("OTEL_SERVICE_NAME", "kennethbot").strip()
-                or "kennethbot"
+                os.getenv("OTEL_SERVICE_NAME", "gaoji").strip()
+                or "gaoji"
             ),
             otel_exporter_otlp_endpoint=os.getenv(
                 "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
@@ -920,8 +920,8 @@ class Settings:
             sandbox_enabled=_get_bool("AI_SANDBOX_ENABLED", False),
             sandbox_image=os.getenv("AI_SANDBOX_IMAGE", "").strip(),
             sandbox_nix_cache_volume=(
-                os.getenv("AI_SANDBOX_NIX_CACHE_VOLUME", "kennethbot-nix-v2").strip()
-                or "kennethbot-nix-v2"
+                os.getenv("AI_SANDBOX_NIX_CACHE_VOLUME", "gaoji-nix-v2").strip()
+                or "gaoji-nix-v2"
             ),
             sandbox_allowed_users=_get_group_ids(
                 "AI_SANDBOX_ALLOWED_USERS"

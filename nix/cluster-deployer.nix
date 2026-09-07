@@ -4,7 +4,7 @@
   pkgs,
   ...
 }: let
-  cfg = config.services.kennethbot-cluster-deployer;
+  cfg = config.services.gaoji-cluster-deployer;
   defaultPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
   targetType = lib.types.submodule {
     options = {
@@ -27,8 +27,13 @@
   };
   targetIds = map (target: target.hostId) cfg.targets;
 in {
-  options.services.kennethbot-cluster-deployer = {
-    enable = lib.mkEnableOption "Kennethbot's fixed-contract Nix deployment executor";
+  options.services.gaoji-cluster-deployer = {
+    stateDirectory = lib.mkOption {
+      type = lib.types.strMatching "[A-Za-z0-9][A-Za-z0-9_-]*";
+      default = "gaoji-cluster-deployer";
+      description = "Persistent directory under /var/lib; preserve it when renaming an existing service.";
+    };
+    enable = lib.mkEnableOption "gaoji's fixed-contract Nix deployment executor";
     package = lib.mkOption {
       type = lib.types.package;
       default = defaultPackage;
@@ -70,47 +75,47 @@ in {
     assertions = [
       {
         assertion = builtins.match "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$" cfg.deployerId != null;
-        message = "Kennethbot deployerId is invalid";
+        message = "gaoji deployerId is invalid";
       }
       {
         assertion = builtins.match "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$" cfg.executorHostId != null;
-        message = "Kennethbot executorHostId is invalid";
+        message = "gaoji executorHostId is invalid";
       }
       {
         assertion = builtins.match "^[a-z][a-z0-9_-]{0,63}$" cfg.repositoryId != null;
-        message = "Kennethbot deployment repositoryId is invalid";
+        message = "gaoji deployment repositoryId is invalid";
       }
       {
         assertion = lib.hasPrefix "http://" cfg.controlUrl || lib.hasPrefix "https://" cfg.controlUrl;
-        message = "Kennethbot deployer controlUrl must use HTTP(S)";
+        message = "gaoji deployer controlUrl must use HTTP(S)";
       }
       {
         assertion = lib.hasPrefix "https://" cfg.repositoryUrl || lib.hasPrefix "ssh://" cfg.repositoryUrl || lib.hasPrefix "git@" cfg.repositoryUrl;
-        message = "Kennethbot deployer repositoryUrl must use HTTPS or SSH";
+        message = "gaoji deployer repositoryUrl must use HTTPS or SSH";
       }
       {
         assertion = cfg.targets != [] && builtins.length targetIds == builtins.length (lib.unique targetIds);
-        message = "Kennethbot deployer requires unique deployment targets";
+        message = "gaoji deployer requires unique deployment targets";
       }
       {
         assertion = cfg.allowSelfDeployment || !(lib.elem cfg.executorHostId targetIds);
-        message = "Kennethbot deployer cannot target its own host unless allowSelfDeployment is explicitly enabled";
+        message = "gaoji deployer cannot target its own host unless allowSelfDeployment is explicitly enabled";
       }
       {
         assertion = lib.all (target: builtins.match "^([A-Za-z0-9._-]+@)?[A-Za-z0-9][A-Za-z0-9.-]{0,199}$" target.sshTarget != null) cfg.targets;
-        message = "Kennethbot deployer target sshTarget is invalid";
+        message = "gaoji deployer target sshTarget is invalid";
       }
       {
         assertion = lib.all (target: lib.all (unit: builtins.match "^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,119}\\.service$" unit != null) target.verificationUnits) cfg.targets;
-        message = "Kennethbot deployer verification unit is invalid";
+        message = "gaoji deployer verification unit is invalid";
       }
     ];
 
-    systemd.services.kennethbot-cluster-deployer = {
-      description = "Kennethbot fixed-contract Nix deployer";
+    systemd.services.gaoji-cluster-deployer = {
+      description = "gaoji fixed-contract Nix deployer";
       wantedBy = ["multi-user.target"];
-      wants = ["network-online.target" "kennethbot-cluster-control.service"];
-      after = ["network-online.target" "kennethbot-cluster-control.service"];
+      wants = ["network-online.target" "gaoji-cluster-control.service"];
+      after = ["network-online.target" "gaoji-cluster-control.service"];
       path = [pkgs.git pkgs.nix pkgs.openssh pkgs.coreutils pkgs.systemd];
       environment = {
         KD_DEPLOYER_ID = cfg.deployerId;
@@ -118,7 +123,7 @@ in {
         KD_ALLOW_SELF_DEPLOYMENT = lib.boolToString cfg.allowSelfDeployment;
         KD_TOKEN_FILE = "%d/deployer-token";
         KD_CONTROL_URL = cfg.controlUrl;
-        KD_STATE_DIR = "/var/lib/kennethbot-cluster-deployer";
+        KD_STATE_DIR = "/var/lib/${cfg.stateDirectory}";
         KD_REPOSITORY_ID = cfg.repositoryId;
         KD_REPOSITORY_URL = cfg.repositoryUrl;
         KD_DEFAULT_BRANCH = cfg.defaultBranch;
@@ -139,14 +144,14 @@ in {
       serviceConfig = {
         Type = "simple";
         DynamicUser = true;
-        StateDirectory = "kennethbot-cluster-deployer";
-        WorkingDirectory = "${cfg.package}/share/qq-deepseek-bot";
+        StateDirectory = cfg.stateDirectory;
+        WorkingDirectory = "${cfg.package}/share/gaoji";
         LoadCredential = [
           "deployer-token:${cfg.tokenFile}"
           "ssh-identity:${cfg.sshIdentityFile}"
           "ssh-known-hosts:${cfg.sshKnownHostsFile}"
         ];
-        ExecStart = "${cfg.package}/bin/kennethbot-cluster-deployer";
+        ExecStart = "${cfg.package}/bin/gaoji-cluster-deployer";
         Restart = "on-failure";
         RestartSec = 5;
         UMask = "0077";

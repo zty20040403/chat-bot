@@ -324,7 +324,7 @@ export function OverviewView({ plane, onOpenDetail }: { plane: Plane; onOpenDeta
         action={<RefreshButton loading={plane.loading.has('overview')} onClick={() => void plane.refreshMany(['overview', 'observability'])} />}
       />
       <div className="metric-grid overview-metrics">
-        <Metric label="服务状态" value={plane.online ? '运行中' : '连接断开'} hint={`v${overview.version ?? window.__KENNETHBOT_ADMIN__.version} · 已运行 ${fmtDuration(overview.uptime_seconds)}`} />
+        <Metric label="服务状态" value={plane.online ? '运行中' : '连接断开'} hint={`v${overview.version ?? window.__GAOJI_ADMIN__.version} · 已运行 ${fmtDuration(overview.uptime_seconds)}`} />
         <Metric label="运行任务" value={fmtNumber(Number(overview.running_tasks ?? 0) + Number(overview.subagent_tasks?.running ?? 0) + Number(overview.subagent_tasks?.planning ?? 0) + Number(overview.subagent_tasks?.verifying ?? 0))} hint={`${fmtNumber(overview.durable_jobs?.running)} 个持久任务 · ${fmtNumber(overview.subagent_tasks?.completed)} 个 Sub-Agent 任务完成 · ${fmtNumber(totals.turns)} 个 Agent 回合`} />
         <Metric label="沙盒活动" value={fmtNumber(sandboxes.active_commands)} hint={`${fmtNumber(rows(sandboxes.items).length)} 个保留沙盒 · 空闲时停止`} />
         <Metric label="90 天 Token" value={fmtNumber(usageTotals.input + usageTotals.output)} hint={`${fmtNumber(usageTotals.calls)} 次调用 · 输入 ${fmtNumber(usageTotals.input)} / 输出 ${fmtNumber(usageTotals.output)}`} />
@@ -895,7 +895,7 @@ export function FleetView({ plane }: { plane: Plane }) {
     <>
       <PageHeader title="服务器集群" description="只读证据、受控操作、远程 Worker、资源预留与临时预览" action={<RefreshButton loading={plane.loading.has('fleet')} onClick={() => void plane.refresh('fleet')} />} />
       <div className="metric-grid">
-        <Metric label="控制链路" value={<StatusBadge value={status} />} hint={payload.configured ? `MaxOps：${backend.state ?? 'unknown'}` : '尚未配置集群控制服务'} />
+        <Metric label="控制链路" value={<StatusBadge value={status} />} hint={payload.configured ? `Ops：${backend.state ?? 'unknown'}` : '尚未配置集群控制服务'} />
         <Metric label="登记节点" value={fmtNumber(knownHosts.length)} hint={`${fmtNumber(observedHosts.length)} 台有当前观测`} />
         <Metric label="可用能力" value={`${availableCapabilities.length}/${capabilities.length}`} hint="新能力不会自动授权" />
         <Metric label="最后成功" value={fmtTime(backend.last_success_at ?? fleet.observed_at)} hint={fleet.cached ? '当前结果来自缓存' : '当前结果来自上游'} />
@@ -1026,9 +1026,9 @@ export function FleetView({ plane }: { plane: Plane }) {
         {unitDetail && <DataTable><thead><tr><th>服务</th><th>加载</th><th>运行</th><th>子状态</th><th>主进程</th><th>内存</th></tr></thead><tbody><tr><td><code>{selectedUnit}</code></td><td>{unitDetail.data?.unit?.load_state ?? '-'}</td><td><StatusBadge value={unitDetail.data?.unit?.active_state ?? unitDetail.status} /></td><td>{unitDetail.data?.unit?.sub_state ?? '-'}</td><td>{unitDetail.data?.unit?.details?.main_pid ?? '-'}</td><td>{fmtBytes(unitDetail.data?.unit?.details?.memory_current_bytes)}</td></tr></tbody></DataTable>}
         {logDetail && <div className="fleet-log-lines"><div><strong>最近一小时日志</strong><StatusBadge value={logDetail.status} /></div>{rows(logDetail.data?.entries).map((entry, index) => <p key={`${entry.timestamp_us}-${index}`}><time>{fmtTime(Number(entry.timestamp_us ?? 0) / 1_000_000)}</time><code>{entry.priority ?? '-'}</code><span>{entry.message ?? ''}</span></p>)}{!rows(logDetail.data?.entries).length && <EmptyState>没有返回日志；可能没有记录或当前范围无权读取</EmptyState>}</div>}
       </Section>}
-      <Section title="只读能力" description="能力必须同时存在于上游目录和 Kennethbot 映射中">
+      <Section title="只读能力" description="能力必须同时存在于上游目录和 gaoji 映射中">
         <DataTable><thead><tr><th>能力</th><th>上游操作</th><th>可用</th><th>敏感</th><th>原因</th></tr></thead><tbody>{capabilities.map((item) => <tr key={item.name}><td><code>{item.name}</code></td><td><code>{item.operation}</code></td><td><StatusBadge value={item.available ? 'enabled' : 'disabled'} /></td><td>{item.sensitive ? '是' : '否'}</td><td>{item.reason || '-'}</td></tr>)}</tbody></DataTable>
-        {!capabilities.length && <EmptyState>尚未取得 MaxOps 操作目录</EmptyState>}
+        {!capabilities.length && <EmptyState>尚未取得 Ops 操作目录</EmptyState>}
       </Section>
       <Section title="最近观测" description="日志正文不落库，这里只保存操作、目标、状态和时间">
         <DataTable><thead><tr><th>收到时间</th><th>操作</th><th>目标</th><th>状态</th><th>耗时</th><th>敏感</th><th>错误码</th></tr></thead><tbody>{observations.slice(0, 5).map((item) => <tr key={item.observation_id}><td>{fmtTime(item.received_at)}</td><td><code>{item.operation}</code></td><td>{item.target_key}</td><td><StatusBadge value={item.status} /></td><td>{item.duration_ms ?? '-'} ms</td><td>{item.sensitive ? '是' : '否'}</td><td>{item.error_code || '-'}</td></tr>)}</tbody></DataTable>
@@ -1180,7 +1180,7 @@ const HELP_SECTIONS = [
       ['Trace 与上下文', '用 Trace ID 串起一次回答的模型、工具、Token 和耗时；上下文决策显示“你觉得呢”等追问最终关联了哪条消息及置信度。'],
       ['上下文调试', '左侧选择一次回答，右侧查看当前话题、原始证据、候选评分、Token 分区及群/个人记忆。确认质量后点“答对了”或“答非所问”，备注会连同版本写入审计。'],
       ['数据库', '查看 h610 主库和备用节点、连接池、延迟及复制状态。出现 offline 或 degraded 时先看节点错误，不要直接清数据。'],
-      ['服务器集群', '查看 MaxOps 只读链路、节点观测、操作能力和最近查询。fresh 是新数据，stale 是旧数据加上游错误，unavailable 只表示当前取不到证据，不能据此断定服务器关机。'],
+      ['服务器集群', '查看 Ops 只读链路、节点观测、操作能力和最近查询。fresh 是新数据，stale 是旧数据加上游错误，unavailable 只表示当前取不到证据，不能据此断定服务器关机。'],
       ['沙盒', '查看临时容器、正在执行的命令、内存和 Agent 任务。任务完成后沙盒自动销毁，因此这里为空通常是正常状态。'],
     ],
   },

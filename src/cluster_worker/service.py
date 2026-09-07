@@ -25,7 +25,7 @@ from .config import WorkerSettings
 
 CAPABILITIES = tuple(sorted(WORKER_JOB_KINDS))
 EXECUTOR_VERSION = "worker-v2"
-logger = logging.getLogger("kennethbot.cluster_worker")
+logger = logging.getLogger("gaoji.cluster_worker")
 
 
 class ClusterWorker:
@@ -225,8 +225,8 @@ class ClusterWorker:
                 int(checkpoint.get("format_version") or 0) != 1
                 or checkpoint.get("executor_version") != EXECUTOR_VERSION
                 or constraints.get("executor_version", EXECUTOR_VERSION) != EXECUTOR_VERSION
-                or constraints.get("checkpoint_format", "kennethbot-result-v1")
-                != "kennethbot-result-v1"
+                or constraints.get("checkpoint_format", "gaoji-result-v1")
+                not in {"gaoji-result-v1", "kennethbot-result-v1"}
             ):
                 raise ValueError("saved checkpoint is incompatible with this worker")
             state = checkpoint.get("state")
@@ -318,7 +318,7 @@ class ClusterWorker:
         preview_id = str(payload["preview_id"])
         target = self.previews / preview_id
         if target.exists():
-            metadata = json.loads((target / ".kennethbot-preview.json").read_text(encoding="utf-8"))
+            metadata = json.loads(self._preview_metadata(target).read_text(encoding="utf-8"))
             return {"public_url": metadata["public_url"], "reconciled": True}
         temporary = self.previews / f".{preview_id}.tmp"
         shutil.rmtree(temporary, ignore_errors=True)
@@ -354,7 +354,7 @@ class ClusterWorker:
                 "public_url": public_url,
                 "expires_at": int(payload["expires_at"]),
             }
-            (temporary / ".kennethbot-preview.json").write_text(
+            (temporary / ".gaoji-preview.json").write_text(
                 json.dumps(metadata), encoding="utf-8"
             )
             os.replace(temporary, target)
@@ -369,17 +369,22 @@ class ClusterWorker:
             if not path.is_dir() or path.name.startswith("."):
                 continue
             try:
-                metadata = json.loads((path / ".kennethbot-preview.json").read_text(encoding="utf-8"))
+                metadata = json.loads(self._preview_metadata(path).read_text(encoding="utf-8"))
                 if int(metadata["expires_at"]) <= now:
                     shutil.rmtree(path)
             except Exception:
                 continue
 
+    @staticmethod
+    def _preview_metadata(root: Path) -> Path:
+        current = root / ".gaoji-preview.json"
+        return current if current.is_file() else root / ".kennethbot-preview.json"
+
     def preview_file(self, preview_id: str, relative_path: str) -> tuple[Path, str] | None:
         if not preview_id.startswith("preview_") or len(preview_id) != 40:
             return None
         root = (self.previews / preview_id).resolve()
-        metadata = root / ".kennethbot-preview.json"
+        metadata = self._preview_metadata(root)
         if not metadata.is_file():
             return None
         try:
@@ -388,6 +393,8 @@ class ClusterWorker:
         except Exception:
             return None
         requested = relative_path or "index.html"
+        if any(part.startswith(".") for part in PurePosixPath(requested).parts):
+            return None
         candidate = (root / requested).resolve()
         try:
             candidate.relative_to(root)
@@ -395,6 +402,6 @@ class ClusterWorker:
             return None
         if candidate.is_dir():
             candidate = candidate / "index.html"
-        if not candidate.is_file() or candidate.name == ".kennethbot-preview.json":
+        if not candidate.is_file():
             return None
         return candidate, mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"

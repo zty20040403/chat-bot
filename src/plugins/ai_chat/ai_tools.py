@@ -110,7 +110,7 @@ QUERY_ALERTS_TOOL: ToolDefinition = {
     "function": {
         "name": QUERY_ALERTS_TOOL_NAME,
         "description": (
-            "查询 Kennethbot 权威告警库，而不是搜索群聊通知。用于回答当前哪些"
+            "查询 gaoji 权威告警库，而不是搜索群聊通知。用于回答当前哪些"
             "服务器或服务在告警、过去谁告警最多、谁是常客、告警数量和恢复情况。"
             "结果按 incident_key 聚合同一台机器或服务，并明确统计周期。"
         ),
@@ -141,7 +141,7 @@ FLEET_OVERVIEW_TOOL: ToolDefinition = {
         "name": FLEET_OVERVIEW_TOOL_NAME,
         "description": (
             "查询已授权服务器集群的当前概况、数据来源和观测时间。用于回答哪些机器"
-            "在线、异常、未接入或观测已过期。结果来自 Kennethbot 控制服务与 MaxOps，"
+            "在线、异常、未接入或观测已过期。结果来自 gaoji 控制服务与 Ops，"
             "不能把查询入口失败解释成所有机器关机。"
         ),
         "parameters": {
@@ -185,7 +185,7 @@ SERVICE_INSPECT_TOOL: ToolDefinition = {
             "type": "object",
             "properties": {
                 "host_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"},
-                "unit": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,119}\\.service$", "description": "已授权的完整服务名，例如 qq-deepseek-bot.service；systemd 不是服务名。"},
+                "unit": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,119}\\.service$", "description": "已授权的完整服务名，例如 gaoji.service；systemd 不是服务名。"},
             },
             "required": ["host_id", "unit"],
             "additionalProperties": False,
@@ -249,7 +249,7 @@ DIAGNOSE_INCIDENT_TOOL: ToolDefinition = {
     "function": {
         "name": DIAGNOSE_INCIDENT_TOOL_NAME,
         "description": (
-            "运行一次受限、可审计的集群排障流程。它会组合 MaxOps、Bot Trace、"
+            "运行一次受限、可审计的集群排障流程。它会组合 Ops、Bot Trace、"
             "Outbox、数据库和预先配置的固定探测，最多两层、六项检查，并返回可在"
             "控制台查看的 diagnostic# 与 evidence#。服务器或 Bot 出问题时优先调用，"
             "不要靠聊天记录猜，也不要自行拼接内网 URL 或 shell 命令。"
@@ -758,8 +758,8 @@ SANDBOX_EXEC_TOOL: ToolDefinition = {
         "description": (
             "在指定沙盒的 /workspace 中执行 shell 命令，适合构建、测试、运行程序"
             "和打包文件。缺少工具时不要 apt/pip 全局安装：先用 nix_search 找到"
-            "属性名，再放进 packages；首次下载后会被所有 Kennethbot 沙盒缓存。"
-            "中文 PDF 使用 kennethbot-pdf，并用 pdffonts、pdftotext 验收。"
+            "属性名，再放进 packages；首次下载后会被所有 gaoji 沙盒缓存。"
+            "中文 PDF 使用 gaoji-pdf，并用 pdffonts、pdftotext 验收。"
             "不要用于读写宿主机。"
             "预计超过一次对话等待时间时，"
             "设置 background=true 交给可恢复的持久任务队列。"

@@ -624,25 +624,26 @@ class CheckpointResumeTests(unittest.IsolatedAsyncioTestCase):
             state, ensure_ascii=False, separators=(",", ":"), sort_keys=True
         ).encode("utf-8")
         worker = object.__new__(ClusterWorker)
-        result = await worker._execute(
-            {
-                "job_id": "job_" + "a" * 32,
-                "fence": 2,
-                "kind": "document.verify",
-                "constraints": {
-                    "checkpoint_format": "kennethbot-result-v1",
-                    "executor_version": "worker-v2",
-                },
-                "resume_checkpoint": {
-                    "phase": "completed",
-                    "format_version": 1,
-                    "executor_version": "worker-v2",
-                    "state": state,
-                    "state_hash": hashlib.sha256(encoded).hexdigest(),
-                },
-            }
-        )
-        self.assertEqual(result, state["result"])
+        for checkpoint_format in ("gaoji-result-v1", "kennethbot-result-v1"):
+            result = await worker._execute(
+                {
+                    "job_id": "job_" + "a" * 32,
+                    "fence": 2,
+                    "kind": "document.verify",
+                    "constraints": {
+                        "checkpoint_format": checkpoint_format,
+                        "executor_version": "worker-v2",
+                    },
+                    "resume_checkpoint": {
+                        "phase": "completed",
+                        "format_version": 1,
+                        "executor_version": "worker-v2",
+                        "state": state,
+                        "state_hash": hashlib.sha256(encoded).hexdigest(),
+                    },
+                }
+            )
+            self.assertEqual(result, state["result"])
 
 
 class _IndexState:

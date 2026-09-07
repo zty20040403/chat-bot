@@ -245,7 +245,7 @@ class FleetControlClient:
         host_id: str,
         target_id: str = "",
         subject: str = "",
-        requested_by: str = "kennethbot",
+        requested_by: str = "gaoji",
     ) -> dict[str, Any]:
         return await self._post(
             "/v1/diagnostics",
@@ -254,7 +254,7 @@ class FleetControlClient:
                 "host_id": host_id,
                 "target_id": target_id,
                 "subject": subject[:1000],
-                "requested_by": requested_by[:200] or "kennethbot",
+                "requested_by": requested_by[:200] or "gaoji",
             },
         )
 

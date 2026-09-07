@@ -113,7 +113,7 @@ AGENT_SPECS: dict[SubAgentRole, AgentSpec] = {
         instructions=(
             "先取得真实文件，再解析内容；不得根据文件名猜测。生成文档后检查文件"
             "存在且可读取，并通过文件句柄交付。含中文的 PDF 必须使用沙盒里的 "
-            "kennethbot-pdf 生成，再用 pdffonts 检查字体嵌入、pdftotext 检查中文；"
+            "gaoji-pdf 生成，再用 pdffonts 检查字体嵌入、pdftotext 检查中文；"
             "验收失败不得发送。"
         ),
         allowed_tools=(
@@ -178,7 +178,7 @@ AGENT_SPECS: dict[SubAgentRole, AgentSpec] = {
     "operator": AgentSpec(
         role="operator",
         title="运维",
-        description="检查 Kennethbot、告警、任务、数据库和运行状态。",
+        description="检查 gaoji、告警、任务、数据库和运行状态。",
         instructions=(
             "默认只读检查。涉及停止、重启、删除或修改服务时必须遵守宿主审批策略；"
             "报告影响范围、当前状态和建议动作。"

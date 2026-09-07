@@ -3,8 +3,8 @@
 The bot uses Alembic as the only authority for its PostgreSQL schema.
 
 ```bash
-qq-deepseek-bot-db upgrade
-qq-deepseek-bot-db current
+gaoji-db upgrade
+gaoji-db current
 ```
 
 `AI_POSTGRES_DSN` and, optionally, `AI_POSTGRES_SCHEMA` must be present in the

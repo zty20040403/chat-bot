@@ -126,7 +126,7 @@
     "category": "bot_reply_graph",
     "messages": [
       {"id": 1, "user": 7, "sender": "Alice", "text": "B站分享卡片为什么看不到视频正文？"},
-      {"id": 2, "user": 999, "sender": "KennethBot", "text": "目前只能读取页面简介和评论", "reply_to": 1, "direction": "outbound"},
+      {"id": 2, "user": 999, "sender": "gaoji", "text": "目前只能读取页面简介和评论", "reply_to": 1, "direction": "outbound"},
       {"id": 3, "user": 8, "sender": "Bob", "text": "好吧"}
     ],
     "current": {"id": 4, "user": 9, "sender": "Kenneth", "text": "为什么"},
@@ -245,7 +245,7 @@
       {"id": 3, "user": 6, "sender": "Carol", "text": "B站视频分析最长一小时", "at": 1200}
     ],
     "current": {"id": 4, "user": 9, "sender": "Kenneth", "text": "之前内网域名的直连规则是什么", "at": 90000},
-    "prompts": ["之前内网域名的直连规则是什么", "Clash 怎么绕过 Kennethbot 内网", "inner 域名应该走哪个策略", "VPN 和 Tailscale 冲突怎么分流", "DOMAIN-SUFFIX 那条规则是什么"],
+    "prompts": ["之前内网域名的直连规则是什么", "Clash 怎么绕过 gaoji 内网", "inner 域名应该走哪个策略", "VPN 和 Tailscale 冲突怎么分流", "DOMAIN-SUFFIX 那条规则是什么"],
     "expected_focus": null,
     "expected_recall": 1,
     "semantic_order": [1, 2, 3],

@@ -16,7 +16,7 @@ def _params_hash(params: dict[str, Any]) -> str:
 
 
 class FleetProjectionStore:
-    """Small durable projection; MaxOps and Prometheus remain source systems."""
+    """Small durable projection; Ops and Prometheus remain source systems."""
 
     def __init__(self, database: PostgresDatabase) -> None:
         self.database = database
@@ -42,7 +42,7 @@ class FleetProjectionStore:
                 INSERT INTO fleet_backend_states (
                     backend_name, state, catalog_version, operations_json,
                     error_code, last_success_at, checked_at
-                ) VALUES ('maxops', ?, ?, ?, ?, ?, ?)
+                ) VALUES ('ops', ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(backend_name) DO UPDATE SET
                     state = EXCLUDED.state,
                     catalog_version = EXCLUDED.catalog_version,
@@ -94,7 +94,7 @@ class FleetProjectionStore:
                     source_backend, operation, target_key, params_hash,
                     status, payload_json, sensitive, observed_at, received_at,
                     expires_at, duration_ms, error_code
-                ) VALUES ('maxops', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES ('ops', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 RETURNING observation_id
                 """,
                 (
@@ -134,7 +134,7 @@ class FleetProjectionStore:
                 SELECT operation, status, payload_json, sensitive, observed_at,
                        received_at, expires_at, duration_ms, error_code
                 FROM fleet_observations
-                WHERE source_backend = 'maxops'
+                WHERE source_backend = 'ops'
                   AND operation = ?
                   AND params_hash = ?
                   AND sensitive = FALSE
@@ -185,7 +185,7 @@ class FleetProjectionStore:
                 """
                 SELECT backend_name, state, catalog_version, operations_json,
                        error_code, last_success_at, checked_at
-                FROM fleet_backend_states WHERE backend_name = 'maxops'
+                FROM fleet_backend_states WHERE backend_name = 'ops'
                 """
             ).fetchone()
             if row is None:

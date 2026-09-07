@@ -10,8 +10,8 @@ Summary: 在隔离 Docker 沙盒中创建、修改、测试并交付项目。
    或 Python import 检查。缺少 Go、Rust、Java、LibreOffice、Pandoc、
    FFmpeg、ImageMagick、Tesseract 或数据分析库时，先用 `nix_search`
    找到属性名，再放进 `sandbox_exec.packages`；不要使用 apt，也不要全局
-   pip install。第一次会下载，之后从 Kennethbot 的共享 Nix 缓存复用。
-   含中文的 PDF 统一使用 `kennethbot-pdf input.md output.pdf`，随后运行
+   pip install。第一次会下载，之后从 gaoji 的共享 Nix 缓存复用。
+   含中文的 PDF 统一使用 `gaoji-pdf input.md output.pdf`，随后运行
    `pdffonts output.pdf` 确认字体已嵌入，并用 `pdftotext output.pdf -`
    确认中文可提取。不要用默认 Helvetica 生成中文 PDF。
 5. 先运行测试或最小启动检查，再声称完成。工具失败时报告实际错误，不可伪造成功。

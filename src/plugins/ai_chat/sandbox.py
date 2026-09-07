@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import re
 import secrets
 import shlex
@@ -69,7 +70,7 @@ class DockerSandboxManager:
         default_timeout_seconds: int = 120,
         max_output_chars: int = 12000,
         max_file_bytes: int = 20 * 1024 * 1024,
-        nix_cache_volume: str = "kennethbot-nix-v2",
+        nix_cache_volume: str = "gaoji-nix-v2",
         max_packages_per_exec: int = 16,
     ) -> None:
         self.image = image.strip()
@@ -78,7 +79,7 @@ class DockerSandboxManager:
         self.default_timeout_seconds = max(5, default_timeout_seconds)
         self.max_output_chars = max(1000, max_output_chars)
         self.max_file_bytes = max(0, int(max_file_bytes))
-        self.nix_cache_volume = nix_cache_volume.strip() or "kennethbot-nix-v2"
+        self.nix_cache_volume = nix_cache_volume.strip() or "gaoji-nix-v2"
         self.max_packages_per_exec = min(max(int(max_packages_per_exec), 1), 32)
         self._active_execs: dict[str, SandboxExecutionActivity] = {}
         self._last_execs: dict[str, SandboxExecutionActivity] = {}
@@ -327,6 +328,24 @@ class DockerSandboxManager:
                 sandbox_id,
                 require_running=False,
             )
+            workspace_volume = None
+            if self.image:
+                mounted = await self._run(
+                    "docker", "inspect", "--format", "{{json .Mounts}}", name,
+                    timeout=15,
+                )
+                if mounted.returncode != 0:
+                    raise SandboxError(self._docker_error(mounted.stderr))
+                # Read the mount before removal so pre-rename workspaces are not orphaned.
+                for mount in json.loads(mounted.stdout):
+                    if mount.get("Destination") == "/workspace" and mount.get("Type") == "volume":
+                        candidate = mount.get("Name")
+                        if candidate not in {
+                            self._workspace_volume_name(sandbox_id),
+                            f"kennethbot-work-{sandbox_id}",
+                        }:
+                            raise SandboxError("工作区卷不属于当前沙盒，已取消销毁。")
+                        workspace_volume = candidate
             result = await self._run(
                 "docker",
                 "rm",
@@ -336,8 +355,8 @@ class DockerSandboxManager:
             )
             if result.returncode != 0:
                 raise SandboxError(self._docker_error(result.stderr))
-            if self.image:
-                await self._remove_volume(self._workspace_volume_name(sandbox_id))
+            if workspace_volume:
+                await self._remove_volume(workspace_volume)
         self._exec_locks.pop(sandbox_id, None)
 
     async def exec(
@@ -533,15 +552,9 @@ class DockerSandboxManager:
                 "--tmpfs",
                 "/root:rw,nosuid,nodev,size=32m,mode=700",
                 "--mount",
-                f"type=volume,source={self.nix_cache_volume},target=/nix",
+                f"type=volume,source={self.nix_cache_volume},target=/cache/nix",
                 image,
-                "sh",
-                "-lc",
-                (
-                    "test -x \"$(command -v nix-store)\" "
-                    "&& nix-store --verify "
-                    "&& touch /nix/.kennethbot-cache-ready"
-                ),
+                "gaoji-cache-seed",
                 timeout=300,
             )
             if result.returncode != 0:
@@ -640,7 +653,7 @@ class DockerSandboxManager:
         await self._ensure_nix_volume(self.image)
         expression = self._package_expression(unique)
         cache_key = hashlib.sha256("\0".join(unique).encode()).hexdigest()[:24]
-        root = f"/nix/var/nix/gcroots/kennethbot-packages/{cache_key}"
+        root = f"/nix/var/nix/gcroots/gaoji-packages/{cache_key}"
         timeout = min(max(int(timeout_seconds), 30), 300)
         script = (
             "set -eu; root=$1; expr=$2; rm -rf -- \"$root\"; "
@@ -679,7 +692,7 @@ class DockerSandboxManager:
             "sh",
             "-lc",
             script,
-            "kennethbot-package-helper",
+            "gaoji-package-helper",
             root,
             expression,
             timeout=timeout + 20,
@@ -1308,7 +1321,7 @@ with tempfile.TemporaryFile() as output:
 
     @staticmethod
     def _workspace_volume_name(sandbox_id: str) -> str:
-        return f"kennethbot-work-{sandbox_id}"
+        return f"gaoji-work-{sandbox_id}"
 
     @staticmethod
     def _owner_ref(owner: str) -> str:

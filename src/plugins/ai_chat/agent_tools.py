@@ -95,7 +95,7 @@ AGENT_TOOL_PROMPT = (
     "先用 nix_search 找属性名，再通过 sandbox_exec 的 packages 参数按需加载，"
     "不要使用 apt，也不要全局 pip install；"
     "需要交付时，用 send_file_from_sandbox 或 send_image_from_sandbox 发到当前群。"
-    "生成含中文的 PDF 时必须使用沙盒内的 kennethbot-pdf input.md output.pdf，"
+    "生成含中文的 PDF 时必须使用沙盒内的 gaoji-pdf input.md output.pdf，"
     "再用 pdffonts 确认字体已嵌入、pdftotext 确认中文可提取；"
     "禁止用 Helvetica 等默认西文字体直接生成中文 PDF。"
     "任务沙盒不会由模型销毁；任务结束后宿主会停止容器并保留 /workspace，"
@@ -953,7 +953,7 @@ class AgentToolExecutor:
                     ok=False,
                     error=(
                         "PDF 含文字但字体没有嵌入，中文可能显示为方框，文件未发送。"
-                        "请使用 kennethbot-pdf 重新生成。"
+                        "请使用 gaoji-pdf 重新生成。"
                     ),
                 )
             pdf_validation = {

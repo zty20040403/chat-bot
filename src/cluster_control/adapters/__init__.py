@@ -1,10 +1,10 @@
 """External cluster backends with narrow, versioned contracts."""
 
-from .maxops import MaxOpsClient, MaxOpsError, MaxOpsOperation, MaxOpsResponse
+from .ops import OpsClient, OpsError, OpsOperation, OpsResponse
 
 __all__ = [
-    "MaxOpsClient",
-    "MaxOpsError",
-    "MaxOpsOperation",
-    "MaxOpsResponse",
+    "OpsClient",
+    "OpsError",
+    "OpsOperation",
+    "OpsResponse",
 ]

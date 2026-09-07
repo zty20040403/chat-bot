@@ -37,11 +37,11 @@ def dashboard_html(prefix: str, version: str, requires_token: bool) -> str:
   <meta name="theme-color" content="#18181b">
   <link rel="icon" type="image/svg+xml" href="{escape(prefix)}/favicon.svg?v={escape(version)}">
   <link rel="stylesheet" href="{escape(prefix)}/assets/app.css?v={escape(version)}">
-  <title>Kennethbot Control</title>
+  <title>gaoji Control</title>
 </head>
 <body>
-  <div id="root"><div class="boot-state">Kennethbot 控制台正在加载</div></div>
-  <script>window.__KENNETHBOT_ADMIN__={runtime};</script>
+  <div id="root"><div class="boot-state">gaoji 控制台正在加载</div></div>
+  <script>window.__GAOJI_ADMIN__={runtime};</script>
   <script type="module" src="{escape(prefix)}/assets/app.js?v={escape(version)}"></script>
 </body>
 </html>"""

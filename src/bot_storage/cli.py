@@ -25,7 +25,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="qq-deepseek-bot-db",
+        prog="gaoji-db",
         description="Manage the bot PostgreSQL schema and legacy data migration.",
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
