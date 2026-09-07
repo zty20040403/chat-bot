@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import unittest
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import nonebot
@@ -457,7 +457,7 @@ class GuardianRuntimeTests(unittest.IsolatedAsyncioTestCase):
         service = GuardianService(
             store,  # type: ignore[arg-type]
             ({"target_id": "admin", "url": "http://admin.test/health"},),
-            operation_factory=lambda payload, _actor, _scope: actions.append(payload) or {},
+            operation_factory=AsyncMock(side_effect=lambda payload, _owner: actions.append(payload) or {}),
         )
         await service._client.aclose()
         service._client = httpx.AsyncClient(
@@ -492,7 +492,7 @@ class GuardianRuntimeTests(unittest.IsolatedAsyncioTestCase):
         service = GuardianService(
             store,  # type: ignore[arg-type]
             ({"target_id": "admin", "url": "http://admin.test/health"},),
-            operation_factory=lambda _payload, _actor, _scope: {},
+            operation_factory=AsyncMock(return_value={}),
         )
         await service._client.aclose()
         service._client = httpx.AsyncClient(
@@ -563,7 +563,7 @@ class GuardianRuntimeTests(unittest.IsolatedAsyncioTestCase):
         service = GuardianService(
             store,  # type: ignore[arg-type]
             ({"target_id": "admin", "url": "http://admin.test/health"},),
-            operation_factory=lambda payload, _actor, _scope: actions.append(payload) or {},
+            operation_factory=AsyncMock(side_effect=lambda payload, _owner: actions.append(payload) or {}),
         )
         await service._client.aclose()
         service._client = httpx.AsyncClient(
@@ -598,11 +598,11 @@ class GuardianRuntimeTests(unittest.IsolatedAsyncioTestCase):
         service = GuardianService(
             store,  # type: ignore[arg-type]
             ({"target_id": "admin", "url": "http://admin.test/health"},),
-            operation_factory=lambda _payload, _actor, _scope: {
+            operation_factory=AsyncMock(return_value={
                 "operation_id": "op_" + "e" * 32,
                 "status": "awaiting_approval",
                 "executable": True,
-            },
+            }),
         )
         await service._client.aclose()
         service._client = httpx.AsyncClient(

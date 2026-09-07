@@ -10,6 +10,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from .api_resources import ResourceStatusRequest
 from .execution_service import ClusterExecutionService
 from .guardian import require_guardian_mode_capability
+from .guardian_ops import GuardianOpsBridge
+from .adapters.ops import OpsError
 from .reliability import ReliabilityStore
 
 
@@ -47,6 +49,8 @@ class GuardianRequest(BaseModel):
     max_actions: int = Field(default=0, ge=0, le=20)
     probe_policy: dict[str, object] = Field(default_factory=dict)
     authorized_action: dict[str, object] = Field(default_factory=dict)
+    confirm_remediation: bool = False
+    expected_target_hash: str = ""
 
 
 class CaseSearchRequest(BaseModel):
@@ -65,6 +69,7 @@ def build_reliability_router(
     signed_principal: Callable[..., Any],
     reliability_store: Callable[[], ReliabilityStore],
     execution_service: Callable[[], ClusterExecutionService],
+    guardian_ops: GuardianOpsBridge | None = None,
 ) -> APIRouter:
     router = APIRouter()
 
@@ -187,8 +192,11 @@ def build_reliability_router(
             execution = execution_service()
             require_guardian_mode_capability(
                 body.mode,
-                remediation_available=execution.write_backend.available,
+                remediation_available=guardian_ops is not None,
             )
+            if body.mode == "remediate" and guardian_ops is not None:
+                return await guardian_ops.create(body.model_dump(exclude_none=True),
+                    actor=principal[0], origin=principal[1])
             return await asyncio.to_thread(
                 reliability_store().create_guardian,
                 body.model_dump(exclude_none=True),
@@ -196,6 +204,8 @@ def build_reliability_router(
                 origin_scope=principal[1],
                 known_targets=execution.diagnostic_targets,
             )
+        except OpsError as exc:
+            raise HTTPException(status_code=502, detail=exc.code) from None
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from None
         except ValueError as exc:

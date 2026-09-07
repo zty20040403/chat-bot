@@ -11,9 +11,9 @@ Worker resource borrowing is separate from host root permissions.
 | P1 | Fresh authenticated status for all three hosts | Management catalog and root identity checks verified; refresh read observations in final audit |
 | P2 | Diagnostic evidence names the actual target and observer; a probe from each worker | Pending three-worker deployment |
 | P3 | Prepare, review, approve, execute and query a harmless command on each host | Verified on all three with `id -u`, 2026-09-07 |
-| P4 | Each worker registers, receives a real job and serves its own expiring preview | Worker configuration in progress |
+| P4 | Each worker registers, receives a real job and serves its own expiring preview | Worker package built; three-host Nix configuration committed, encrypted credential push awaiting authorization; live acceptance pending |
 | P5 | Owner dispatch, external grant requirement, resource reservation, grant revocation and checkpoint recovery | Existing mechanisms; three-host live acceptance pending |
-| P6 | Registered targets on all three, observed incident and recovery, searchable evidence; approved bounded remediation via the single Ops backend | Targets configured; backend integration and acceptance pending |
+| P6 | Registered targets on all three, observed incident and recovery, searchable evidence; approved bounded remediation via the single Ops backend | Ops bridge and explicit console authorization implemented; isolated PostgreSQL and desktop/mobile checks passed; production acceptance pending |
 | P7 | Fixed revision preflight, approval, serial verification and rollback contracts for three hosts through the single Ops backend | Integration and acceptance pending |
 
 Do not describe a configured host as a verified runtime. Do not perform destructive
@@ -36,3 +36,31 @@ shared Nix repository.
 The owner's authenticated QQ identity is an explicitly configured worker-owner
 alias, evaluated at each claim. It does not change the recorded actor or scope.
 Other users still need grants; models cannot supply aliases through task payloads.
+
+## Bounded Repair
+
+The console distinguishes observation from limited repair. Limited repair requires
+an authenticated administrator to review an exact registered target, service,
+action (start/restart), expiry and attempt limit. A target hash rejects approval
+of a target changed during review. Chat tools can still create observation-only
+guardians; they cannot approve a repair policy.
+
+The guardian uses MaxOps, not a second SSH/root backend. It binds the catalog and
+credential identity at authorization. Reserving an attempt and approving its Ops
+operation share one PostgreSQL transaction. Dispatch checks the policy again;
+paused, cancelled, expired or changed authorizations cannot start new actions.
+Already-started operations are tracked rather than blindly replayed. An attempt
+whose outcome is unknown still consumes its reservation. A later successful HTTP
+probe, not submission of a restart, is the evidence of recovery.
+
+Local acceptance uses `tests/test_guardian_ops.py` with
+`TEST_OPS_POSTGRES_DSN` pointing to a test-capable PostgreSQL account. It creates
+and removes a unique schema, models all three hosts, injects a transaction
+interruption, and checks repeat/cancel behavior with a mocked Ops transport.
+`tools/verify_ops_ui.cjs` verifies native review dialogs on desktop/mobile and
+ensures SSE refreshes do not replace a pending authorization.
+
+The shared configuration commit `a5966aa` has not been pushed: the credential
+publication gate needs explicit approval. Do not work around that gate by copying
+credentials through another channel. This does not prevent code-only development
+or isolated tests; it does prevent claiming the new three-host rollout is live.

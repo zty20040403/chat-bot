@@ -18,6 +18,7 @@ from .storage import FleetProjectionStore
 from .execution_service import ClusterExecutionService, WorkerAuthenticator
 from .execution_storage import ClusterExecutionStore
 from .guardian import GuardianService
+from .guardian_ops import GuardianOpsBridge
 from .reliability import ReliabilityStore
 from .resource_policy import ResourcePolicyStore
 from .ops_management import OpsManagementService
@@ -81,12 +82,12 @@ def main() -> None:
         },
         resource_policies=resource_policies,
     )
+    guardian_ops = (GuardianOpsBridge(management, reliability, execution.diagnostic_targets,
+        settings.inventory) if management is not None else None)
     guardian = GuardianService(
         reliability,
         settings.diagnostic_targets,
-        operation_factory=lambda raw, actor, origin: execution.submit_guardian_operation(
-            raw, actor_id=actor, origin_scope=origin
-        ),
+        operation_factory=guardian_ops.submit if guardian_ops is not None else None,
     )
     worker_authenticator = WorkerAuthenticator(
         {item["worker_id"]: item["token_file"] for item in settings.worker_identities}
@@ -117,6 +118,7 @@ def main() -> None:
         deployments=deployments,
         deployer_authenticator=deployer_authenticator,
         management=management,
+        guardian_ops=guardian_ops,
     )
     uvicorn.run(app, host=settings.host, port=settings.port, log_level="info")
 

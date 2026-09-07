@@ -7,7 +7,7 @@ import os
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from src.bot_storage import PostgresDatabase
 
@@ -119,6 +119,7 @@ class ClusterExecutionStore:
     def approve_operation(
         self, operation_id: str, *, actor_id: str, expected_hash: str,
         expected_version: int, expires_at: int,
+        before_approve: Callable[[Any, dict[str, Any], int], None] | None = None,
     ) -> dict[str, Any]:
         now = int(time.time())
         connection = self.database.store_connection()
@@ -139,6 +140,8 @@ class ClusterExecutionStore:
                 raise ValueError("operation changed; prepare and review it again")
             if int(item["deadline_at"]) <= now:
                 raise ValueError("operation deadline expired")
+            if before_approve is not None:
+                before_approve(cursor, item, now)
             approval_id = new_handle("approval")
             cursor.execute(
                 """INSERT INTO fleet_approvals

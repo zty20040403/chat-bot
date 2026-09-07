@@ -14,3 +14,6 @@
 .ops-confirm { display: flex; align-items: flex-start; gap: 10px; margin: 18px 0; }
 .ops-confirm input { flex-shrink: 0; margin-top: 3px; }
 .ops-error { color: #b91c1c; overflow-wrap: anywhere; }
+.guardian-review { padding: 0; }
+.guardian-review::backdrop { background: #0006; }
+.guardian-review p { overflow-wrap: anywhere; }

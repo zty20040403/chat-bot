@@ -22,6 +22,7 @@ import {
 import { TokenUsageChart } from './TokenUsageChart'
 import { SubAgentControls } from './SubAgentControls'
 import { OpsManagementPanel } from './OpsManagementPanel'
+import { GuardianControls } from './GuardianControls'
 import { LocalModelPanel, ModelRouteSummary } from './LocalModelPanel'
 import {
   DataTable,
@@ -579,7 +580,6 @@ export function FleetView({ plane }: { plane: Plane }) {
   const runbookCases = rows(payload.runbook_cases?.items)
   const guardians = rows(payload.guardians?.items)
   const policyByWorker = new Map(resourcePolicies.map((item) => [String(item.worker_id), item]))
-  const guardianTargets = rows(executionCapabilities.guardians?.targets)
   const observedHosts = rows(fleet.data?.hosts)
   const inventory = rows(fleet.inventory)
   const observedByHost = new Map(observedHosts.map((host) => [String(host.host), host]))
@@ -613,8 +613,6 @@ export function FleetView({ plane }: { plane: Plane }) {
   const [policyMemoryGiB, setPolicyMemoryGiB] = useState(0)
   const [policyGpu, setPolicyGpu] = useState(0)
   const [policyAllowGpu, setPolicyAllowGpu] = useState(false)
-  const [guardianTarget, setGuardianTarget] = useState('')
-  const [guardianHours, setGuardianHours] = useState(3)
   const [caseTitle, setCaseTitle] = useState('')
   const [caseHost, setCaseHost] = useState('')
   const [caseService, setCaseService] = useState('')
@@ -768,25 +766,6 @@ export function FleetView({ plane }: { plane: Plane }) {
       setFleetMutationError('')
     } catch (reason) {
       setFleetMutationError(reason instanceof Error ? reason.message : '借用授权修改失败')
-    }
-  }
-  const createGuardian = async () => {
-    const target = guardianTarget || String(guardianTargets[0] ?? '')
-    if (!target) return
-    try {
-      await plane.mutate('fleet', '/fleet/guardians', 'POST', {
-        target_id: target,
-        mode: 'observe',
-        expires_at: Math.floor(Date.now() / 1000) + Math.max(1, guardianHours) * 3600,
-        interval_seconds: 60,
-        failure_threshold: 3,
-        max_actions: 0,
-        probe_policy: {},
-        authorized_action: {},
-      }, ['fleet'])
-      setFleetMutationError('')
-    } catch (reason) {
-      setFleetMutationError(reason instanceof Error ? reason.message : '目标守护创建失败')
     }
   }
   const setGuardianStatus = async (item: any, status: string) => {
@@ -985,11 +964,7 @@ export function FleetView({ plane }: { plane: Plane }) {
         {!previews.length && <EmptyState>还没有临时预览</EmptyState>}
       </Section>
       <Section title="目标守护" description="固定探针按期限运行；连续失败才形成事故，健康检查不会消耗模型 Token">
-        <div className="diagnostic-controls">
-          <label><span>探测目标</span><select value={guardianTarget} onChange={(event) => setGuardianTarget(event.target.value)}><option value="">选择已登记目标</option>{guardianTargets.map((target) => <option key={target} value={target}>{target}</option>)}</select></label>
-          <label><span>守护时长</span><input type="number" min={1} max={744} value={guardianHours} onChange={(event) => setGuardianHours(Number(event.target.value) || 1)} /></label>
-          <button className="command-button" type="button" disabled={!guardianTarget && !guardianTargets.length} onClick={() => void createGuardian()}><ShieldCheck size={15} />创建只观察守护</button>
-        </div>
+        <GuardianControls plane={plane} />
         <DataTable><thead><tr><th>守护</th><th>目标</th><th>截止</th><th>最近检查</th><th>连续失败</th><th>处理次数</th><th>状态</th><th></th></tr></thead><tbody>{guardians.slice(0, 5).map((item) => <tr key={item.guardian_id}><td><code>{item.guardian_id}</code></td><td>{item.target_id}</td><td>{fmtTime(item.expires_at)}</td><td>{fmtTime(item.last_checked_at)}</td><td>{fmtNumber(item.consecutive_failures)} / {fmtNumber(item.failure_threshold)}</td><td>{fmtNumber(item.actions_used)} / {fmtNumber(item.max_actions)}</td><td><StatusBadge value={item.status} /></td><td className="actions"><button className="icon-button" title={item.status === 'paused' ? '恢复守护' : '暂停守护'} onClick={() => void setGuardianStatus(item, item.status === 'paused' ? 'active' : 'paused')}>{item.status === 'paused' ? <Play size={14} /> : <Clock3 size={14} />}</button><button className="icon-button danger" title="取消后不再创建新处理" onClick={() => void setGuardianStatus(item, 'cancelled')}><X size={14} /></button></td></tr>)}</tbody></DataTable>
         {!guardians.length && <EmptyState>暂无目标守护合同</EmptyState>}
       </Section>

@@ -22,6 +22,9 @@ from .deployment_service import DeploymentService
 from .diagnostics import IncidentDiagnosticService
 from .execution_service import ClusterExecutionService, WorkerAuthenticator
 from .guardian import GuardianService
+from .guardian import guardian_target_snapshot
+from .execution_contracts import content_hash
+from .guardian_ops import GuardianOpsBridge
 from .reliability import ReliabilityStore
 from .resource_policy import ResourcePolicyStore
 from .service import FleetControlService
@@ -148,6 +151,7 @@ def create_app(
     deployments: DeploymentService | None = None,
     deployer_authenticator: CredentialFileAuthenticator | None = None,
     management: OpsManagementService | None = None,
+    guardian_ops: GuardianOpsBridge | None = None,
 ) -> FastAPI:
     token_path = Path(api_token_file)
 
@@ -373,6 +377,11 @@ def create_app(
         result = execution_service().capabilities()
         result["ops_management"] = {"available": management is not None,
             "hosts": sorted(management.hosts) if management else [], "approval_required": True}
+        result["guardians"]["remediation_available"] = guardian_ops is not None
+        result["guardians"]["target_details"] = [
+            {**target, "target_hash": content_hash(guardian_target_snapshot(target))}
+            for target in execution_service().diagnostic_targets.values()
+        ]
         return result
 
     def management_service() -> OpsManagementService:
@@ -687,6 +696,7 @@ def create_app(
             signed_principal=signed_principal,
             reliability_store=reliability_store,
             execution_service=execution_service,
+            guardian_ops=guardian_ops,
         )
     )
     app.include_router(

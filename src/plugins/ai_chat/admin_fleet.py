@@ -119,6 +119,8 @@ class FleetGuardianRequest(BaseModel):
     max_actions: int = 0
     probe_policy: dict[str, object] = Field(default_factory=dict)
     authorized_action: dict[str, object] = Field(default_factory=dict)
+    confirm_remediation: bool = False
+    expected_target_hash: str = ""
 
 
 class FleetRunbookCaseRequest(BaseModel):
@@ -557,7 +559,7 @@ def register_fleet_admin_routes(
         request: FleetGuardianRequest,
         authorization: Optional[str] = Header(default=None),
     ) -> dict[str, object]:
-        authorize(authorization)
+        management_auth(authorization)
         try:
             return await configured_client().create_guardian(
                 request.model_dump(), actor="admin:kenneth", origin="admin-console"

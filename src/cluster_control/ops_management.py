@@ -7,7 +7,7 @@ import json
 import logging
 import time
 import uuid
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from jsonschema import Draft202012Validator, ValidationError
 
@@ -25,6 +25,7 @@ class OpsManagementService:
         self.actors = frozenset(actors)
         self.owner = uuid.uuid4().hex
         self.closed = False
+        self.guardian_validator: Callable[[dict[str, Any]], Awaitable[None]] | None = None
 
     def authorize(self, actor: str) -> None:
         if actor not in self.actors:
@@ -66,7 +67,7 @@ class OpsManagementService:
             "identity": hashlib.sha256(self.client._credential()).hexdigest()})
 
     async def call(self, operation: str, params: dict[str, Any], *, actor: str,
-                   origin: str, idempotency_key: str = "") -> dict[str, Any]:
+                   origin: str, idempotency_key: str = "", guardian_id: str = "") -> dict[str, Any]:
         self.authorize(actor)
         definition = next((d for d in await self.definitions() if d["name"] == operation), None)
         if definition is None:
@@ -88,6 +89,8 @@ class OpsManagementService:
         arguments = {"op": operation, "params": params,
                      "binding_hash": self.binding_hash(definition),
                      "upstream_idempotency": definition["idempotency"]}
+        if guardian_id:
+            arguments["guardian_id"] = guardian_id
         intent_hash = content_hash({"actor": actor, "origin": origin, "arguments": arguments})
         existing = await asyncio.to_thread(self.store.find_operation, actor, origin, idempotency_key)
         if existing is not None:
@@ -122,6 +125,8 @@ class OpsManagementService:
         record = await asyncio.to_thread(self.store.get_operation, operation_id)
         if not record or record["operation"] != "maxops.execute":
             raise LookupError("Management proposal not found")
+        if record["arguments"].get("guardian_id"):
+            raise PermissionError("Guardian actions must consume their bounded guardian authorization")
         await self.validate_binding(record)
         return await asyncio.to_thread(self.store.approve_operation, operation_id, actor_id=actor,
             expected_hash=expected_hash, expected_version=expected_version, expires_at=int(time.time()) + 300)
@@ -158,6 +163,10 @@ class OpsManagementService:
                     result = cancelled.data
                     status = "cancelling"
             else:
+                if record["arguments"].get("guardian_id"):
+                    if self.guardian_validator is None:
+                        raise PermissionError("Guardian authorization backend is unavailable")
+                    await self.guardian_validator(record)
                 # Persist the claim before any effect; lost submissions are never blindly replayed.
                 response = await self.client._request("POST", "/v1/execute",
                     body=canonical_json({"op": record["arguments"]["op"],

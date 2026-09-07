@@ -11,6 +11,9 @@ const operation = { operation_id: 'op_fixture', status: 'awaiting_approval', hos
   arguments: { op: 'exec.run', params: { host: 'h610', profile: 'operator',
     command: { argv: ['/run/current-system/sw/bin/printf', 'LONG_PARAMETER_'.repeat(60)] } } }, events: [] };
 let approved = 0;
+let guardianApproved = 0;
+const guardianTarget = { target_id: 'tank-worker', host_id: 'tank',
+  service_ref: 'gaoji-cluster-worker.service', target_hash: 'b'.repeat(64) };
 const streams = new Set();
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://localhost');
@@ -24,6 +27,15 @@ const server = http.createServer((req, res) => {
     if (req.method === 'POST') {
       let raw = ''; req.on('data', c => raw += c); req.on('end', () => {
         const body = JSON.parse(raw);
+        if (resource === 'fleet/guardians') {
+          assert.equal(body.confirm_remediation, true);
+          assert.equal(body.expected_target_hash, guardianTarget.target_hash);
+          assert.equal(body.authorized_action.host_id, 'tank');
+          assert.equal(body.authorized_action.resource_ref, guardianTarget.service_ref);
+          assert.equal(body.max_actions, 2);
+          guardianApproved++;
+          res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ guardian_id: 'guardian_fixture', status: 'scheduled' })); return;
+        }
         assert.equal(body.contract_hash, operation.contract_hash);
         assert.equal(body.resource_version, 1);
         approved++; operation.status = 'queued'; operation.updated_at++;
@@ -31,7 +43,8 @@ const server = http.createServer((req, res) => {
       }); return;
     }
     const payload = resource === 'fleet' ? { configured: true, fleet: { inventory: [] },
-      execution_capabilities: { ops_management: { available: true, hosts: ['h310', 'h610', 'tank'] } }, operations: { items: [operation] } }
+      execution_capabilities: { ops_management: { available: true, hosts: ['h310', 'h610', 'tank'] },
+        guardians: { targets: [guardianTarget.target_id], target_details: [guardianTarget], remediation_available: true } }, operations: { items: [operation] } }
       : resource === 'fleet/operations/op_fixture' ? operation
       : resource === 'fleet/ops/catalog' ? { operations: [{ name: 'exec.run', read_only: false }] }
       : resource === 'resource-versions' ? { versions: {} } : { items: [], counts: {} };
@@ -69,8 +82,30 @@ const server = http.createServer((req, res) => {
     await dialog.getByRole('button', { name: '批准执行' }).click();
     await page.waitForResponse(response => response.url().endsWith('/approve'));
     assert.equal(approved, 1);
+    await dialog.getByRole('button', { name: '关闭审阅' }).click();
+    await page.getByLabel('守护目标', { exact: true }).selectOption('tank-worker');
+    await page.getByLabel('守护模式', { exact: true }).selectOption('remediate');
+    await page.getByLabel('修复次数', { exact: true }).fill('2');
+    await page.getByRole('button', { name: '审阅修复授权' }).click();
+    const guardianDialog = page.getByRole('dialog', { name: '有限修复授权' });
+    await guardianDialog.waitFor();
+    assert.equal(await guardianDialog.getByRole('button', { name: '确认授权' }).isEnabled(), false);
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: 1000 });
+      await page.screenshot({ path: `/tmp/gaoji-guardian-${width}.png`, animations: 'disabled' });
+      const bounds = await guardianDialog.boundingBox();
+      assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= width);
+      assert.equal(await guardianDialog.evaluate(el => el.scrollWidth > el.clientWidth + 1), false);
+    }
+    await guardianDialog.getByRole('checkbox').check();
+    for (const stream of streams) stream.write(`data: ${JSON.stringify({ type: 'resources.changed', sequence: 3, resources: ['fleet'], timestamp: Date.now() / 1000 })}\n\n`);
+    await page.waitForResponse(response => response.url().endsWith('/fleet'));
+    assert.equal(await guardianDialog.getByRole('checkbox').isChecked(), true);
+    await guardianDialog.getByRole('button', { name: '确认授权' }).click();
+    await page.waitForResponse(response => response.url().endsWith('/guardians'));
+    assert.equal(guardianApproved, 1);
     assert.deepEqual(errors, []);
-    console.log('Desktop/mobile approval layout, stable SSE review and exact approval binding passed.');
+    console.log('Desktop/mobile operation and guardian reviews, stable SSE state and exact approvals passed.');
   } finally {
     await browser.close();
     for (const stream of streams) stream.end();

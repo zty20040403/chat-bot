@@ -4,7 +4,7 @@ import asyncio
 import logging
 import time
 import uuid
-from typing import Any, Callable, Mapping, Protocol
+from typing import Any, Awaitable, Callable, Mapping, Protocol
 
 import httpx
 
@@ -160,7 +160,7 @@ class GuardianService:
         store: GuardianStore,
         targets: tuple[dict[str, str], ...],
         *,
-        operation_factory: Callable[[dict[str, Any], str, str], dict[str, Any]] | None = None,
+        operation_factory: Callable[[Mapping[str, Any], str], Awaitable[dict[str, Any]]] | None = None,
     ) -> None:
         self.store = store
         self.targets = {str(item["target_id"]): dict(item) for item in targets}
@@ -178,7 +178,8 @@ class GuardianService:
     async def run(self) -> None:
         while not self.stop_event.is_set():
             try:
-                await self.tick()
+                if await self.tick():
+                    continue
                 await asyncio.wait_for(self.stop_event.wait(), timeout=5)
             except asyncio.TimeoutError:
                 pass
@@ -188,7 +189,7 @@ class GuardianService:
 
     async def tick(self) -> int:
         guardians = await asyncio.to_thread(
-            self.store.claim_due_guardians, owner=self.owner
+            self.store.claim_due_guardians, owner=self.owner, limit=1, lease_seconds=180
         )
         for guardian in guardians:
             await self._check(guardian)
@@ -282,16 +283,7 @@ class GuardianService:
             )
             if can_act:
                 try:
-                    operation = await asyncio.to_thread(
-                        self.operation_factory,
-                        materialize_guardian_action(
-                            guardian["authorized_action"],
-                            guardian,
-                            now=int(time.time()),
-                        ),
-                        str(guardian["actor_id"]),
-                        str(guardian["origin_scope"]),
-                    )
+                    operation = await self.operation_factory(guardian, self.owner)
                     operation_id = str(operation.get("operation_id") or "")
                     action_used = str(operation.get("status") or "") in {
                         "queued", "running", "verifying", "succeeded",
@@ -301,6 +293,9 @@ class GuardianService:
                         facts["remediation_status"] = str(
                             operation.get("status") or "not_started"
                         )
+                    if operation.get("action_reserved"):
+                        facts["action_reserved"] = True
+                        action_used = False
                 except Exception as exc:
                     requires_attention = True
                     facts["remediation_error"] = type(exc).__name__
