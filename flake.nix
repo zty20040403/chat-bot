@@ -183,6 +183,7 @@
       {
         default = mkPackage system;
         gaoji = mkPackage system;
+        cluster-worker = import ./nix/cluster-worker-package.nix {inherit pkgs lib;};
       }
       // lib.optionalAttrs pkgs.stdenv.isLinux {
         sandbox-image = mkSandboxImage system;
@@ -199,7 +200,7 @@
       };
       cluster-worker = {
         type = "app";
-        program = "${self.packages.${system}.default}/bin/gaoji-cluster-worker";
+        program = "${self.packages.${system}.cluster-worker}/bin/gaoji-cluster-worker";
       };
       cluster-deployer = {
         type = "app";

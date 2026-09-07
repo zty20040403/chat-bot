@@ -40,6 +40,7 @@ class ClusterExecutionService:
         diagnostic_targets: tuple[dict[str, str], ...],
         worker_hosts: Mapping[str, str],
         worker_owners: Mapping[str, str] | None = None,
+        worker_owner_aliases: Mapping[str, tuple[str, ...]] | None = None,
         resource_policies: ResourcePolicyStore | None = None,
         write_backend: WriteBackendBinding | None = None,
     ) -> None:
@@ -50,6 +51,7 @@ class ClusterExecutionService:
         }
         self.worker_hosts = dict(worker_hosts)
         self.worker_owners = dict(worker_owners or {})
+        self.worker_owner_aliases = dict(worker_owner_aliases or {})
         self.resource_policies = resource_policies
         self.write_backend = write_backend or WriteBackendBinding()
 
@@ -256,7 +258,10 @@ class ClusterExecutionService:
     def claim_job(self, worker_id: str) -> dict[str, Any] | None:
         host_id = self.worker_hosts.get(worker_id)
         host = self.inventory.get(str(host_id or ""), {})
-        return self.store.claim_job(worker_id, host=dict(host))
+        return self.store.claim_job(
+            worker_id, host=dict(host),
+            owner_aliases=self.worker_owner_aliases.get(worker_id, ()),
+        )
 
     def heartbeat(self, worker_id: str, raw: Mapping[str, Any]) -> dict[str, Any]:
         configured_host = self.worker_hosts.get(worker_id)

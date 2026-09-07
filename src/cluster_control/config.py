@@ -103,7 +103,7 @@ def _inventory(raw: str) -> tuple[dict[str, object], ...]:
     return tuple(result)
 
 
-def _worker_identities(raw: str) -> tuple[dict[str, str], ...]:
+def _worker_identities(raw: str) -> tuple[dict[str, object], ...]:
     if not raw.strip():
         return ()
     try:
@@ -112,7 +112,7 @@ def _worker_identities(raw: str) -> tuple[dict[str, str], ...]:
         raise ValueError("KC_WORKER_IDENTITIES_JSON must be valid JSON") from exc
     if not isinstance(value, list):
         raise ValueError("KC_WORKER_IDENTITIES_JSON must be a JSON array")
-    result: list[dict[str, str]] = []
+    result: list[dict[str, object]] = []
     worker_ids: set[str] = set()
     for item in value:
         if not isinstance(item, dict):
@@ -121,6 +121,13 @@ def _worker_identities(raw: str) -> tuple[dict[str, str], ...]:
         host_id = str(item.get("host_id") or "").strip()
         token_file = str(item.get("token_file") or "").strip()
         owner_actor_id = str(item.get("owner_actor_id") or "admin:kenneth").strip()
+        owner_aliases = item.get("owner_aliases", [])
+        if not isinstance(owner_aliases, list) or any(
+            not isinstance(actor, str)
+            or not re.fullmatch(r"qq:[0-9]+", actor)
+            for actor in owner_aliases
+        ):
+            raise ValueError("Worker owner aliases must be exact QQ identities")
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", worker_id):
             raise ValueError("Invalid worker_id")
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", host_id):
@@ -139,6 +146,7 @@ def _worker_identities(raw: str) -> tuple[dict[str, str], ...]:
                 "host_id": host_id,
                 "token_file": token_file,
                 "owner_actor_id": owner_actor_id,
+                "owner_aliases": list(dict.fromkeys(owner_aliases)),
             }
         )
     return tuple(result)
@@ -362,7 +370,7 @@ class ClusterControlSettings:
     cache_seconds: int
     inventory: tuple[dict[str, object], ...]
     diagnostic_targets: tuple[dict[str, str], ...]
-    worker_identities: tuple[dict[str, str], ...]
+    worker_identities: tuple[dict[str, object], ...]
     deployment_repositories: tuple[dict[str, object], ...]
     deployer_identities: tuple[dict[str, object], ...]
     artifact_dir: str

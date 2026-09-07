@@ -457,6 +457,7 @@ class ClusterExecutionStore:
     def claim_job(
         self, worker_id: str, *, host: dict[str, Any] | None = None,
         lease_seconds: int = 60,
+        owner_aliases: tuple[str, ...] = (),
     ) -> dict[str, Any] | None:
         now = int(time.time())
         connection = self.database.store_connection()
@@ -605,6 +606,7 @@ class ClusterExecutionStore:
                 request = ResourceRequest.parse(_decode(row["constraints_json"], {}))
                 external_borrow = (
                     str(row["actor_id"]) != str(policy["owner_actor_id"])
+                    and str(row["actor_id"]) not in owner_aliases
                 )
                 grant = None
                 grant_rows = cursor.execute(

@@ -115,6 +115,11 @@
       workerId = lib.mkOption {type = lib.types.str;};
       hostId = lib.mkOption {type = lib.types.str;};
       tokenFile = lib.mkOption {type = lib.types.str;};
+      ownerAliases = lib.mkOption {
+        type = lib.types.listOf (lib.types.strMatching "qq:[0-9]+");
+        default = [];
+        description = "Verified QQ identities of the administrator who owns this worker. Other callers require borrow grants.";
+      };
     };
   };
   deploymentTargetType = lib.types.submodule {
@@ -186,6 +191,12 @@ in {
       type = lib.types.bool;
       default = false;
       description = "Open the control API port. This should remain false for a colocated bot.";
+    };
+
+    firewallInterfaces = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [];
+      description = "Limit an explicitly opened API port to these interfaces; empty means all interfaces.";
     };
 
     environmentFile = lib.mkOption {
@@ -402,7 +413,10 @@ in {
       }
     ];
 
-    networking.firewall.allowedTCPPorts = lib.optionals cfg.openFirewall [cfg.port];
+    networking.firewall.allowedTCPPorts = lib.optionals (cfg.openFirewall && cfg.firewallInterfaces == []) [cfg.port];
+    networking.firewall.interfaces = lib.genAttrs (lib.optionals cfg.openFirewall cfg.firewallInterfaces) (_: {
+      allowedTCPPorts = [cfg.port];
+    });
 
     systemd.services.gaoji-cluster-control = {
       description = "gaoji authenticated cluster control service";
@@ -427,6 +441,7 @@ in {
         KC_WORKER_IDENTITIES_JSON = builtins.toJSON (map (worker: {
           worker_id = worker.workerId;
           host_id = worker.hostId;
+          owner_aliases = worker.ownerAliases;
           token_file = "%d/worker-${worker.workerId}";
         }) cfg.workers);
         KC_DEPLOYMENT_REPOSITORIES_JSON = builtins.toJSON (map (repository: {

@@ -75,6 +75,10 @@ def main() -> None:
         diagnostic_targets=settings.diagnostic_targets,
         worker_hosts=worker_hosts,
         worker_owners=worker_owners,
+        worker_owner_aliases={
+            str(item["worker_id"]): tuple(item["owner_aliases"])
+            for item in settings.worker_identities
+        },
         resource_policies=resource_policies,
     )
     guardian = GuardianService(

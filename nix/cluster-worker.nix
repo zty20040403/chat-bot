@@ -5,7 +5,7 @@
   ...
 }: let
   cfg = config.services.gaoji-cluster-worker;
-  defaultPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
+  defaultPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.cluster-worker;
 in {
   options.services.gaoji-cluster-worker = {
     enable = lib.mkEnableOption "an isolated gaoji compute and preview worker";
@@ -17,7 +17,7 @@ in {
     package = lib.mkOption {
       type = lib.types.package;
       default = defaultPackage;
-      defaultText = lib.literalExpression "inputs.qq-bot.packages.${pkgs.stdenv.hostPlatform.system}.default";
+      defaultText = lib.literalExpression "inputs.qq-bot.packages.${pkgs.stdenv.hostPlatform.system}.cluster-worker";
     };
     workerId = lib.mkOption {type = lib.types.str;};
     controlUrl = lib.mkOption {type = lib.types.str;};
@@ -49,8 +49,8 @@ in {
     systemd.services.gaoji-cluster-worker = {
       description = "gaoji isolated cluster worker";
       wantedBy = ["multi-user.target"];
-      wants = ["network-online.target" "gaoji-cluster-control.service"];
-      after = ["network-online.target" "gaoji-cluster-control.service"];
+      wants = ["network-online.target"];
+      after = ["network-online.target"];
       path = [pkgs.poppler-utils pkgs.ffmpeg-headless];
       environment = {
         KW_WORKER_ID = cfg.workerId;
