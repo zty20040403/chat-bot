@@ -11,6 +11,7 @@ nonebot.init()
 
 from src.plugins.ai_chat.alert_notifier import (
     ActivityAlert,
+    AlertNotificationPreferences,
     AlertNotificationService,
     format_alert_notification,
     group_alert_incidents,
@@ -57,6 +58,45 @@ def alert(
 
 
 class AlertNotificationServiceTests(unittest.IsolatedAsyncioTestCase):
+    def test_notification_preference_is_persistent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = Path(directory) / "notification-preferences.json"
+            preferences = AlertNotificationPreferences(state_path)
+            self.assertTrue(preferences.effective_enabled(True))
+            self.assertIsNone(preferences.enabled_override())
+
+            preferences.set_enabled(False)
+            restarted = AlertNotificationPreferences(state_path)
+
+            self.assertFalse(restarted.effective_enabled(True))
+            self.assertFalse(restarted.enabled_override())
+
+    async def test_disabled_delivery_keeps_baseline_without_replaying_backlog(self) -> None:
+        current: list[ActivityAlert] = []
+        enabled = False
+        bot = Bot()
+        with tempfile.TemporaryDirectory() as directory:
+            service = AlertNotificationService(
+                alertmanager_url="http://alertmanager",
+                group_id=611798505,
+                check_seconds=30,
+                state_path=Path(directory) / "alerts.json",
+                logger=Logger(),
+                fetcher=lambda: _result(current),
+                bot_provider=lambda: [bot],
+                enabled_provider=lambda: enabled,
+            )
+            await service.run_once()
+            current.append(alert("suppressed-while-disabled"))
+            suppressed = await service.run_once()
+            enabled = True
+            replayed = await service.run_once()
+            current.append(alert("new-after-enabled", peer="r2s"))
+            delivered = await service.run_once()
+
+        self.assertEqual((suppressed, replayed, delivered), (0, 0, 1))
+        self.assertEqual(len(bot.calls), 1)
+
     async def test_first_poll_only_establishes_baseline(self) -> None:
         current = [alert("existing")]
         bot = Bot()

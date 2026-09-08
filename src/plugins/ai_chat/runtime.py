@@ -12,6 +12,7 @@ from src.bot_storage import DatabaseError, PostgresDatabase
 from src.bot_storage.schema import HEAD_REVISION
 
 from .alert_history import AlertEventStore
+from .alert_notifier import AlertNotificationPreferences
 from .bridges import (
     BlueBubblesClient,
     BridgeManager,
@@ -109,6 +110,7 @@ class AppContext:
     user_profiles: GroupUserProfileStore
     model_preferences: ModelPreferenceStore
     reasoning_preferences: ModelPreferenceStore
+    alert_preferences: AlertNotificationPreferences
     model_catalog: ModelCatalog
     llm_gateway: LLMGateway = field(repr=False)
     self_source: SelfSource
@@ -281,6 +283,9 @@ def build_app_context(
     reasoning_preferences = ModelPreferenceStore(
         store_source("reasoning_preferences.json"),
         namespace="reasoning_preferences",
+    )
+    alert_preferences = AlertNotificationPreferences(
+        store_source("alert_notification_preferences.json")
     )
     model_catalog = ModelCatalog.from_settings(settings)
     if settings.model_simple_chat_profile:
@@ -849,6 +854,7 @@ def build_app_context(
         user_profiles=user_profiles,
         model_preferences=model_preferences,
         reasoning_preferences=reasoning_preferences,
+        alert_preferences=alert_preferences,
         model_catalog=model_catalog,
         llm_gateway=llm_gateway,
         local_model=local_model,

@@ -117,6 +117,9 @@ alert_notifier = AlertNotificationService(
     state_path=app_context.state_dir / "alert-notifier.json",
     logger=logger,
     history_store=app_context.alert_store,
+    enabled_provider=lambda: app_context.alert_preferences.effective_enabled(
+        settings.alert_notify_enabled
+    ),
 )
 BOT_STARTED_AT = app_context.started_at
 driver = get_driver()
@@ -299,14 +302,14 @@ async def start_background_tasks() -> None:
     if app_context.local_model is not None:
         background_tasks.start("local-model-health", app_context.local_model.run_forever)
     if (
-        settings.alert_notify_enabled
-        and settings.alertmanager_url
+        settings.alertmanager_url
         and settings.alert_notify_group_id > 0
         and background_tasks.start("alert-notifier", alert_notifier.run_forever)
     ):
         logger.info(
-            "Activity alert QQ notifier enabled for group "
-            f"{settings.alert_notify_group_id}."
+            "Activity alert QQ notifier started for group "
+            f"{settings.alert_notify_group_id}; delivery is "
+            f"{'enabled' if alert_notifier.notifications_enabled else 'disabled'}."
         )
     if (
         job_store is not None

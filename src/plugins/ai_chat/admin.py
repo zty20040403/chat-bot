@@ -84,6 +84,7 @@ class AdminServices:
     database: Any = None
     telemetry: Any = None
     alert_store: Any = None
+    alert_preferences: Any = None
     fleet_client: Any = None
 
 
@@ -108,6 +109,11 @@ class ReasoningEffortRequest(BaseModel):
 
 
 class GroupEnabledRequest(BaseModel):
+    enabled: bool
+
+
+class AlertNotificationControlRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     enabled: bool
 
 
@@ -510,6 +516,39 @@ def register_admin(
             "api_version": "v1",
             "resource": resource_key,
             "resource_version": control_store.version(resource_key),
+        }
+
+    def alert_notification_control() -> dict[str, object]:
+        settings = services.settings
+        configured_default = bool(
+            getattr(settings, "alert_notify_enabled", False)
+        )
+        preferences = services.alert_preferences
+        override = (
+            preferences.enabled_override()
+            if preferences is not None
+            and callable(getattr(preferences, "enabled_override", None))
+            else None
+        )
+        enabled = (
+            preferences.effective_enabled(configured_default)
+            if preferences is not None
+            and callable(getattr(preferences, "effective_enabled", None))
+            else configured_default
+        )
+        alertmanager_url = str(
+            getattr(settings, "alertmanager_url", "") or ""
+        )
+        group_id = int(getattr(settings, "alert_notify_group_id", 0) or 0)
+        return {
+            "configured": bool(alertmanager_url and group_id > 0),
+            "enabled": bool(enabled),
+            "configured_default": configured_default,
+            "enabled_override": override,
+            "group_id": group_id,
+            "check_seconds": int(
+                getattr(settings, "alert_notify_check_seconds", 30) or 30
+            ),
         }
 
     @router.get("", response_class=HTMLResponse, include_in_schema=False)
@@ -1985,7 +2024,43 @@ def register_admin(
             days=days,
             limit=limit,
         )
+        payload["notification_control"] = alert_notification_control()
         return versioned("alerts", payload)
+
+    @router.put("/api/alert-notifications/control")
+    async def set_alert_notification_control(
+        selection: AlertNotificationControlRequest,
+        mutation_info: AdminMutationContext = Depends(mutation_context),
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
+        authorize(authorization)
+        preferences = services.alert_preferences
+        if preferences is None or not callable(
+            getattr(preferences, "set_enabled", None)
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail="QQ 告警通知状态存储不可用",
+            )
+        before = alert_notification_control()
+
+        def update_notification_control(_version: int) -> dict[str, object]:
+            preferences.set_enabled(selection.enabled)
+            return alert_notification_control()
+
+        result = mutate(
+            mutation_info,
+            "alerts",
+            action="alert-notifications.set",
+            target=str(before["group_id"]),
+            before=before,
+            operation=update_notification_control,
+        )
+        event_broker.publish("alerts", "observability")
+        return mutation_payload(
+            result,
+            notification_control=result.value,
+        )
 
     legacy_api_prefix = f"{prefix}/api"
     for route in tuple(router.routes):

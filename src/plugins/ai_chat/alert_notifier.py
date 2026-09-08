@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import threading
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -16,6 +17,8 @@ import httpx
 from nonebot import get_bots
 from nonebot.adapters.onebot.v11 import Bot, Message, MessageSegment
 from nonebot.adapters.onebot.v11.exception import ActionFailed
+
+from src.bot_storage import StateSource, open_json_state
 
 
 class AlertLogger(Protocol):
@@ -62,6 +65,38 @@ class ActivityAlert:
 
 AlertFetcher = Callable[[], Awaitable[list[ActivityAlert]]]
 BotProvider = Callable[[], Sequence[GroupMessageBot]]
+NotificationEnabledProvider = Callable[[], bool]
+
+
+class AlertNotificationPreferences:
+    """Persistent operator override for QQ alert delivery."""
+
+    def __init__(self, state_source: StateSource) -> None:
+        self._state = open_json_state(
+            state_source,
+            "alert_notification_preferences",
+        )
+        self._lock = threading.RLock()
+        payload = self._state.load()
+        stored = payload.get("enabled") if isinstance(payload, dict) else None
+        self._enabled_override = stored if isinstance(stored, bool) else None
+
+    def effective_enabled(self, configured_default: bool) -> bool:
+        with self._lock:
+            if self._enabled_override is None:
+                return bool(configured_default)
+            return self._enabled_override
+
+    def enabled_override(self) -> bool | None:
+        with self._lock:
+            return self._enabled_override
+
+    def set_enabled(self, enabled: bool) -> bool:
+        normalized = bool(enabled)
+        with self._lock:
+            self._enabled_override = normalized
+            self._state.save({"version": 1, "enabled": normalized})
+        return normalized
 
 
 class AlertHistoryStore(Protocol):
@@ -114,6 +149,7 @@ class AlertNotificationService:
         fetcher: AlertFetcher | None = None,
         bot_provider: BotProvider | None = None,
         history_store: AlertHistoryStore | None = None,
+        enabled_provider: NotificationEnabledProvider | None = None,
     ) -> None:
         self._alertmanager_url = alertmanager_url.rstrip("/")
         self._group_id = group_id
@@ -123,6 +159,7 @@ class AlertNotificationService:
         self._fetcher = fetcher or self._fetch_active_alerts
         self._bot_provider = bot_provider or _onebot_bots
         self._history_store = history_store
+        self._enabled_provider = enabled_provider or (lambda: True)
         self._loaded = False
         self._seen_alerts: dict[str, ActivityAlert] = {}
         self._notified_incidents: dict[str, int] = {}
@@ -162,6 +199,23 @@ class AlertNotificationService:
 
         previous_incidents, _ = group_alert_incidents(self._seen_alerts.values())
         current_incidents, _ = group_alert_incidents(alerts)
+        await self._record_history(alerts)
+        if not self.notifications_enabled:
+            previous_alerts = self._seen_alerts
+            previous_notified = self._notified_incidents
+            retained_notified = {
+                key: severity
+                for key, severity in previous_notified.items()
+                if key in current_incidents
+            }
+            self._seen_alerts = current_alerts
+            self._notified_incidents = retained_notified
+            if (
+                current_alerts != previous_alerts
+                or retained_notified != previous_notified
+            ):
+                await asyncio.to_thread(self._write_state)
+            return 0
         firing: list[AlertIncident] = []
         escalations: list[AlertIncident] = []
         for key, incident in current_incidents.items():
@@ -176,7 +230,6 @@ class AlertNotificationService:
             if key not in current_incidents and key in self._notified_incidents
         ]
 
-        await self._record_history(alerts)
         if not firing and not escalations and not recoveries:
             if current_alerts != self._seen_alerts:
                 self._seen_alerts = current_alerts
@@ -229,6 +282,16 @@ class AlertNotificationService:
             f"{self._group_id}."
         )
         return delivered
+
+    @property
+    def notifications_enabled(self) -> bool:
+        try:
+            return bool(self._enabled_provider())
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            self._logger.warning(
+                f"Alert notification preference could not be read: {exc}"
+            )
+            return False
 
     async def _fetch_active_alerts(self) -> list[ActivityAlert]:
         async with httpx.AsyncClient(timeout=5.0) as client:

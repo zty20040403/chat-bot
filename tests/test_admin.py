@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -18,6 +20,7 @@ from src.plugins.ai_chat.admin import (
     register_admin,
 )
 from src.plugins.ai_chat.delivery import DeliveryStore
+from src.plugins.ai_chat.alert_notifier import AlertNotificationPreferences
 from src.plugins.ai_chat.model_catalog import ModelCatalog
 from src.plugins.ai_chat.quota import UsageStore
 from src.plugins.ai_chat.tool_policy import configure_tool_overrides
@@ -484,6 +487,62 @@ class AdminTests(unittest.TestCase):
         self.assertEqual(
             _changed_database_resources(previous, current),
             {"usage", "overview", "observability"},
+        )
+
+    def test_alert_notification_control_is_independent_and_versioned(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            preferences = AlertNotificationPreferences(
+                Path(directory) / "alert-preferences.json"
+            )
+            settings = SimpleNamespace(
+                alert_notify_enabled=False,
+                alert_notify_group_id=611798505,
+                alert_notify_check_seconds=30,
+                alertmanager_url="http://alertmanager",
+            )
+            app = FastAPI()
+            register_admin(
+                app,
+                AdminServices(
+                    version="test",
+                    started_at=1,
+                    settings=settings,
+                    alert_preferences=preferences,
+                ),
+                token="secret",
+            )
+
+            async def run():
+                transport = httpx.ASGITransport(app=app)
+                headers = {"Authorization": "Bearer secret"}
+                async with httpx.AsyncClient(
+                    transport=transport,
+                    base_url="http://test",
+                ) as client:
+                    before = await client.get(
+                        "/bot-admin/api/alerts",
+                        headers=headers,
+                    )
+                    changed = await client.put(
+                        "/bot-admin/api/alert-notifications/control",
+                        headers=headers,
+                        json={"enabled": True},
+                    )
+                    after = await client.get(
+                        "/bot-admin/api/alerts",
+                        headers=headers,
+                    )
+                    return before, changed, after
+
+            before, changed, after = asyncio.run(run())
+
+        self.assertFalse(before.json()["notification_control"]["enabled"])
+        self.assertEqual(changed.status_code, 200)
+        self.assertEqual(changed.json()["resource"], "alerts")
+        self.assertEqual(changed.json()["resource_version"], 1)
+        self.assertTrue(after.json()["notification_control"]["enabled"])
+        self.assertTrue(
+            after.json()["notification_control"]["enabled_override"]
         )
 
     def test_dashboard_api_requires_token_and_returns_runtime_state(self) -> None:

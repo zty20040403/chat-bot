@@ -91,6 +91,7 @@ def register_http_surfaces(
                 database=context.database,
                 telemetry=telemetry,
                 alert_store=context.alert_store,
+                alert_preferences=context.alert_preferences,
                 fleet_client=context.fleet_client,
             ),
             path=settings.admin_path,
