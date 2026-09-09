@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS subagent_controls (
     task_id INTEGER PRIMARY KEY REFERENCES subagent_tasks(task_id) ON DELETE CASCADE,
     version INTEGER NOT NULL, revision INTEGER NOT NULL,
     policy_json TEXT NOT NULL, dispatch_json TEXT NOT NULL,
-    updated_at INTEGER NOT NULL
+    updated_at INTEGER NOT NULL, final_queued_revision INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS subagent_deliveries (
     task_id INTEGER NOT NULL REFERENCES subagent_tasks(task_id) ON DELETE CASCADE,
@@ -56,10 +56,23 @@ class TaskControlStoreMixin:
         with self._lock:
             events = self._connection.execute("SELECT sequence, event_type, payload_json FROM subagent_events WHERE run_id=? AND event_type IN ('agent.tool_started','agent.tool_finished') ORDER BY sequence", (run_id,)).fetchall()
             session = self._connection.execute("SELECT transcript_json, covered_sequence FROM subagent_sessions WHERE run_id=?", (run_id,)).fetchone()
+            durable = self._connection.execute("""SELECT e.call_id, e.request_json, e.response_json FROM subagent_external_calls e
+                JOIN subagent_controls c ON c.task_id=e.task_id AND c.revision=e.revision
+                WHERE e.run_id=? AND e.status='resolved'""", (run_id,)).fetchall()
+        reconciled = {row["call_id"]: json.loads(row["request_json"]) for row in durable}
+        for row in durable:
+            response = json.loads(row["response_json"])
+            record = response.get("operation") if isinstance(response.get("operation"), dict) else response
+            if record.get("status") == "needs_attention":
+                return False
         acknowledged = {m.get("tool_call_id") for m in json.loads(session["transcript_json"]) if m.get("role") == "tool"} if session else set()
         pending = {}
         for event in events:
             value = json.loads(event["payload_json"])
+            known = reconciled.get(value.get("call_id"))
+            if known and known.get("tool_name") == value.get("tool_name") and (
+                event["event_type"] == "agent.tool_finished" or known.get("tool_arguments") == value.get("arguments")):
+                continue
             if value.get("idempotency") in {"pure", "idempotent"}:
                 continue
             if not session or int(event["sequence"]) > int(session["covered_sequence"]):
@@ -76,7 +89,7 @@ class TaskControlStoreMixin:
         return not pending
 
     def interrupt_task(self, task_id: int) -> None:
-        running = [r.run_id for r in self.runs(task_id) if r.status in {"running", "interrupted"}]
+        running = [r.run_id for r in self.runs(task_id) if r.status in {"running", "interrupted", "waiting_external"}]
         with self._transaction() as cursor:
             cursor.execute("UPDATE subagent_runs SET status='interrupted' WHERE task_id=? AND status='running'", (task_id,))
             cursor.execute("UPDATE subagent_tasks SET status='interrupted', finished_at=NULL WHERE task_id=?", (task_id,))
@@ -102,7 +115,7 @@ class TaskControlStoreMixin:
             if policy is not None:
                 lock = "" if self._legacy_sqlite else " FOR UPDATE"
                 task = cursor.execute("SELECT status FROM subagent_tasks WHERE task_id=?" + lock, (task_id,)).fetchone()
-                if task is None or task["status"] in {"running", "planning", "verifying", "cancelling", "revising"}:
+                if task is None or task["status"] in {"running", "planning", "verifying", "cancelling", "revising", "waiting_external"}:
                     raise ValueError("Task started before the model update; wait until it stops")
             if expected_version == 0:
                 cursor.execute("""INSERT INTO subagent_controls
@@ -149,9 +162,23 @@ class TaskControlStoreMixin:
     def dispatchable_tasks(self) -> list[int]:
         with self._lock:
             rows = self._connection.execute("""SELECT t.task_id FROM subagent_tasks t JOIN subagent_controls c ON t.task_id=c.task_id
-                WHERE t.status IN ('queued', 'interrupted') AND t.cancel_requested=?
+                WHERE t.status IN ('queued', 'interrupted', 'waiting_external') AND t.cancel_requested=?
                 ORDER BY t.created_at LIMIT 100""", (False,)).fetchall()
         return [int(row["task_id"]) for row in rows]
+
+    def finalizable_tasks(self) -> list[int]:
+        with self._lock:
+            rows = self._connection.execute("""SELECT t.task_id FROM subagent_tasks t
+                JOIN subagent_controls c ON t.task_id=c.task_id
+                WHERE t.status IN ('completed','partial','failed','cancelled')
+                  AND c.dispatch_json <> '{}' AND c.final_queued_revision <> c.revision
+                ORDER BY t.finished_at, t.task_id LIMIT 100""").fetchall()
+        return [int(row["task_id"]) for row in rows]
+
+    def mark_final_queued(self, task_id, revision):
+        with self._transaction() as cursor:
+            cursor.execute("UPDATE subagent_controls SET final_queued_revision=? WHERE task_id=? AND revision=?",
+                (revision, task_id, revision))
 
     def uncertain_deliveries(self) -> list[int]:
         with self._lock:

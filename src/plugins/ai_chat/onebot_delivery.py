@@ -200,12 +200,18 @@ class OneBotDelivery(HandlerService):
                     f"Parked {expired} expired delivery lease(s) as ambiguous."
                 )
             bots = [bot for bot in get_bots().values() if isinstance(bot, Bot)]
-            for delivery in self.context.delivery_store.claim_due(limit=20):
+            for delivery in self.context.delivery_store.claim_due(limit=20, exclude_platforms=() if bots else ("onebot-v11",)):
                 try:
                     if delivery.target_platform == "onebot-v11":
-                        if not bots:
-                            raise BridgeRetryableError("OneBot 尚未连接")
-                        await self._deliver_onebot_outbox(bots[0], delivery)
+                        selected_bot = bots[0] if bots else None
+                        if delivery.idempotency_key.startswith("subagent-final:"):
+                            task_id = int(delivery.idempotency_key.split(":")[1])
+                            dispatch = self.context.subagent_store.control(task_id)["dispatch"]
+                            selected_bot = next((bot for bot in bots if str(bot.self_id) == str(dispatch["bot_id"])), None)
+                        if selected_bot is None:
+                            self.context.delivery_store.defer_unsent(delivery, "原任务的 QQ 账号尚未连接")
+                            continue
+                        await self._deliver_onebot_outbox(selected_bot, delivery)
                     elif self.context.bridge_manager is not None:
                         native_id = await self.context.bridge_manager.deliver(delivery)
                         self.context.delivery_store.mark_committed(

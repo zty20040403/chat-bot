@@ -526,6 +526,7 @@ async def ask_deepseek_with_tools(
     entry_profile: ModelProfile | None = None,
     entry_allowed_profiles: frozenset[str] | None = None,
     transcript_sink: TranscriptSink | None = None,
+    after_tool_round: Callable[[], None] | None = None,
 ) -> str:
     _last_completion_profile.set(None)
     selected_profile = _resolve_profile(profile, model)
@@ -683,6 +684,8 @@ async def ask_deepseek_with_tools(
 
         assistant_message = _assistant_tool_message(message)
         messages.append(assistant_message)
+        if transcript_sink is not None:
+            transcript_sink([item for item in messages if item.get("role") != "system"])
         if trace is not None:
             trace.messages.append(dict(assistant_message))
         model_note = str(assistant_message.get("content") or "").strip()
@@ -938,6 +941,8 @@ async def ask_deepseek_with_tools(
                     **event_fields,
                 ),
             )
+            if transcript_sink is not None:
+                transcript_sink([item for item in messages if item.get("role") != "system"])
             if tool_context_chars >= settings.tool_max_context_chars:
                 budget_exhausted = True
 
@@ -982,6 +987,8 @@ async def ask_deepseek_with_tools(
                 trace.messages.append(dict(tool_message))
         if transcript_sink is not None:
             transcript_sink([item for item in messages if item.get("role") != "system"])
+        if after_tool_round is not None:
+            after_tool_round()
         if budget_exhausted:
             if tool_context_chars >= settings.tool_max_context_chars:
                 stop_reason = "工具结果累计内容已达到系统预算。"

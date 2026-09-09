@@ -222,9 +222,11 @@ class DeliveryStore:
         *,
         now: int | None = None,
         limit: int = 20,
+        exclude_platforms: tuple[str, ...] = (),
     ) -> list[Delivery]:
         timestamp = int(time.time() if now is None else now)
         bounded = min(max(int(limit), 1), 100)
+        platform_clause = " AND target_platform NOT IN (" + ",".join("?" for _ in exclude_platforms) + ")" if exclude_platforms else ""
         with self._transaction() as cursor:
             lock_clause = "" if self._legacy_sqlite else "FOR UPDATE SKIP LOCKED"
             rows = cursor.execute(
@@ -232,11 +234,12 @@ class DeliveryStore:
                 SELECT * FROM deliveries
                 WHERE status = 'pending' AND next_attempt_at <= ?
                   AND attempts < ?
+                  {platform_clause}
                 ORDER BY next_attempt_at ASC, delivery_id ASC
                 LIMIT ?
                 {lock_clause}
                 """,
-                (timestamp, self.max_attempts, bounded),
+                (timestamp, self.max_attempts, *exclude_platforms, bounded),
             ).fetchall()
             claimed = []
             for row in rows:
@@ -266,6 +269,27 @@ class DeliveryStore:
                 if stored is not None:
                     claimed.append(stored)
         return [self._row(row) for row in claimed]
+
+    def defer_unsent(self, delivery: Delivery, reason: str, *, delay_seconds: int = 30) -> bool:
+        """Only before calling the transport: disconnection is not a send attempt."""
+        now = int(time.time())
+        with self._transaction() as cursor:
+            cursor.execute("""UPDATE deliveries SET status='pending', attempts=attempts-1,
+                next_attempt_at=?, lease_until=NULL, updated_at=?, last_error=?
+                WHERE delivery_id=? AND status='sending' AND attempts=? AND lease_until>?""",
+                (now + delay_seconds, now, reason[:1000], delivery.delivery_id, delivery.attempts, now))
+            changed = cursor.rowcount == 1
+            if changed:
+                cursor.execute("DELETE FROM delivery_attempts WHERE delivery_id=? AND attempt=? AND state='sending'",
+                    (delivery.delivery_id, delivery.attempts))
+            return changed
+
+    def ambiguous_finals(self, *, limit: int = 100) -> list[Delivery]:
+        with self._lock:
+            rows = self._connection.execute("""SELECT * FROM deliveries
+                WHERE status='ambiguous' AND idempotency_key LIKE 'subagent-final:%'
+                ORDER BY updated_at, delivery_id LIMIT ?""", (limit,)).fetchall()
+        return [self._row(row) for row in rows]
 
     def mark_committed(
         self,
@@ -510,6 +534,11 @@ class DeliveryStore:
                 "SELECT * FROM deliveries WHERE delivery_id = ?",
                 (int(delivery_id),),
             ).fetchone()
+        return self._row(row) if row is not None else None
+
+    def find_by_key(self, idempotency_key: str) -> Delivery | None:
+        with self._lock:
+            row = self._connection.execute("SELECT * FROM deliveries WHERE idempotency_key=?", (idempotency_key,)).fetchone()
         return self._row(row) if row is not None else None
 
     def recent(self, *, limit: int = 100) -> list[Delivery]:

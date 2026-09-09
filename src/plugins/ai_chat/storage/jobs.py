@@ -102,6 +102,7 @@ class DurableJobStore:
         scope_key: str = "",
         priority: int = 100,
         max_attempts: int | None = None,
+        resume_on_lease_loss: bool = False,
         run_at: int | None = None,
         now: int | None = None,
     ) -> tuple[DurableJob, bool]:
@@ -126,9 +127,9 @@ class DurableJobStore:
                     kind, idempotency_key, scope_key, payload_json,
                     status, priority, attempts, max_attempts,
                     next_attempt_at, lease_owner, lease_until,
-                    result_json, last_error, created_at, updated_at, finished_at
+                    result_json, last_error, created_at, updated_at, finished_at, resume_on_lease_loss
                 ) VALUES (?, ?, ?, ?, 'pending', ?, 0, ?, ?, '', NULL,
-                          '{}', '', ?, ?, NULL)
+                          '{}', '', ?, ?, NULL, ?)
                 ON CONFLICT(idempotency_key) DO NOTHING
                 """,
                 (
@@ -141,6 +142,7 @@ class DurableJobStore:
                     due_at,
                     timestamp,
                     timestamp,
+                    int(resume_on_lease_loss),
                 ),
             )
             created = cursor.rowcount == 1
@@ -241,6 +243,17 @@ class DurableJobStore:
                 """,
                 (encoded_result, timestamp, timestamp, int(job_id), str(owner)),
             )
+            return cursor.rowcount == 1
+
+    def defer(self, job: DurableJob, *, delay_seconds: int = 15, reason: str = "", now: int | None = None) -> bool:
+        """Release a continuation lease without charging a failure attempt."""
+        timestamp = int(time.time() if now is None else now)
+        with self._transaction() as cursor:
+            cursor.execute("""UPDATE durable_jobs SET status='pending', attempts=attempts-1,
+                next_attempt_at=?, lease_owner='', lease_until=NULL, last_error=?, updated_at=?
+                WHERE job_id=? AND status='running' AND lease_owner=? AND attempts=? AND lease_until>?""",
+                (timestamp + max(delay_seconds, 0), reason[:2000], timestamp,
+                 job.job_id, job.lease_owner, job.attempts, timestamp))
             return cursor.rowcount == 1
 
     def renew_lease(
@@ -386,14 +399,15 @@ class DurableJobStore:
             """
             UPDATE durable_jobs
             SET status = CASE
-                    WHEN attempts < max_attempts THEN 'pending'
+                    WHEN resume_on_lease_loss=1 OR attempts < max_attempts THEN 'pending'
                     ELSE 'failed'
                 END,
+                attempts = CASE WHEN resume_on_lease_loss=1 AND attempts>0 THEN attempts-1 ELSE attempts END,
                 next_attempt_at = ?, lease_owner = '', lease_until = NULL,
                 last_error = 'worker lease expired; task recovered',
                 updated_at = ?,
                 finished_at = CASE
-                    WHEN attempts < max_attempts THEN NULL
+                    WHEN resume_on_lease_loss=1 OR attempts < max_attempts THEN NULL
                     ELSE ?
                 END
             WHERE status = 'running' AND lease_until IS NOT NULL
@@ -443,6 +457,9 @@ class DurableJobStore:
                     ON durable_jobs(status, lease_until);
                 """
             )
+            columns = {row[1] for row in cursor.execute("PRAGMA table_info(durable_jobs)").fetchall()}
+            if "resume_on_lease_loss" not in columns:
+                cursor.execute("ALTER TABLE durable_jobs ADD COLUMN resume_on_lease_loss INTEGER NOT NULL DEFAULT 0")
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Cursor]:

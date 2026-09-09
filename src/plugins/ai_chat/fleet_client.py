@@ -13,6 +13,7 @@ import httpx
 from src.bot_security.service import MobileAuthorization
 from src.bot_security.store import SecurityError
 from .fleet_authorization import FleetAuthorization
+from .agent.external import active_external
 
 
 class FleetControlError(RuntimeError):
@@ -72,6 +73,13 @@ class FleetControlClient:
     async def _request(
         self, method: str, path: str, payload: dict[str, Any] | None = None, *, actor: str = "", origin: str = "",
     ) -> dict[str, Any]:
+        tracker = active_external.get()
+        if tracker is not None:
+            return await tracker.request(method, path, payload, actor=actor, origin=origin,
+                perform=lambda body: self._authorized_request(method, path, body, actor=actor, origin=origin))
+        return await self._authorized_request(method, path, payload, actor=actor, origin=origin)
+
+    async def _authorized_request(self, method, path, payload=None, *, actor="", origin=""):
         try:
             if self.authorization is not None:
                 return await self.authorization.request(method, path, payload, actor=actor, origin=origin)
@@ -79,7 +87,7 @@ class FleetControlClient:
                 raise SecurityError("手机口令授权未初始化，管理操作已锁定", 503)
             return await self._raw_request(method, path, payload, actor=actor, origin=origin)
         except SecurityError as exc:
-            raise FleetControlError("approval_required", str(exc)) from None
+            raise FleetControlError("approval_required", str(exc), retryable=exc.status in {408, 503}) from None
 
     async def _raw_request(
         self,

@@ -47,13 +47,13 @@ export function Section({
 }
 
 export function StatusBadge({ value, label }: { value: unknown; label?: string }) {
-  const text = String(label ?? value ?? 'unknown')
+  const text = String(label ?? (value === 'waiting_external' ? '等待外部结果' : value) ?? 'unknown')
   const normalized = String(value ?? '').toLowerCase()
   const tone = ['active', 'healthy', 'online', 'ready', 'succeeded', 'safe', 'approved', 'configured', 'correct'].includes(normalized)
     ? 'success'
     : ['failed', 'offline', 'blocked', 'rejected', 'critical', 'error', 'off_topic'].includes(normalized)
       ? 'danger'
-      : ['running', 'pending', 'partial', 'skipped', 'degraded', 'warning', 'review', 'medium'].includes(normalized)
+      : ['running', 'pending', 'waiting_external', 'partial', 'skipped', 'degraded', 'warning', 'review', 'medium'].includes(normalized)
         ? 'warning'
         : 'neutral'
   return <span className={`badge ${tone}`}>{text}</span>

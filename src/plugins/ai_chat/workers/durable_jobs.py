@@ -21,6 +21,12 @@ DurableJobCompensator: TypeAlias = Callable[
 ]
 
 
+class JobDeferred(Exception):
+    def __init__(self, reason: str, delay_seconds: int = 15):
+        super().__init__(reason)
+        self.delay_seconds = delay_seconds
+
+
 class WorkerLogger(Protocol):
     def error(self, message: object, *args: object, **kwargs: object) -> object: ...
 
@@ -155,6 +161,8 @@ class DurableJobWorker:
                 self.logger.warning(
                     f"Durable job {job.handle} finished after losing its lease."
                 )
+        except JobDeferred as exc:
+            await asyncio.to_thread(self.store.defer, job, delay_seconds=exc.delay_seconds, reason=str(exc))
         except TimeoutError:
             await self._compensate(job, "timeout")
             changed = await asyncio.to_thread(
@@ -172,14 +180,7 @@ class DurableJobWorker:
                 await self._compensate(job, "cancelled")
                 self.logger.info(f"Durable job {job.handle} was cancelled.")
                 return
-            await asyncio.to_thread(
-                self.store.mark_failed,
-                job.job_id,
-                self.worker_id,
-                "worker shutdown interrupted the task",
-                retryable=True,
-                retry_delay_seconds=0,
-            )
+            await asyncio.to_thread(self.store.defer, job, delay_seconds=0, reason="worker shutdown interrupted the task")
             raise
         except Exception as exc:
             retryable = job.attempts < job.max_attempts

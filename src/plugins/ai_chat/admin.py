@@ -230,8 +230,8 @@ _DATABASE_RESOURCE_MAP: dict[str, tuple[str, ...]] = {
     "principals": ("groups",),
     "principal_identities": ("groups",),
     "messages": ("groups", "context-debug"),
-    "deliveries": ("deliveries", "overview", "observability"),
-    "delivery_attempts": ("deliveries", "overview", "observability"),
+    "deliveries": ("deliveries", "subagents", "overview", "observability"),
+    "delivery_attempts": ("deliveries", "subagents", "overview", "observability"),
     "usage_events": ("usage", "overview", "observability"),
     "agent_turns": ("traces", "context-debug", "observability"),
     "turn_journal_events": ("traces", "context-debug", "observability"),
@@ -260,6 +260,7 @@ _DATABASE_RESOURCE_MAP: dict[str, tuple[str, ...]] = {
     "subagent_controls": ("subagents", "tasks", "overview"),
     "subagent_sessions": ("subagents", "tasks"),
     "subagent_deliveries": ("subagents", "tasks", "deliveries"),
+    "subagent_external_calls": ("subagents", "tasks"),
     "bridge_sources": ("overview",),
     "bridge_deliveries": ("overview",),
     "bridge_cursors": ("overview",),
@@ -949,10 +950,16 @@ def register_admin(
         if task is None:
             raise HTTPException(status_code=404, detail="Sub-Agent task not found")
         control = services.subagent_store.control(task_id)
+        final = services.delivery_store.find_by_key(f"subagent-final:{task_id}:{control['revision']}") if services.delivery_store else None
         return {
             "control": {key: control[key] for key in ("version", "revision", "policy")},
             "background": bool(control["dispatch"]),
+            "final_delivery": {"delivery_id": final.delivery_id, "status": final.status, "attempts": final.attempts,
+                "updated_at": final.updated_at, "last_error": final.last_error} if final else None,
             "artifact_deliveries": services.subagent_store.deliveries(task_id),
+            "external_waits": [{"run_id": item["run_id"], "call_id": item["call_id"],
+                "status": item["status"], "remote_path": item["remote_path"], "updated_at": item["updated_at"]}
+                for item in services.subagent_store.external_calls(task_id)],
             "task": {
                 "task_id": task.task_id,
                 "handle": task.handle,

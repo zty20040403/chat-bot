@@ -32,6 +32,7 @@ from .agent.model_routing import agent_profile_names, choose_agent_profile, scop
 from .agent.scheduling import SpecialistScheduler
 from .agent.workspaces import ArtifactCaptureError, IMPORT_AGENT_ARTIFACT
 from .agent.sessions import AgentSessionStoreMixin, READ_AGENT_RESULT, read_upstream_result, upstream_index
+from .agent.external import ExternalCalls, ExternalPending, ExternalStoreMixin, EXTERNAL_SQL, active_external
 from .agent.control import (CONTROL_SQL, TaskControlStoreMixin, LeaseLost,
                             active_job_fence, active_task_id, active_model_policy, assert_job_owned)
 from .deepseek import (
@@ -190,7 +191,7 @@ class RunRecord:
         return f"agent#{self.run_id}"
 
 
-class SubAgentStore(AgentSessionStoreMixin, TaskControlStoreMixin):
+class SubAgentStore(AgentSessionStoreMixin, TaskControlStoreMixin, ExternalStoreMixin):
     def __init__(self, source: DatabaseSource) -> None:
         self._legacy_sqlite = not isinstance(source, PostgresDatabase)
         self.path, self._connection = open_store_connection(source)
@@ -200,6 +201,10 @@ class SubAgentStore(AgentSessionStoreMixin, TaskControlStoreMixin):
             self._configure()
             self._migrate()
             self._connection.executescript(CONTROL_SQL)
+            self._connection.executescript(EXTERNAL_SQL)
+            if "final_queued_revision" not in {row["name"] for row in self._connection.execute("PRAGMA table_info(subagent_controls)").fetchall()}:
+                self._connection.execute("ALTER TABLE subagent_controls ADD COLUMN final_queued_revision INTEGER NOT NULL DEFAULT 0")
+                self._connection.execute("UPDATE subagent_controls SET final_queued_revision=revision WHERE task_id IN (SELECT task_id FROM subagent_events WHERE event_type='task.final_delivery_queued')")
             if "covered_sequence" not in {row["name"] for row in self._connection.execute("PRAGMA table_info(subagent_sessions)").fetchall()}:
                 self._connection.execute("ALTER TABLE subagent_sessions ADD COLUMN covered_sequence INTEGER NOT NULL DEFAULT 0")
         self.recovered_tasks = self.recover_interrupted()
@@ -336,7 +341,7 @@ class SubAgentStore(AgentSessionStoreMixin, TaskControlStoreMixin):
         )
         return run
 
-    def start_run(self, run_id: int, *, now: int | None = None) -> bool:
+    def start_run(self, run_id: int, *, now: int | None = None, continuation: bool = False) -> bool:
         timestamp = int(time.time() if now is None else now)
         with self._transaction() as cursor:
             row = cursor.execute(
@@ -348,11 +353,11 @@ class SubAgentStore(AgentSessionStoreMixin, TaskControlStoreMixin):
             cursor.execute(
                 """
                 UPDATE subagent_runs
-                SET status = 'running', attempt = attempt + 1,
+                SET status = 'running', attempt = attempt + ?,
                     started_at = ?, finished_at = NULL, last_error = ''
                 WHERE run_id = ? AND status = 'pending'
                 """,
-                (timestamp, int(run_id)),
+                (0 if continuation else 1, timestamp, int(run_id)),
             )
             changed = cursor.rowcount == 1
             task_id = int(row["task_id"])
@@ -461,7 +466,7 @@ class SubAgentStore(AgentSessionStoreMixin, TaskControlStoreMixin):
                     status,
                     _json_dump(result or {}),
                     str(error)[:4000],
-                    timestamp,
+                    timestamp if status not in {"waiting_external", "interrupted"} else None,
                     int(run_id),
                 ),
             )
@@ -491,20 +496,20 @@ class SubAgentStore(AgentSessionStoreMixin, TaskControlStoreMixin):
             rows = cursor.execute(
                 """
                 SELECT run_id, status FROM subagent_runs
-                WHERE task_id = ? AND status IN ('pending', 'running')
+                WHERE task_id = ? AND status IN ('pending', 'running', 'interrupted', 'waiting_external')
                 ORDER BY run_id
                 """,
                 (int(task_id),),
             ).fetchall()
             for row in rows:
                 status = (
-                    running_status if str(row["status"]) == "running" else pending_status
+                    pending_status if str(row["status"]) == "pending" else running_status
                 )
                 cursor.execute(
                     """
                     UPDATE subagent_runs
                     SET status = ?, last_error = ?, finished_at = ?
-                    WHERE run_id = ? AND status IN ('pending', 'running')
+                    WHERE run_id = ? AND status IN ('pending', 'running', 'interrupted', 'waiting_external')
                     """,
                     (status, str(error)[:4000], timestamp, int(row["run_id"])),
                 )
@@ -778,7 +783,7 @@ class SubAgentStore(AgentSessionStoreMixin, TaskControlStoreMixin):
                 UPDATE subagent_tasks
                 SET cancel_requested = ?, status = 'cancelling', updated_at = ?
                 WHERE task_id = ? AND status IN (
-                    'received', 'planning', 'running', 'verifying', 'interrupted', 'queued'
+                    'received', 'planning', 'running', 'verifying', 'interrupted', 'queued', 'waiting_external'
                 )
                 """,
                 (True, timestamp, int(task_id)),
@@ -804,7 +809,7 @@ class SubAgentStore(AgentSessionStoreMixin, TaskControlStoreMixin):
                 UPDATE subagent_tasks
                 SET status = 'running', last_error = '', updated_at = ?,
                     finished_at = NULL
-                WHERE task_id = ? AND status IN ('interrupted', 'queued')
+                WHERE task_id = ? AND status IN ('interrupted', 'queued', 'waiting_external')
                     AND cancel_requested = ?
                 """,
                 (timestamp, int(task_id), False),
@@ -816,7 +821,7 @@ class SubAgentStore(AgentSessionStoreMixin, TaskControlStoreMixin):
                     UPDATE subagent_runs
                     SET status = 'pending', last_error = '', started_at = NULL,
                         finished_at = NULL
-                    WHERE task_id = ? AND status = 'interrupted'
+                    WHERE task_id = ? AND status IN ('interrupted', 'waiting_external')
                     """,
                     (int(task_id),),
                 )
@@ -1142,7 +1147,7 @@ class SubAgentStore(AgentSessionStoreMixin, TaskControlStoreMixin):
 
 ProgressCallback = Callable[[str], Awaitable[None]]
 ToolExecutor = Callable[[str, dict[str, object]], Awaitable[str]]
-WorkerOutcomeState = Literal["success", "partial", "failed", "skipped"]
+WorkerOutcomeState = Literal["success", "partial", "failed", "skipped", "waiting"]
 WorkerReportedState = Literal["success", "partial", "failed"]
 
 
@@ -1222,7 +1227,7 @@ class SubAgentCoordinator:
 
     def configure_models(self, task_id: int, policy: dict[str, Any], expected_version: int) -> dict[str, Any]:
         task = self.store.get(task_id)
-        if not task or task.status in {"planning", "running", "verifying", "cancelling"}:
+        if not task or task.status in {"planning", "running", "verifying", "cancelling", "waiting_external"}:
             raise ValueError("Change task models while queued or stopped, not during an active step")
         clean = validate_model_policy(policy, self.model_catalog)
         result = self.store.update_control(task_id, expected_version=expected_version, policy=clean)
@@ -1379,7 +1384,8 @@ class SubAgentCoordinator:
             running.cancel()
             return True
         if changed:
-            self.store.set_task_state(task_id, "cancelled", error="用户取消任务")
+            self.store.settle_unfinished_runs(task_id, running_status="cancelled", pending_status="skipped", error="用户取消任务")
+            self.store.set_task_state(task_id, "cancelled", error="用户取消任务；已提交的远程作业需另行核对。")
         return changed
 
     @scoped_agent_models
@@ -1403,7 +1409,7 @@ class SubAgentCoordinator:
             raise ValueError(f"Sub-Agent 任务 task#{task_id} 不存在。")
         if task.scope_key != scope_key or task.requester_user_id != requester_user_id:
             raise ValueError("不能恢复其他群或其他用户发起的 Sub-Agent 任务。")
-        if task.status not in {"interrupted", "queued"}:
+        if task.status not in {"interrupted", "queued", "waiting_external"}:
             raise ValueError(f"{task.handle} 当前状态是 {task.status}，不能断点续跑。")
         context = _checkpoint_context_packet(self.store.checkpoints(task_id))
         if context is None:
@@ -1447,6 +1453,11 @@ class SubAgentCoordinator:
                     },
                 )
                 return result
+        except ExternalPending:
+            self.store.set_task_state(task.task_id, "waiting_external")
+            self.store.append_checkpoint(task.task_id, "waiting_external", {"resume_automatically": True})
+            await self._notify_progress(progress, f"{task.handle} 正在等待服务器作业结果，结果返回后自动继续；本轮尚未结束。")
+            return f"{task.handle} 等待外部结果"
         except asyncio.CancelledError:
             if active_job_fence.get() and not self.store.cancellation_requested(task.task_id):
                 self.store.interrupt_task(task.task_id)
@@ -1845,7 +1856,7 @@ class SubAgentCoordinator:
                     if item.get("state", {}).get("entry_decision")), None),
             )
         interrupted_ids = _interrupted_run_ids(self.store.checkpoints(task.task_id))
-        for run in stored_runs:
+        for run in self.store.runs(task.task_id):
             if run.run_id not in interrupted_ids or self.store.run_resume_safe(run.run_id):
                 continue
             error = "进程中断前已发生不可安全重复的副作用，结果未知，已阻止自动续跑。"
@@ -1893,6 +1904,8 @@ class SubAgentCoordinator:
                     execute_tool=execute_tool,
                     hooks=hooks,
                 )
+            if outcome.state == "waiting":
+                raise ExternalPending()
             validation = await self._validate_workflow(task, {step.key: outcome}, context=context,
                 selected_profile=selected_profile, tools_by_name=tools_by_name, execute_tool=execute_tool,
                 hooks=hooks, parent_trace=parent_trace, progress=progress)
@@ -2031,6 +2044,8 @@ class SubAgentCoordinator:
                     completed=completed, selected_profile=selected_profile, tools_by_name=tools_by_name,
                     execute_tool=tracked_execute_tool, parent_trace=parent_trace, progress=progress,
                     hooks=hooks, repair_number=adaptive_repairs_used + 1)
+                if repaired is not None and repaired.state == "waiting":
+                    raise ExternalPending()
                 if attempted and repaired is not None and repaired.usable:
                     completed[target.step.key] = repaired
                     completed[repaired.step.key] = repaired
@@ -2062,7 +2077,9 @@ class SubAgentCoordinator:
             tool_context=(
                 "你是 Sub-Agent 主控。检查各步骤是否真正完成原始目标，再给用户一个"
                 "直接、自然的最终答复。明确说明失败和未解决事项；不要暴露内部 JSON，"
-                "不要声称没有证据的工作已经完成。"
+                "不要声称没有证据的工作已经完成。先用短句说明完成了什么、实际改动、"
+                "未完成事项和下一步；详细流水留在控制台，不加入无关吐槽。"
+                "这是终态通知，没有登记自动接续，不得承诺等结果出来会继续或稍后自动补发。"
             ),
             trace=final_trace,
         )
@@ -2149,6 +2166,8 @@ class SubAgentCoordinator:
         outcome = await self._run_step_reliably(task, step, run, context=context,
             upstream={key: value.result for key, value in completed.items()}, selected_profile=selected_profile,
             tools_by_name=tools_by_name, execute_tool=execute_tool, hooks=hooks)
+        if outcome.state == "waiting":
+            raise ExternalPending()
         _merge_trace(parent_trace, outcome.trace)
         # A file task cannot pass solely on an unsubstantiated model assertion.
         events = [e for e in self.store.events(task.task_id, limit=2000) if e.get("run_id") == run.run_id]
@@ -2172,6 +2191,7 @@ class SubAgentCoordinator:
         run_step: Callable[[TaskStep], Awaitable[tuple[StepOutcome, StepOutcome | None]]],
         parent_trace: DeepSeekTrace | None, progress: ProgressCallback | None,
     ) -> None:
+        waiting = False
         while pending or in_flight:
             if self.store.cancellation_requested(task.task_id):
                 raise asyncio.CancelledError
@@ -2197,6 +2217,8 @@ class SubAgentCoordinator:
 
             ready = [step for step in settled if step not in blocked]
             if not ready and not blocked and not in_flight:
+                if waiting:
+                    raise ExternalPending()
                 raise RuntimeError("任务依赖图无法继续执行")
             ready = ready[: max(self.max_parallelism - len(in_flight), 0)]
             for step in ready:
@@ -2214,6 +2236,10 @@ class SubAgentCoordinator:
             for worker in sorted(done, key=lambda item: in_flight[item].key):
                 outcome, repair = worker.result()
                 in_flight.pop(worker)
+                if outcome.state == "waiting" or (repair is not None and repair.state == "waiting"):
+                    waiting = True
+                    _merge_trace(parent_trace, outcome.trace)
+                    continue
                 outcomes.append(outcome)
                 completed[outcome.step.key] = outcome
                 repaired_step = _repair_target(outcome.step.key)
@@ -2245,10 +2271,10 @@ class SubAgentCoordinator:
                 f"{self.registry.worker(item.step.role).title}{_outcome_progress_label(item)}"
                 for item in outcomes
             )
-            await self._notify_progress(
-                progress,
-                f"{task.handle} 进度：{finished}。",
-            )
+            if finished:
+                await self._notify_progress(progress, f"{task.handle} 进度：{finished}。")
+        if waiting:
+            raise ExternalPending()
 
     async def _attempt_adaptive_repair(
         self,
@@ -2376,6 +2402,8 @@ class SubAgentCoordinator:
             execute_tool=execute_tool,
             hooks=hooks,
         )
+        if repair.state == "waiting":
+            return True, repair
         repair.result.setdefault("metadata", {})["replaces_step"] = failed.step.key
         self.store.append_checkpoint(
             task.task_id,
@@ -2558,10 +2586,12 @@ class SubAgentCoordinator:
             if name in tools_by_name
         ]
         trace = DeepSeekTrace(trace_id=task.trace_id)
+        self.store.hydrate_external_session(task.task_id, run.run_id)
         session = self.store.agent_session(
             task.task_id, run.run_id, scope_key=task.scope_key, requester_user_id=task.requester_user_id,
         )
         session_version = session["version"]
+        external = ExternalCalls(self.store, task.task_id, run.run_id) if self.store.control(task.task_id)["dispatch"] else None
         if upstream:
             allowed_tools.append(READ_AGENT_RESULT)
             if hooks and hooks.workspaces:
@@ -2602,6 +2632,10 @@ class SubAgentCoordinator:
         }, run_id=run.run_id)
 
         async def record_agent_event(event: AgentLoopEvent) -> None:
+            if external is not None and event.kind == "tool_started":
+                external.call_id = event.call_id
+                external.tool_name = event.tool_name
+                external.arguments = dict(event.arguments or {})
             self.store.append_event(
                 task.task_id,
                 f"agent.{event.kind}",
@@ -2625,6 +2659,7 @@ class SubAgentCoordinator:
             )
 
         context_token = active_agent_step.set(f"task#{task.task_id}/{step.key}")
+        external_token = active_external.set(external)
         self.store.append_event(task.task_id, "agent.waiting_capacity", {"profile": profile.name}, run_id=run.run_id)
         if session["messages"]:
             worker_input = (
@@ -2640,7 +2675,7 @@ class SubAgentCoordinator:
         worker_input += f"\n[本步骤工作目录]\n/workspace/tasks/{task.task_id}/steps/{step.key}\n"
         try:
             async with self.scheduler.slot(task.scope_key, profile.name), asyncio.timeout(min(self.timeout_seconds, spec.timeout_seconds)):
-                self.store.start_run(run.run_id)
+                self.store.start_run(run.run_id, continuation=run.result.get("status") == "waiting")
                 if session["messages"] and hooks and hooks.workspaces:
                     await hooks.workspaces.restore_step()
                 with model_scope_for_role(step.role, profile, self.model_catalog, self.profile_overrides):
@@ -2658,6 +2693,7 @@ class SubAgentCoordinator:
                         handoff_tool=(hooks.handoff_tool if hooks else None),
                         compensate_tool=(hooks.compensate_tool if hooks else None),
                         transcript_sink=save_transcript,
+                        after_tool_round=external.pause if external else None,
                     )
             result = _normalize_worker_scope_result(_parse_worker_result(answer))
             if hooks and hooks.workspaces and result.get("artifacts"):
@@ -2695,6 +2731,9 @@ class SubAgentCoordinator:
                 error=error,
             )
 
+        except ExternalPending:
+            self.store.finish_run(run.run_id, "waiting_external", result={"status": "waiting", "summary": "等待服务器作业完成后自动继续"})
+            return StepOutcome(step, run, {}, trace, "waiting")
         except asyncio.CancelledError:
             self.store.finish_run(run.run_id, "interrupted" if active_job_fence.get() and not self.store.cancellation_requested(task.task_id) else "cancelled", error="任务停止，等待续跑或确认取消")
             raise
@@ -2731,6 +2770,7 @@ class SubAgentCoordinator:
                 error=error,
             )
         finally:
+            active_external.reset(external_token)
             active_agent_step.reset(context_token)
             self.store.append_event(task.task_id, "agent.model_completed", {
                 "selected_profile": profile.name, "actual_profile": trace.profile,
@@ -3296,6 +3336,7 @@ def _outcome_progress_label(outcome: StepOutcome) -> str:
         "partial": "部分完成",
         "failed": "失败",
         "skipped": "跳过",
+        "waiting": "等待外部结果",
     }[outcome.state]
 
 

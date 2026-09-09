@@ -418,6 +418,7 @@ Sub-Agent V2 内核区分直接回答、单专家委派、后台工作流和已�
 只有明确指定才启用。页面分别展示执行、独立验收和文件投递状态，模型记录可悬停查看 Token。
 
 部署与边界说明见 [Sub-Agent V2 运维说明](docs/subagent-v2-operations.md)。
+重启接管、外部作业等待和最终回复投递见 [任务持久化与恢复](docs/task-persistence.md)。
 
 ## 上下文与记忆
 

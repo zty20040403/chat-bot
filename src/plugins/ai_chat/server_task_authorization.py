@@ -53,10 +53,12 @@ class ServerTaskAuthorization:
             task = self.context.subagent_store.get(scope["id"])
             valid = (task is not None and task.scope_key == scope["scope"]
                 and str(task.requester_user_id) == scope["qq_id"]
-                and task.status in {"received", "queued", "planning", "running", "verifying"}
+                and task.status in {"received", "queued", "planning", "running", "verifying", "waiting_external", "interrupted"}
                 and not task.cancel_requested and task.finished_at is None
                 and task.objective == scope["objective"]
                 and self.context.subagent_store.control(scope["id"])["revision"] == scope["revision"])
+            dispatch = self.context.subagent_store.control(scope["id"]).get("dispatch", {})
+            valid = valid and float(dispatch.get("deadline") or float("inf")) > time.time()
         elif scope.get("kind") == "turn":
             turn = self.context.turn_journal.get_turn_by_id(scope["id"])
             valid = (turn is not None and turn.scope_key == scope["scope"]

@@ -190,6 +190,7 @@ function stageState(stage: any[]): string {
   const states = stage.map((node) => String(node.status))
   if (states.some((state) => state === 'failed' || state === 'cancelled')) return 'failed'
   if (states.some((state) => state === 'running' || state === 'planning' || state === 'verifying')) return 'running'
+  if (states.some((state) => state === 'waiting_external')) return 'pending'
   if (states.some((state) => state === 'partial' || state === 'skipped')) return 'partial'
   if (states.every((state) => state === 'succeeded' || state === 'completed')) return 'succeeded'
   return 'pending'
@@ -200,6 +201,7 @@ function SubAgentFlow({ detail, loading, error, now, roles }: { detail: any; loa
   const task = detail?.task
   const runs = rows(detail?.runs)
   const running = runs.filter((run) => run.status === 'running').length
+  const waiting = rows(detail?.external_waits).filter((item) => item.status === 'pending').length
   const peak = peakParallelism(runs, now)
   const roleTitles = new Map(roles.map((role) => [String(role.role), String(role.title)]))
   const runsByStep = new Map(runs.map((run) => [String(run.step_key), run]))
@@ -221,7 +223,9 @@ function SubAgentFlow({ detail, loading, error, now, roles }: { detail: any; loa
     }
   }))
   const planningStatus = ['received', 'planning'].includes(String(task?.status)) ? 'running' : task?.plan?.steps ? 'succeeded' : 'failed'
-  const deliveryStatus = task?.status === 'verifying'
+  const deliveryStatus = detail?.background && ['completed', 'partial'].includes(String(task?.status)) && detail?.final_delivery?.status !== 'committed'
+    ? detail?.final_delivery?.status === 'failed' ? 'failed' : detail?.final_delivery?.status === 'ambiguous' ? 'partial' : 'pending'
+    : task?.status === 'verifying'
     ? 'running'
     : ['completed', 'partial', 'failed', 'cancelled'].includes(String(task?.status))
       ? task.status
@@ -276,6 +280,7 @@ function SubAgentFlow({ detail, loading, error, now, roles }: { detail: any; loa
         </div>
         <div className="flow-metrics">
           <span><small>当前并行</small><strong>{running}</strong></span>
+          <span><small>等待外部结果</small><strong>{waiting}</strong></span>
           <span><small>峰值并行</small><strong>{peak}</strong></span>
           <span><small>执行阶段</small><strong>{workerStages.length}</strong></span>
         </div>

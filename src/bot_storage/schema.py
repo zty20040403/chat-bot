@@ -1,4 +1,4 @@
 from __future__ import annotations
 
 
-HEAD_REVISION = "0026_admin_accounts_otp"
+HEAD_REVISION = "0027_external_continuations"
