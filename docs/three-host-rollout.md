@@ -68,6 +68,22 @@ New management writes must use the account/private-QQ approval flow. Do not
 reuse old admin-token scripts, bypass mobile approval with a machine credential,
 or infer that the historical bounded guardian checks authorize a new action.
 
+### Worker Completion Notifications Follow-up
+
+The account-security integration audit found that approved Worker submissions
+were not added to the persistent result watches. The QQ tool path also labelled
+a queued job as a completed authorization operation. The fix tracks `/v1/jobs`
+alongside operations/deployments, labels pending Worker submissions explicitly,
+and includes the actual Worker and error code in the final private receipt.
+
+Two isolated regressions reproduced both failures before the fix. Nine focused
+mobile-integration/Worker-selection tests passed afterwards, including all three
+Worker identities, success/failure/cancellation, watcher recovery from a reopened test database
+and notification retry without resubmitting work. Tests used temporary SQLite
+and mocked QQ/control responses, not production jobs or real QQ delivery.
+This follow-up still needs the normal account-authorized release; it does not
+complete the outstanding live transfer or file-delivery acceptance.
+
 Bot release `e175de051e7d47411b86834056099e5cfa3728e9` includes the queue and
 receipt fixes plus the previously committed independent QQ alert switch.
 Concurrent account/OTP work and migration 0026 were excluded. Exact-release

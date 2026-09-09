@@ -3,7 +3,9 @@ from __future__ import annotations
 import copy
 import os
 import re
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -13,7 +15,7 @@ os.environ.setdefault("AI_ALLOW_LEGACY_SQLITE", "true")
 nonebot.init()
 
 from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message, PrivateMessageEvent
-from src.bot_security.service import MobileAuthorization
+from src.bot_security.service import MobileAuthorization, assert_approved
 from src.bot_security.store import SecurityError, SecurityStore
 from src.plugins.ai_chat.fleet_authorization import FleetAuthorization
 from src.plugins.ai_chat.mobile_authorization import handle_approval_event, redact_approval_event_logs
@@ -33,7 +35,10 @@ def event(text, *, group=False):
 
 class MobileIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.store = SecurityStore(":memory:", b"x" * 32)
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.store_path = Path(temp.name) / "security.sqlite3"
+        self.store = SecurityStore(self.store_path, b"x" * 32)
         self.addCleanup(self.store.close)
         self.account = self.store.bootstrap("kenneth", PASSWORD, QQ)
         self.sent = []
@@ -144,6 +149,104 @@ class MobileIntegrationTests(unittest.IsolatedAsyncioTestCase):
         record["arguments"]["unit"] = "different.service"
         await self.mobile.run_once()
         self.assertEqual(self.store.get(identifier, self.account["account_id"])["status"], "failed")
+
+    async def test_worker_jobs_track_all_hosts_after_phone_approval(self):
+        records, writes = {}, []
+
+        async def raw(method, path, body=None, **kwargs):
+            if path == "/v1/operations?limit=200":
+                return {"items": []}
+            self.assertEqual(kwargs["actor"], "admin:kenneth")
+            self.assertEqual(kwargs["origin"], "test")
+            if method == "POST":
+                self.assertEqual(path, "/v1/jobs")
+                worker = body["constraints"]["worker_id"]
+                row = {"job_id": "job_" + worker, "status": "queued", "worker_id": worker}
+                records["/v1/jobs/" + row["job_id"]] = row
+                writes.append(copy.deepcopy(body))
+                return copy.deepcopy(row)
+            return copy.deepcopy(records[path])
+
+        fleet = FleetAuthorization(SimpleNamespace(_raw_request=raw), self.mobile)
+        for index, (host, final_status) in enumerate((("h310", "succeeded"), ("h610", "failed"), ("tank", "cancelled"))):
+            worker = host + "-worker"
+            result = await fleet.request("POST", "/v1/jobs", {"kind": "probe.http", "constraints": {"worker_id": worker}},
+                actor="qq:" + QQ, origin="test")
+            self.assertFalse(result["executed"])
+            self.assertEqual(len(writes), index)
+            await self.confirm_latest()
+            self.assertTrue(await self.mobile.run_once())
+            self.assertEqual(len(writes), index + 1)
+            path = "/v1/jobs/job_" + worker
+            with self.store.transaction() as db:
+                watch = db.execute("SELECT * FROM admin_fleet_watches WHERE path=?", (path,)).fetchone()
+            self.assertIsNotNone(watch, worker)
+            self.assertEqual(watch["actor"], "admin:kenneth")
+            self.assertEqual(watch["origin"], "test")
+            self.assertIn("等待服务器", self.sent[-1][2])
+            before = len(self.sent)
+            await fleet.poll()
+            self.assertEqual(len(self.sent), before)
+            records[path].update(status=final_status, error_code="test_error" if final_status == "failed" else "")
+            records[path]["result"] = {"public_url": "http://192.0.2.3/previews/test/"} if final_status == "succeeded" else {}
+            with self.store.transaction() as db:
+                db.execute("UPDATE admin_fleet_watches SET lease_until=0 WHERE path=?", (path,))
+            await fleet.poll()
+            self.assertEqual(self.sent[-1][:2], (BOT, QQ))
+            self.assertIn(worker, self.sent[-1][2])
+            self.assertIn(final_status, self.sent[-1][2])
+            if final_status == "failed":
+                self.assertIn("test_error", self.sent[-1][2])
+            if final_status == "succeeded":
+                self.assertIn(records[path]["result"]["public_url"], self.sent[-1][2])
+            self.assertFalse(await self.mobile.run_once())
+            await fleet.poll()
+            self.assertEqual(len(self.sent), before + 1)
+        self.assertEqual(len(writes), 3)
+
+    async def test_worker_tool_approval_tracks_result_and_retries_notice_without_resubmit(self):
+        writes = []
+        record = {"job_id": "job_tool", "worker_id": "tank-worker", "status": "queued"}
+
+        async def raw(method, path, body=None, **kwargs):
+            if path == "/v1/operations?limit=200":
+                return {"items": []}
+            if method == "POST":
+                writes.append(path)
+            return copy.deepcopy(record)
+
+        fleet = FleetAuthorization(SimpleNamespace(_raw_request=raw), self.mobile)
+        payload = {"tool": "cluster_job_submit", "arguments": {"worker_id": "tank-worker"}}
+
+        async def approved_tool(request):
+            assert_approved("tool", request["payload"])
+            return await fleet.request("POST", "/v1/jobs", {"constraints": payload["arguments"]}, actor="qq:" + QQ, origin="test")
+
+        self.mobile.executors["tool"] = approved_tool
+        await self.mobile.propose(self.account, kind="tool", payload=payload, summary="Run a test worker job")
+        await self.confirm_latest()
+        self.assertTrue(await self.mobile.run_once())
+        self.assertEqual(writes, ["/v1/jobs"])
+        self.assertIn("等待服务器", self.sent[-1][2])
+        record.update(status="succeeded", result={"status_code": 200})
+        sender = self.mobile.sender
+        self.store.close()
+        reopened = SecurityStore(self.store_path, b"x" * 32)
+        self.addCleanup(reopened.close)
+        restarted = MobileAuthorization(reopened, sender=AsyncMock(side_effect=RuntimeError("QQ unavailable")), bot_selector=lambda: BOT)
+        recovered = FleetAuthorization(SimpleNamespace(_raw_request=raw), restarted)
+        await recovered.poll()
+        with reopened.transaction() as db:
+            watch = db.execute("SELECT status FROM admin_fleet_watches WHERE path='/v1/jobs/job_tool'").fetchone()
+            self.assertEqual(watch["status"], "watching")
+            db.execute("UPDATE admin_fleet_watches SET lease_until=0")
+        restarted.sender = sender
+        await recovered.poll()
+        self.assertIn("tank-worker", self.sent[-1][2])
+        self.assertEqual(writes, ["/v1/jobs"])
+        count = len(self.sent)
+        await recovered.poll()
+        self.assertEqual(len(self.sent), count)
 
 
 if __name__ == "__main__":

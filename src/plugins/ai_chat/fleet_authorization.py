@@ -51,8 +51,10 @@ class FleetAuthorization:
         if approved_request.get() is not None:
             # This call is made by a fixed, already approved HTTP/tool/command handler.
             result = await self.client._raw_request(method, path, body, actor=actor, origin=origin)
-            if result.get("operation_id") or result.get("deployment_id"):
+            if result.get("operation_id") or result.get("deployment_id") or result.get("job_id"):
                 await self.watch(result, account, actor, origin)
+            if result.get("job_id") and result.get("status") in {"queued", "running", "verifying", "cancelling"}:
+                return {**result, "submitted": True}
             return result
         payload = {"method": method, "path": path, "body": body, "actor": actor, "origin": origin}
         summary = f"服务器管理：{method} {path}\n参数：{json.dumps(body, ensure_ascii=False, indent=2)}"
@@ -101,18 +103,20 @@ class FleetAuthorization:
             if self.contract_view(record) != payload["contract"]:
                 raise SecurityError("操作参数已变化，旧口令不可使用", 409)
         result = await self.client._raw_request(payload["method"], payload["path"], payload["body"], actor=payload["actor"], origin=payload["origin"])
-        if result.get("operation_id") or result.get("deployment_id"):
+        if result.get("operation_id") or result.get("deployment_id") or result.get("job_id"):
             await self.watch(result, request["account"], payload["actor"], payload["origin"])
-        return {"ok": True, "submitted": result.get("status") in {"queued", "running", "preflight_queued"}, "data": result,
+        return {"ok": True, "submitted": result.get("status") in {"queued", "running", "verifying", "cancelling", "preflight_queued"}, "data": result,
                 "message": "已提交这次已批准的操作；服务器最终结果将另发 QQ 私聊。"}
 
     @staticmethod
     def record_path(record: dict[str, Any]) -> str:
-        kind = "deployments" if record.get("deployment_id") else "operations"
-        identifier = record.get("deployment_id") or record.get("operation_id")
-        if not identifier or not re.fullmatch(r"[A-Za-z0-9_.-]+", str(identifier)):
-            raise SecurityError("无效服务器操作编号", 502)
-        return f"/v1/{kind}/{identifier}"
+        for key, kind in (("deployment_id", "deployments"), ("operation_id", "operations"), ("job_id", "jobs")):
+            identifier = record.get(key)
+            if identifier:
+                if not re.fullmatch(r"[A-Za-z0-9_.-]+", str(identifier)):
+                    raise SecurityError("无效服务器操作编号", 502)
+                return f"/v1/{kind}/{identifier}"
+        raise SecurityError("无效服务器操作编号", 502)
 
     async def watch(self, record, account, actor, origin):
         await asyncio.to_thread(self.mobile.store.watch_fleet, self.record_path(record), account,
@@ -150,7 +154,7 @@ class FleetAuthorization:
                 elif record.get("status") in {"succeeded", "failed", "cancelled", "expired", "needs_attention", "preflight_failed", "rolled_back"}:
                     await self.mobile.sender(item["bot_id"], item["account"]["qq_id"],
                         f"服务器执行结果：{item['path'].rsplit('/', 1)[-1]}\n状态：{record['status']}\n"
-                        + json.dumps({k: record[k] for k in ("result", "error", "failure_reason", "verification") if k in record}, ensure_ascii=False)[:3000])
+                        + json.dumps({k: record[k] for k in ("worker_id", "host_id", "error_code", "result", "error", "failure_reason", "verification") if k in record}, ensure_ascii=False)[:3000])
                     done = True
             except Exception:
                 # Polling/notification failure never resubmits the server mutation.
