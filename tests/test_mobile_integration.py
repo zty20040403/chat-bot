@@ -90,6 +90,11 @@ class MobileIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("012345", str(bot.send_private_msg.call_args))
             self.assertNotIn("012345", str(bot.send_group_msg.call_args))
         self.assertFalse(await handle_approval_event(self.mobile, bot, event("机器人状态")))
+        incoming = event("012345")
+        self.assertNotIn("012345", incoming.get_log_string())
+        self.assertTrue(await handle_approval_event(self.mobile, bot, incoming))
+        self.assertNotIn("012345", str(bot.send_private_msg.call_args))
+        self.assertFalse(await handle_approval_event(self.mobile, bot, event("012345", group=True)))
 
     async def test_tools_delegate_server_authorization_to_fleet_boundary(self):
         for name in ("memory_add", "job_cancel", "browser_click", "browser_fill", "unknown_tool", "sandbox_host_exec", "cluster_job_submit"):

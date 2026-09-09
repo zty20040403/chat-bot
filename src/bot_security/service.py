@@ -31,8 +31,9 @@ def audit_actor() -> str:
     return "account:" + principal()["account_id"] + ":" + principal()["username"]
 
 
-def approval_command(text: str) -> bool:
-    return bool(re.match(r"^\s*/?(?:确认|取消|重发|审批状态|confirm|cancel|resend)\s+AP-", text, re.I))
+def approval_command(text: str, *, private: bool = False) -> bool:
+    return bool(re.match(r"^\s*/?(?:确认|取消|重发|审批状态|confirm|cancel|resend)\s+AP-", text, re.I)
+                or (private and re.fullmatch(r"[0-9]{6}", text.strip())))
 
 
 class MobileAuthorization:
@@ -55,7 +56,7 @@ class MobileAuthorization:
         if code is not None:
             await self._send_code(request, code)
         result = await asyncio.to_thread(self.store.get, request["approval_id"], account["account_id"])
-        return {**result, "executed": False, "message": "请在绑定 QQ 的机器人私聊中核对操作并回复口令；无需在电脑上批准。"}
+        return {**result, "executed": False, "message": "在绑定 QQ 的机器人私聊中核对内容，直接回复 6 位验证码即授权并自动继续；无需再确认。"}
 
     async def propose_qq(self, qq_id: str, *, kind: str, payload: dict[str, Any], summary: str) -> dict[str, Any]:
         account = await asyncio.to_thread(self.store.account_for_qq, qq_id)
@@ -66,7 +67,7 @@ class MobileAuthorization:
     async def _send_code(self, request: dict[str, Any], code: str) -> None:
         text = (f"待确认操作：{request['approval_id']}\n{request['summary']}\n\n"
                 f"一次性口令：{code}\n3 分钟有效，仅本人可用，成功一次立即失效。\n"
-                f"确认请回复：确认 {request['approval_id']} {code}\n"
+                f"直接回复 {code} 即授权并自动继续，无需操作编号或再次确认。\n"
                 f"取消请回复：取消 {request['approval_id']}\n"
                 f"重发请回复：重发 {request['approval_id']}")
         try:
@@ -79,9 +80,16 @@ class MobileAuthorization:
     async def handle_message(self, *, qq_id: str, bot_id: str, text: str, private: bool) -> str:
         if not private:
             return "操作确认只接受管理员 QQ 私聊，请勿在群里发送口令。"
+        if re.fullmatch(r"[0-9]{6}", text.strip()):
+            try:
+                request = await asyncio.to_thread(self.store.confirm, None, qq_id, bot_id, text.strip())
+                self.wake.set()
+                return f"{request['approval_id']} 已授权，验证码已失效，将自动继续执行，无需再次确认。"
+            except SecurityError as exc:
+                return str(exc)
         parts = text.strip().lstrip("/").split()
         if len(parts) < 2:
-            return "格式：确认 AP-操作编号 6位口令"
+            return "直接回复收到的 6 位验证码即可授权。"
         verb, approval_id = parts[0].lower(), parts[1].upper()
         try:
             if verb in {"确认", "confirm"} and len(parts) == 3:
@@ -101,7 +109,7 @@ class MobileAuthorization:
                     raise SecurityError("需要绑定的管理员 QQ")
                 request = await asyncio.to_thread(self.store.get, approval_id, account["account_id"])
                 return f"{approval_id}：{request['status']}\n{canonical(request['result'])}"
-            return "格式：确认 AP-操作编号 6位口令；取消/重发 AP-操作编号"
+            return "直接回复 6 位验证码即可授权；取消/重发 AP-操作编号。"
         except SecurityError as exc:
             return str(exc)
 

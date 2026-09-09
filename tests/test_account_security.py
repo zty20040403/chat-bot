@@ -89,6 +89,50 @@ class AccountStoreTests(unittest.TestCase):
         with self.assertRaises(SecurityError):
             self.store.confirm(request["approval_id"], QQ, BOT, code)
 
+    def test_code_only_selects_its_operation_not_the_newest(self):
+        with patch("src.bot_security.store.secrets.randbelow", side_effect=[42, 43]):
+            first, code = self.proposal()
+            second, _ = self.proposal(payload={"action": "another"})
+        for qq, bot in (("222222222", BOT), (QQ, "111111111")):
+            with self.assertRaises(SecurityError):
+                self.store.confirm(None, qq, bot, code)
+        accepted = self.store.confirm(None, QQ, BOT, code)
+        self.assertEqual(accepted["approval_id"], first["approval_id"])
+        self.assertEqual(self.store.get(second["approval_id"], self.admin["account_id"])["status"], "pending")
+        with self.assertRaises(SecurityError):
+            self.store.confirm(None, QQ, BOT, code)
+
+    def test_code_only_collision_never_approves_multiple_or_consumed_target(self):
+        with patch("src.bot_security.store.secrets.randbelow", return_value=42):
+            first, code = self.proposal()
+            second, _ = self.proposal(payload={"action": "another"})
+        with self.assertRaisesRegex(SecurityError, "多项操作"):
+            self.store.confirm(None, QQ, BOT, code)
+        self.assertIsNone(self.store.claim("worker"))
+        self.store.confirm(first["approval_id"], QQ, BOT, code)
+        with self.assertRaisesRegex(SecurityError, "多项操作"):
+            self.store.confirm(None, QQ, BOT, code)
+        self.assertEqual(self.store.get(second["approval_id"], self.admin["account_id"])["status"], "pending")
+
+    def test_code_only_lockout_expiry_and_resend(self):
+        with patch("src.bot_security.store.secrets.randbelow", side_effect=[42, 43]):
+            first, code = self.proposal()
+            second, _ = self.proposal(payload={"action": "another"})
+        for _ in range(5):
+            with self.assertRaises(SecurityError):
+                self.store.confirm(None, QQ, BOT, "999999")
+        for item in (first, second):
+            self.assertEqual(self.store.get(item["approval_id"], self.admin["account_id"])["status"], "locked")
+        with patch("src.bot_security.store.secrets.randbelow", return_value=44):
+            request, new_code = self.store.resend(first["approval_id"], QQ, BOT)
+        self.store.delivered(request["approval_id"], request["code_generation"], True)
+        with self.assertRaises(SecurityError):
+            self.store.confirm(None, QQ, BOT, code)
+        self.now += 180
+        with self.assertRaises(SecurityError):
+            self.store.confirm(None, QQ, BOT, new_code)
+        self.assertIsNone(self.store.claim("worker"))
+
     def test_wrong_codes_lock_at_five_and_expiry_is_enforced(self):
         request, code = self.proposal()
         wrong = "111111" if code != "111111" else "222222"
@@ -133,7 +177,7 @@ class AccountStoreTests(unittest.TestCase):
         self.addCleanup(second.close)
         def confirm(index):
             try:
-                (self.store if index % 2 else second).confirm(request["approval_id"], QQ, BOT, code)
+                (self.store if index % 2 else second).confirm(request["approval_id"] if index % 2 else None, QQ, BOT, code)
                 return True
             except SecurityError:
                 return False
@@ -211,7 +255,9 @@ class MobileAuthorizationTests(unittest.IsolatedAsyncioTestCase):
         group = await self.mobile.handle_message(qq_id=QQ, bot_id=BOT, private=False, text=f"确认 {result['approval_id']} {code}")
         self.assertIn("只接受", group)
         self.assertFalse(await self.mobile.run_once())
-        await self.mobile.handle_message(qq_id=QQ, bot_id=BOT, private=True, text=f"确认 {result['approval_id']} {code}")
+        response = await self.mobile.handle_message(qq_id=QQ, bot_id=BOT, private=True, text=code)
+        self.assertIn("已授权", response)
+        self.assertTrue(self.mobile.wake.is_set())
         self.assertTrue(await self.mobile.run_once())
         self.assertFalse(await self.mobile.run_once())
         self.assertEqual(calls, [{"action": "restart"}])
@@ -230,6 +276,9 @@ class MobileAuthorizationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(approval_command("确认 AP-123456789ABC 000042"))
         self.assertTrue(approval_command("/confirm AP-123456789ABC wrong"))
         self.assertFalse(approval_command("普通聊天"))
+        self.assertTrue(approval_command(" 000042 ", private=True))
+        self.assertFalse(approval_command("000042"))
+        self.assertFalse(approval_command("金额 000042", private=True))
 
 
 if __name__ == "__main__":

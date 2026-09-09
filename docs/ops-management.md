@@ -21,7 +21,7 @@ root profile 是真实宿主机权限，不是容器沙盒；批准任意命令�
 2. `ops_catalog(operation="resources.list")` 取得准确参数，再用 `ops_call` 查询资源。
 3. `ops_catalog(operation="exec.run")` 取得命令 schema，选择真实 profile 和目标。
 4. `ops_call(operation=..., params=..., idempotency_key=...)`：只读请求直接返回；写请求生成 `op_...`，并未执行。
-5. 机器人私聊管理员 QQ，展示本次完整参数与 6 位口令；本人回复 `确认 AP-操作编号 6位口令` 后执行。部署预检结束后会自动发起这一步，无需回电脑批准。
+5. 机器人私聊管理员 QQ，展示授权范围与 6 位验证码；本人直接回复验证码即授权并自动继续，无需操作编号或回电脑批准。任务内子步骤共享任务授权，独立操作只批准对应操作。
 6. `operation_status(operation_id=...)` 查询远端任务结果。输出很多时通过 `jobs.logs` / `jobs.result` 分页读取。
 
 每个独立写意图使用独立幂等键；同一请求重试保持原键。

@@ -50,7 +50,7 @@ def redact_approval_event_logs() -> None:
         return
 
     def get_log_string(event: MessageEvent) -> str:
-        if approval_command(event.get_plaintext()):
+        if approval_command(event.get_plaintext(), private=isinstance(event, PrivateMessageEvent)):
             return f"Message from {event.user_id}: [手机授权消息已隐藏]"
         return original(event)
 
@@ -60,9 +60,9 @@ def redact_approval_event_logs() -> None:
 
 async def handle_approval_event(mobile: MobileAuthorization | None, bot: Bot, event: MessageEvent) -> bool:
     text = event.get_plaintext()
-    if not approval_command(text):
-        return False
     private = isinstance(event, PrivateMessageEvent)
+    if not approval_command(text, private=private):
+        return False
     if mobile is None:
         response = "手机授权尚未初始化，操作不会执行。"
     else:

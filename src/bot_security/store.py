@@ -253,14 +253,34 @@ class SecurityStore:
             self._audit(db, request["account_id"], "approval.resent", approval_id)
             return request, code
 
-    def confirm(self, approval_id: str, qq_id: str, bot_id: str, code: str) -> dict[str, Any]:
+    def confirm(self, approval_id: str | None, qq_id: str, bot_id: str, code: str) -> dict[str, Any]:
         error = "口令无效、已使用，或不是本人的操作"
         accepted = None
         with self.transaction() as db:
             self._limit(db, "verify:" + qq_id, 15, 60)
-            row = db.execute("SELECT * FROM admin_approvals WHERE approval_id=? AND qq_id=? AND bot_id=?", (approval_id, qq_id, bot_id)).fetchone()
-            if row and row["status"] == "pending":
+            if approval_id is not None:
+                row = db.execute("SELECT * FROM admin_approvals WHERE approval_id=? AND qq_id=? AND bot_id=?", (approval_id, qq_id, bot_id)).fetchone()
+                rows = [row] if row else []
+            else:
+                rows = db.execute("SELECT * FROM admin_approvals WHERE qq_id=? AND bot_id=? AND expires_at>?",
+                                  (qq_id, bot_id, int(self.clock()))).fetchall()
+                # Include consumed and superseded codes: a repeated code must not
+                # accidentally select a different pending operation with the same digits.
+                history = db.execute("""SELECT c.approval_id, c.code_fingerprint FROM admin_approval_codes c
+                    JOIN admin_approvals a ON a.approval_id=c.approval_id
+                    WHERE a.qq_id=? AND a.bot_id=? AND a.expires_at>?""",
+                    (qq_id, bot_id, int(self.clock()))).fetchall()
+                matches = {r["approval_id"] for r in history if hmac.compare_digest(
+                    r["code_fingerprint"], self._code_fingerprint(r["approval_id"], code))}
+                if len(matches) > 1:
+                    error, rows = "验证码对应多项操作，未批准任何操作；请重发目标操作的验证码。", []
+                elif matches:
+                    rows = [r for r in rows if r["approval_id"] in matches]
+            for row in rows:
+                if row["status"] != "pending":
+                    continue
                 request = dict(row)
+                approval_id = request["approval_id"]
                 status = "pending"
                 attempts = int(request["attempts"])
                 if not self._current(db, request):

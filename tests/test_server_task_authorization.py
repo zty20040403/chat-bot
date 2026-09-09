@@ -63,7 +63,8 @@ class ServerTaskAuthorizationTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(0.01)
         identifier = re.search(r"AP-[A-F0-9]+", self.sent[0])[0]
         code = re.search(r"一次性口令：([0-9]{6})", self.sent[0])[1]
-        self.store.confirm(identifier, QQ, BOT, code)
+        response = await self.mobile.handle_message(qq_id=QQ, bot_id=BOT, private=True, text=code)
+        self.assertIn("已授权", response)
         await self.mobile.run_once()
 
     async def prepare(self, host):
