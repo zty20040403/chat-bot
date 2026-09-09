@@ -11,17 +11,78 @@ authorization for a new service change. Historical checks remain dated below.
 
 | Phase | Required evidence | Current state |
 | --- | --- | --- |
-| P1 | Fresh authenticated status for all three hosts | Authenticated `host.facts` returned fresh, uncached observations for all three at epoch `1788845883`; this proves reachability at that time, not permanent health |
+| P1 | Fresh authenticated status for all three hosts | Refreshed authenticated host observations were fresh and uncached for all three at epoch `1788925909`; this proves reachability at that time, not permanent health |
 | P2 | Diagnostic evidence names the actual target and observer; a probe from each worker | Diagnostic runs 9/10/11 completed for h310/h610/tank; all three workers have successful HTTP probe jobs. Fault-injection coverage remains separate from production evidence |
 | P3 | Prepare, review, approve, execute and query a harmless command on each host | Verified on all three with `id -u`, 2026-09-07 |
 | P4 | Each worker registers, receives a real job and serves its own expiring preview | All three workers are deployed, registered and available; probe and preview jobs succeeded. Worker HTTP health is 200 and the expired preview is 404 on each host |
-| P5 | Owner dispatch, external grant requirement, resource reservation, grant revocation and checkpoint recovery | Granted previews and grant revocation were verified earlier. The 2026-09-09 capacity audit exposed head-of-line blocking in the deployed scheduler. A local fix passes seven isolated PostgreSQL regressions, including three-host checkpoint transfer; publication and production recovery acceptance remain pending |
-| P6 | Registered targets on all three, observed incident and recovery, searchable evidence; approved bounded remediation via the single Ops backend | Observe-only guardians completed on all three; one verified case is recorded. Bounded repair is integrated and tested in isolation, but a production repair/recovery and subsequent case reuse are not yet verified |
-| P7 | Fixed revision preflight, approval, serial verification and rollback contracts for three hosts through the single Ops backend | Exact-source builds previously passed on all three. The old `32522e3` proposal ended without activation. Authorized serial activation of h610 and tank at `82997e4` now has verified running and boot-profile receipts. h310 activation and rollback acceptance remain pending |
+| P5 | Owner dispatch, external grant requirement, resource reservation, grant revocation and checkpoint recovery | Queue fix deployed at `e175de0`; all three normal probes succeeded while nine oversized/unauthorized jobs remained queued with zero attempts. Test jobs were cancelled afterwards. Seven isolated PostgreSQL regressions passed; live cross-lease task transfer remains untested |
+| P6 | Registered targets on all three, observed incident and recovery, searchable evidence; approved bounded remediation via the single Ops backend | Each real Worker was stopped once and automatically started once by its bounded guardian; failed probe, repair receipt and HTTP 200 recovery recorded. Verified recovery case is searchable for all three with applicability rejection for unknown causes. Automatic case-driven action selection is not claimed |
+| P7 | Fixed revision preflight, approval, serial verification and rollback contracts for three hosts through the single Ops backend | `8e62c4d` built, approved and serially verified on h310, tank and h610 through one durable deployment. h310/tank closures were unchanged; h610 updated only Bot/control services. Production rollback was deliberately not induced; isolated rollback tests remain separate evidence |
 
 Do not describe a configured host as a verified runtime. Do not perform destructive
 service or network tests on classmates' workloads. Use disposable previews and
 the gaoji worker for controlled recovery tests. Keep evidence and operation IDs.
+
+## Scoped Release and Live Recovery (2026-09-09)
+
+Bot release `e175de051e7d47411b86834056099e5cfa3728e9` includes the queue and
+receipt fixes plus the previously committed independent QQ alert switch.
+Concurrent account/OTP work and migration 0026 were excluded. Exact-release
+verification passed seven isolated PostgreSQL queue tests and 22 Ops tests
+(the API import test needs a writable temporary cache and the legacy SQLite
+test setting; it was verified separately without a production connection).
+All 17 NixOS host configurations evaluated successfully using Mac/Linux where
+their platform-specific dependencies were available.
+
+Deployment `deploy_37b5423fc9a247ef95da58eed7d27196` used exact shared revision
+`8e62c4d55f320fa68ac53cbdce52cad6730746ec`. It completed in serial order h310,
+tank, h610. Before approval, remote freshness and the actual service diff were
+checked. Only `gaoji.service` and `gaoji-cluster-control.service` changed, both on
+h610; no database, classmate service or sandbox image changed. The control
+service resumed its persisted deployment verification after its own restart.
+h610's verified target is
+`/nix/store/dzcif1g48zij5r78vwi0d78390kg46lv-nixos-system-h610-26.05.20260622.3426825`.
+QQ WebSocket reconnected at 11:45:36 Asia/Hong_Kong.
+
+Live queue acceptance used prefix `p5-release-e175de0-`. The normal jobs below
+succeeded before any of the nine blocking candidates were cancelled:
+
+| Host | Normal job | Probe latency |
+| --- | --- | --- |
+| h310 | `job_6a5fd0ed936c4bb0a84f41f7d28379d1` | 47 ms |
+| h610 | `job_4e861ca4e68e4dd1af22ab3d837d6d1d` | 22 ms |
+| tank | `job_bb96c4c9e2fb4e7d9a89fb072a2b5ff1` | 54 ms |
+
+CPU, memory and GPU candidates retained respectively
+`worker_cpu_millis_capacity`, `worker_memory_bytes_capacity` and
+`gpu_not_authorized`, with zero execution attempts. All nine were cancelled
+through the API; no audit job remains open. Each successful probe committed
+both started and completed checkpoints, but this does not prove live transfer
+between workers.
+
+Only idle `gaoji-cluster-worker.service` instances were stopped. Each guardian
+was explicitly authorized for 10 minutes, one `service.start`, 15-second probes
+and one failure threshold; its target hash was checked before creation.
+
+| Host | Guardian | Automatic repair | Recovered incident |
+| --- | --- | --- | --- |
+| h310 | `guardian_8e7c18691e1447c0acb19c0d48d81127` | `op_f5a7e1afce0540bdb2a6e5be01cb3928` | `incident_9c4fc4769025458e9d65d2b1db3da711` |
+| tank | `guardian_9346005dbdec435c8566c37ec6bc7bf0` | `op_2b351c9c665f46929557a136ae2ddd0f` | `incident_61268af7d69e4e0688062163dd84d342` |
+| h610 | `guardian_02c38e5e31be49d696bbb8ffa8933b1a` | `op_52f2a8f220804150b16894beaf49f7dd` | `incident_42bb7f1c45d14f18b83bf056d7c42f5e` |
+
+All three produced failed-probe evidence, exactly one successful repair receipt
+and a subsequent HTTP 200. All temporary guardians were cancelled after recovery.
+Case `case_5d407b618eb14ba1a8a7420b3fcf37d0` records the controlled stop, evidence
+and bounded remedy. Its real search endpoint returns it as applicable on all
+three for a confirmed operator stop; an unknown cause is explicitly inapplicable.
+This is verified case retrieval, not autonomous learning or unreviewed repair.
+
+After checks, the Bot DSN still selected writable h610 (`100.64.0.3`), both
+PostgreSQL health services had result `success`/exit 0 and active timers, and QQ
+notifications remained muted. No database role change occurred in this release.
+Live cross-lease transfer, QQ file delivery and an induced production rollback
+remain outside this acceptance; do not imply they were tested by stopping an
+otherwise idle Worker.
 
 ## Runtime Evidence (2026-09-08)
 
@@ -149,7 +210,8 @@ including bounded stop/start recovery checks of `gaoji-cluster-worker.service`
 only. Account/OTP edits are excluded; database and classmates' services must not
 be interrupted for these checks. Publication, live queue acceptance, controlled
 recovery, case reuse and remaining P7 acceptance are still pending execution.
-Authorization is not evidence of a completed rollout.
+Authorization is not evidence of a completed rollout. The subsequent execution
+is recorded in the scoped-release section above; this paragraph is historical.
 
 ## Worker Layout
 
