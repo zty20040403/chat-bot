@@ -2062,7 +2062,10 @@ class SubAgentCoordinator:
         validation = await self._validate_workflow(task, completed, context=context,
             selected_profile=selected_profile, tools_by_name=tools_by_name,
             execute_tool=tracked_execute_tool, hooks=hooks, parent_trace=parent_trace, progress=progress)
-        if validation.get("status") == "failed" and adaptive_repairs_used < self.max_adaptive_repairs:
+        files_ready = bool(validation.get("artifacts")) and all(
+            review.get("status") == "passed" for review in validation["artifacts"]
+        ) and all(check.get("ok") for check in validation.get("checks", []))
+        if validation.get("status") == "failed" and not files_ready and adaptive_repairs_used < self.max_adaptive_repairs:
             target = _acceptance_repair_target(completed, validation)
             if target is not None:
                 repair_sequence += 1
@@ -3327,7 +3330,8 @@ def _retryable_outcome(outcome: StepOutcome) -> bool:
 def _acceptance_repair_target(
     completed: Mapping[str, StepOutcome], validation: Mapping[str, Any],
 ) -> StepOutcome | None:
-    for review in validation.get("artifacts", []):
+    reviews = validation.get("artifacts", [])
+    for review in reviews:
         if review.get("status") != "passed" and review.get("step") in completed:
             return completed[review["step"]]
     for check in validation.get("checks", []):
