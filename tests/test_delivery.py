@@ -1,6 +1,12 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import Mock, patch
+
+from psycopg._queries import PostgresQuery
+from psycopg.adapt import Transformer
+
+from src.bot_storage.database import _translate_sql
 
 import nonebot
 
@@ -73,6 +79,22 @@ class DeliveryStoreTests(unittest.TestCase):
         self.assertEqual(self.store.claim_due(now=110), [])
         second = self.store.claim_due(now=111)[0]
         self.assertEqual(second.attempts, 2)
+
+    def test_ambiguous_finals_filter_and_postgres_parameters(self) -> None:
+        final, _ = self.enqueue("subagent-final:1:2")
+        other, _ = self.enqueue("turn:2:chunk:0")
+        for delivery in (final, other):
+            self.store.begin_direct_attempt(delivery.delivery_id, now=100)
+            self.store.mark_ambiguous(delivery.delivery_id, "receipt lost", now=101)
+        self.assertEqual([d.delivery_id for d in self.store.ambiguous_finals()], [final.delivery_id])
+        connection = Mock()
+        connection.execute.return_value.fetchall.return_value = []
+        with patch.object(self.store, "_connection", connection):
+            self.store.ambiguous_finals(limit=3)
+        statement, parameters = connection.execute.call_args.args
+        translated, _ = _translate_sql(statement)
+        PostgresQuery(Transformer()).convert(translated, parameters)
+        self.assertEqual(parameters, ("subagent-final:%", 3))
 
     def test_interrupted_send_is_ambiguous_after_reopen_semantics(self) -> None:
         delivery, _created = self.enqueue()

@@ -287,8 +287,8 @@ class DeliveryStore:
     def ambiguous_finals(self, *, limit: int = 100) -> list[Delivery]:
         with self._lock:
             rows = self._connection.execute("""SELECT * FROM deliveries
-                WHERE status='ambiguous' AND idempotency_key LIKE 'subagent-final:%'
-                ORDER BY updated_at, delivery_id LIMIT ?""", (limit,)).fetchall()
+                WHERE status='ambiguous' AND idempotency_key LIKE ?
+                ORDER BY updated_at, delivery_id LIMIT ?""", ("subagent-final:%", limit)).fetchall()
         return [self._row(row) for row in rows]
 
     def mark_committed(

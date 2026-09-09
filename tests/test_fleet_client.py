@@ -243,6 +243,23 @@ class FleetControlClientTests(unittest.IsolatedAsyncioTestCase):
         result = (await self.logs(self.log_response(b"a" * 65536)))["result"]
         self.assertEqual(len(result["stdout"]), 65536)
 
+    async def test_finished_job_full_page_still_requires_pagination(self) -> None:
+        payload = {"operation": "jobs.logs", "params": {"job_id": "job-test", "limit": 8}}
+        for stdout, stderr in ((b"12345678", b""), (b"", b"12345678"), (b"1234", b"5678")):
+            with self.subTest(stdout=stdout, stderr=stderr):
+                result = (await self.logs(self.log_response(
+                    stdout, stderr, complete=True, truncated=False), payload))["result"]
+                self.assertTrue(result["complete"])
+                self.assertTrue(result["more_possible"])
+                self.assertIn("complete means the job finished", result["pagination_hint"])
+        for stdout in (b"last", b""):
+            result = (await self.logs(self.log_response(
+                stdout, complete=True, truncated=False), payload))["result"]
+            self.assertFalse(result["more_possible"])
+        result = (await self.logs(self.log_response(
+            b"x" * 65536, complete=True, truncated=False)))["result"]
+        self.assertTrue(result["more_possible"])
+
     async def test_logs_reject_invalid_base64_and_never_claim_empty_success(self) -> None:
         for stream in ("stdout", "stderr"):
             for encoded in (None, 123, [], "%%%synthetic-bad-value", "YQ", "YQ==\n", "\ufffd"):

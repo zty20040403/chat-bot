@@ -166,11 +166,19 @@ def project_jobs_logs(response: dict[str, Any], *, payload: Any, secrets: tuple[
     projected = {key: value for key, value in result.items()
                  if key not in {"stdout_base64", "stderr_base64"}}
     projected.update(decoded, encoding="utf-8")
+    params = payload.get("params")
+    limit = params.get("limit", LOG_PAGE_BYTES) if isinstance(params, dict) else LOG_PAGE_BYTES
+    if type(limit) is not int or not 1 <= limit <= LOG_PAGE_BYTES:
+        limit = LOG_PAGE_BYTES
+    # Upstream complete describes the job, not whether this page exhausted its output.
+    projected["more_possible"] = bool(size >= limit or not result.get("complete")
+                                      or (size and result.get("truncated")))
     projected["pagination_hint"] = (
         "Continue jobs.logs using next_stdout_offset as stdout_offset and "
         "next_stderr_offset as stderr_offset; request at most 65536 bytes per page. "
-        "Offsets count original bytes, not displayed text."
-        if result.get("truncated") or not result.get("complete")
+        "Offsets count original bytes, not displayed text. complete means the job "
+        "finished, not that all log pages have been read. A full page may have a successor."
+        if projected["more_possible"]
         else "Log page complete; no further page indicated."
     )
     return {**response, "result": projected}

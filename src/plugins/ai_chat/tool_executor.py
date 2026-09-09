@@ -1896,7 +1896,7 @@ class ToolExecutor(HandlerService):
                         )
                 except FleetControlError as exc:
                     self.context.logger.warning(
-                        "Fleet control tool failed (%s): %s", exc.code, exc
+                        "Fleet control tool failed ({}): {}", exc.code, exc
                     )
                     return json.dumps(
                         {

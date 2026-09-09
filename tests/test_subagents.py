@@ -87,6 +87,7 @@ class SubAgentStoreTests(unittest.TestCase):
         self.assertGreaterEqual(len(events), 5)
         self.assertIn("run.running", [item["event_type"] for item in events])
         self.assertEqual(changed_tasks, [task.task_id] * len(events))
+        self.assertEqual(self.store.events(task.task_id, limit=3), events[-3:])
 
     def test_cancel_marks_active_task(self) -> None:
         task = self.store.create_task(

@@ -867,7 +867,7 @@ class SubAgentStore(AgentSessionStoreMixin, TaskControlStoreMixin, ExternalStore
             rows = self._connection.execute(
                 """
                 SELECT * FROM subagent_events WHERE task_id = ?
-                ORDER BY sequence ASC LIMIT ?
+                ORDER BY sequence DESC LIMIT ?
                 """,
                 (int(task_id), min(max(int(limit), 1), 2000)),
             ).fetchall()
@@ -881,7 +881,7 @@ class SubAgentStore(AgentSessionStoreMixin, TaskControlStoreMixin, ExternalStore
                 "payload": _json_object(row["payload_json"]),
                 "created_at": int(row["created_at"]),
             }
-            for row in rows
+            for row in reversed(rows)
         ]
 
     def stats(self) -> dict[str, int]:
