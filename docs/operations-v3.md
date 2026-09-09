@@ -139,7 +139,9 @@ Matrix 使用稳定 transaction id，网络失败可安全重试；OneBot 和 iM
 
 ```text
 AI_ADMIN_ENABLED=true
-AI_ADMIN_TOKEN=生成一段足够长的随机字符串
+AI_ADMIN_SECRET_FILE=/run/secrets/gaoji/admin-authorization-key
+AI_ADMIN_ORIGIN=https://bot.example.com
+AI_ADMIN_BOT_ID=机器人QQ号
 AI_ADMIN_PATH=/bot-admin
 AI_ADMIN_USER_IDS=3526452465
 AI_QUOTA_ENABLED=true
@@ -152,7 +154,8 @@ AI_QUOTA_DAILY_OUTPUT_TOKENS=100000
 任务、桥接和浏览器状态，也可调整群默认、管理员本人和其他群友的模型。网页模型
 选择写入 PostgreSQL 后立即生效，不需要 rebuild。页面还可停止任务、重试或取消投递。
 若把 `HOST` 改为公网地址，
-必须设置 `AI_ADMIN_TOKEN` 并在反向代理上再加 TLS 与访问控制。
+必须初始化账户登录与 QQ 私聊授权，并在反向代理上配置 TLS。
+普通成员仅能看基础状态；管理员修改需本人私聊回复 6 位口令。首次迁移与初始化见 [账户与手机授权](account-security.md)。
 
 `/bot-admin/api/overview` 还会列出当前存活的后台 worker、模型 profile 的非敏感配置
 以及最近一次未捕获异常。

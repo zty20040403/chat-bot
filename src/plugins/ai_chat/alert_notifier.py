@@ -94,8 +94,8 @@ class AlertNotificationPreferences:
     def set_enabled(self, enabled: bool) -> bool:
         normalized = bool(enabled)
         with self._lock:
-            self._enabled_override = normalized
             self._state.save({"version": 1, "enabled": normalized})
+            self._enabled_override = normalized
         return normalized
 
 

@@ -908,7 +908,7 @@ export function FleetView({ plane }: { plane: Plane }) {
         {knownHosts.length ? <DataTable><thead><tr><th>节点</th><th>角色</th><th>Agent</th><th>Exporter</th><th>失败服务</th><th>观测状态</th><th></th></tr></thead><tbody>{knownHosts.map((host) => { const hostId = String(host.host ?? host.host_id); return <tr key={hostId}><td><strong>{host.label || hostId}</strong><small className="cell-sub">{hostId} · {host.site ?? host.architecture ?? '-'}</small></td><td>{host.role ?? host.roles?.join?.('、') ?? '-'}</td><td><StatusBadge value={host.agent?.state ?? 'unknown'} /></td><td><StatusBadge value={host.exporter?.state ?? 'unknown'} /></td><td>{host.agent?.failed_units == null ? '-' : fmtNumber(host.agent.failed_units)}</td><td><StatusBadge value={fleetHostState(host)} /></td><td className="actions"><button className="icon-button" title={`查看 ${hostId} 详情`} aria-label={`查看 ${hostId} 详情`} onClick={() => void loadHost(hostId)}><Eye size={15} /></button></td></tr>})}</tbody></DataTable> : <EmptyState>暂无登记节点；控制服务离线时不会猜测机器状态</EmptyState>}
       </Section>
       <OpsManagementPanel plane={plane} />
-      <Section title="固定版本部署" description="先对固定 Git 提交做隔离预检，再批准同一份闭包；不接受任意命令">
+      <Section title="固定版本部署" description="对固定 Git 提交做隔离预检，完成后自动私聊发送手机口令，确认后执行">
         <div className="diagnostic-controls">
           <label><span>配置仓库</span><select value={deploymentRepository} onChange={(event) => selectDeploymentRepository(event.target.value)}><option value="">选择仓库</option>{deploymentRepositories.map((item) => <option key={item.repository_id} value={item.repository_id}>{item.repository_id}</option>)}</select></label>
           <label className="diagnostic-subject"><span>Git 提交（40 位）</span><input value={deploymentRevision} maxLength={40} placeholder="完整 commit SHA" onChange={(event) => setDeploymentRevision(event.target.value.trim().toLowerCase())} /></label>
@@ -922,7 +922,7 @@ export function FleetView({ plane }: { plane: Plane }) {
         <DataTable><thead><tr><th>更新时间</th><th>部署</th><th>提交</th><th>节点</th><th>阶段</th><th>状态</th><th></th></tr></thead><tbody>{deployments.slice(0, 5).map((item) => <tr key={item.deployment_id}><td>{fmtTime(item.updated_at)}</td><td><code>{item.deployment_id}</code><small className="cell-sub">{item.repository_id}</small></td><td><code title={item.source_revision}>{String(item.source_revision ?? '').slice(0, 12)}</code></td><td>{rows(item.target_hosts).join(' → ')}</td><td>{item.phase}</td><td><StatusBadge value={item.status} /></td><td className="actions"><button type="button" className="icon-button" title="查看预检、节点和事件" onClick={() => void loadDeployment(item.deployment_id)}><Eye size={15} /></button>{!['succeeded', 'failed', 'cancelled', 'rolled_back', 'needs_attention'].includes(item.status) && <button type="button" className="icon-button danger" title="取消部署" onClick={() => void cancelDeployment(item.deployment_id)}><Ban size={15} /></button>}</td></tr>)}</tbody></DataTable>
         {!deployments.length && <EmptyState>{deploymentCapabilities.available ? '还没有部署记录' : '尚未配置独立部署执行器'}</EmptyState>}
         {deploymentDetail && <div className="diagnostic-detail">
-          <div className="diagnostic-detail-head"><div><strong>{deploymentDetail.deployment_id} · {String(deploymentDetail.source_revision ?? '').slice(0, 12)}</strong><small>批准哈希：{deploymentDetail.contract_hash}</small></div><div className="actions"><StatusBadge value={deploymentDetail.status} />{deploymentDetail.status === 'awaiting_approval' && <button type="button" className="command-button" title="只批准当前详情中显示的精确预检版本" onClick={() => void approveDeployment(deploymentDetail)}><Check size={15} />批准此预检</button>}</div></div>
+          <div className="diagnostic-detail-head"><div><strong>{deploymentDetail.deployment_id} · {String(deploymentDetail.source_revision ?? '').slice(0, 12)}</strong><small>批准哈希：{deploymentDetail.contract_hash}</small></div><div className="actions"><StatusBadge value={deploymentDetail.status} />{deploymentDetail.status === 'awaiting_approval' && <button type="button" className="command-button" title="只批准当前详情中显示的精确预检版本" onClick={() => void approveDeployment(deploymentDetail)}><Check size={15} />发送手机确认</button>}</div></div>
           <DataTable><thead><tr><th>节点</th><th>顺序</th><th>步骤</th><th>当前闭包</th><th>目标闭包</th><th>状态</th></tr></thead><tbody>{rows(deploymentDetail.targets).map((target) => <tr key={target.host_id}><td>{target.host_id}</td><td>{target.ordinal + 1}</td><td>{target.step}</td><td><code title={target.current_toplevel}>{String(target.current_toplevel ?? '').split('/').pop() || '-'}</code></td><td><code title={target.target_toplevel}>{String(target.target_toplevel ?? '').split('/').pop() || '-'}</code></td><td><StatusBadge value={target.status} /></td></tr>)}</tbody></DataTable>
           {Object.entries(deploymentDetail.preflight?.targets ?? {}).map(([hostId, value]: [string, any]) => <div className="deployment-preview" key={hostId}><strong>{hostId} 软件包变化</strong><pre>{value.change_preview || '等待预检'}</pre></div>)}
           <DataTable><thead><tr><th>时间</th><th>事件</th><th>节点</th><th>步骤</th><th>状态</th><th>操作者</th></tr></thead><tbody>{rows(deploymentDetail.events).slice(-20).reverse().map((event) => <tr key={event.sequence}><td>{fmtTime(event.created_at)}</td><td>{event.event_type}</td><td>{event.host_id || '-'}</td><td>{event.step || '-'}</td><td><StatusBadge value={event.status} /></td><td><code>{event.actor_id}</code></td></tr>)}</tbody></DataTable>
@@ -1115,6 +1115,7 @@ export function AuditView({ plane, onOpenDetail }: { plane: Plane; onOpenDetail:
 }
 
 export function ObservabilityView({ plane, onOpenDetail }: { plane: Plane; onOpenDetail: DetailOpener }) {
+  const [notificationSaving, setNotificationSaving] = useState(false)
   const data = plane.data.observability ?? {}
   const process = data.process ?? {}
   const alerts = rows(data.alertmanager?.items)
@@ -1125,6 +1126,16 @@ export function ObservabilityView({ plane, onOpenDetail }: { plane: Plane; onOpe
   const notifications = rows(history.notifications)
   const notificationControl = history.notification_control ?? {}
   const notificationEnabled = Boolean(notificationControl.enabled)
+  const setNotificationsEnabled = async (enabled: boolean) => {
+    setNotificationSaving(true)
+    try {
+      await plane.mutate('alerts', '/alert-notifications/control', 'PUT', { enabled }, ['alerts', 'observability'])
+    } catch {
+      // The control plane displays the error and refreshes stale versions.
+    } finally {
+      setNotificationSaving(false)
+    }
+  }
   return (
     <>
       <PageHeader title="可观测性" description="Prometheus、告警事故、阶段延迟、模型降级和工具表现" action={<RefreshButton onClick={() => void plane.refreshMany(['observability', 'alerts'])} />} />
@@ -1137,7 +1148,7 @@ export function ObservabilityView({ plane, onOpenDetail }: { plane: Plane; onOpe
       <Section
         title="QQ 告警通知"
         description={`独立控制发往群 ${notificationControl.group_id || '-'} 的通知；关闭后监控采集和告警历史仍继续`}
-        action={<div className="section-actions"><Toggle checked={notificationEnabled} disabled={!notificationControl.configured} label={notificationEnabled ? '通知已开启' : '通知已关闭'} onChange={(enabled) => void plane.mutate('alerts', '/alert-notifications/control', 'PUT', { enabled }, ['alerts', 'observability'])} /><ViewAllButton count={notifications.length} onClick={() => onOpenDetail('alert-notifications')} /></div>}
+        action={<div className="section-actions"><Toggle checked={notificationEnabled} disabled={!notificationControl.configured || notificationSaving} label={notificationSaving ? '保存中' : notificationEnabled ? '通知已开启' : '通知已关闭'} onChange={(enabled) => void setNotificationsEnabled(enabled)} /><ViewAllButton count={notifications.length} onClick={() => onOpenDetail('alert-notifications')} /></div>}
       >{notifications.length ? notifications.slice(0, 5).map((notification) => <div className="alert-row" key={notification.notification_id}><CircleAlert size={17} /><div><strong>{notification.incident_key}</strong><p>{notification.kind} · 合并 {fmtNumber(notification.alert_count)} 条</p><time>{fmtTime(notification.created_at)}</time></div><StatusBadge value={notification.severity} /></div>) : <EmptyState>暂无 QQ 告警通知</EmptyState>}</Section>
     </>
   )
@@ -1178,7 +1189,7 @@ const HELP_SECTIONS = [
       ['摘要与详情', '告警、任务、投递、Trace、上下文、媒体和审计等高频记录在主页面只显示最近 5 条。点击“查看全部”进入独立详情页，可搜索、分页并查看精确到秒的上海时间。'],
       ['实时状态', '右上角“实时”表示 SSE 已连接。后台只增量更新发生变化的资源，编辑中的下拉框不会因刷新而关闭。'],
       ['手动刷新', '侧栏“刷新数据”或右上角刷新按钮会重新拉取全部面板；用于刚部署完成、网络恢复或怀疑数据未同步时。'],
-      ['安全边界', '管理 Token 只保存在当前浏览器本地，模型密钥不会返回前端。危险工具仍需宿主批准，数据库和媒体操作都有审计。'],
+      ['安全边界', '使用账户密码登录。普通成员只能看基础状态；管理员写操作需在绑定 QQ 私聊中回复 6 位一次性口令，口令仅本人、本次操作有效。'],
     ],
   },
 ]

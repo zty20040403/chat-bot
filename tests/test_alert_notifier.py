@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import nonebot
 
@@ -58,6 +59,18 @@ def alert(
 
 
 class AlertNotificationServiceTests(unittest.IsolatedAsyncioTestCase):
+    def test_failed_save_keeps_previous_preference(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = Path(directory) / "notification-preferences.json"
+            preferences = AlertNotificationPreferences(state_path)
+            preferences.set_enabled(False)
+            with patch.object(preferences._state, "save", side_effect=RuntimeError("storage unavailable")):
+                with self.assertRaises(RuntimeError):
+                    preferences.set_enabled(True)
+
+            self.assertFalse(preferences.effective_enabled(True))
+            self.assertFalse(AlertNotificationPreferences(state_path).effective_enabled(True))
+
     def test_notification_preference_is_persistent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             state_path = Path(directory) / "notification-preferences.json"

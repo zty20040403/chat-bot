@@ -93,13 +93,13 @@ def register_http_surfaces(
                 alert_store=context.alert_store,
                 alert_preferences=context.alert_preferences,
                 fleet_client=context.fleet_client,
+                mobile_authorization=context.mobile_authorization,
             ),
             path=settings.admin_path,
-            token=settings.admin_token,
         )
-        if not settings.admin_token:
+        if context.mobile_authorization is None:
             logger.warning(
-                "Admin dashboard is enabled without a token; keep HOST on loopback."
+                "Admin dashboard is locked until account authentication is initialized."
             )
     except (RuntimeError, TypeError, ValueError) as exc:
         logger.error(f"Admin dashboard could not be registered: {exc}")

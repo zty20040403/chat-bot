@@ -200,7 +200,8 @@ class SignedActorApiTests(unittest.IsolatedAsyncioTestCase):
                 transport=httpx.ASGITransport(app=app),
             )
             try:
-                result = await client.prepare_operation(
+                result = await client._raw_request(
+                    "POST", "/v1/operations/prepare",
                     {
                         "host_id": "h610",
                         "resource_ref": "gaoji.service",

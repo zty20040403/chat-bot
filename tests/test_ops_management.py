@@ -335,12 +335,12 @@ class ManagementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.posts('exec.run')), 1)
         self.assertEqual(self.store.get_operation(key)['status'], 'needs_attention')
 
-    async def test_admin_api_fails_closed_without_token(self):
+    async def test_admin_api_fails_closed_without_accounts_even_with_old_token(self):
         import nonebot
         nonebot.init()
         from fastapi import FastAPI
         from src.plugins.ai_chat.admin import AdminServices, register_admin
-        for token, header, expected in [('', '', 503), ('secret', '', 401), ('secret', 'wrong', 401)]:
+        for token, header, expected in [('', '', 503), ('secret', '', 503), ('secret', 'wrong', 503)]:
             app = FastAPI()
             register_admin(app, AdminServices(version='test', started_at=1), token=token)
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:

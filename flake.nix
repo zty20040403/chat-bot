@@ -55,6 +55,7 @@
         ./README.md
         ./LICENSE
         ./THIRD_PARTY_NOTICES.md
+        ./nix/napcat-auth.py
         (lib.fileset.fileFilter (file: file.hasExt "md" || file.hasExt "html") ./docs)
         (lib.fileset.fileFilter (file: file.hasExt "md") ./skills)
         (lib.fileset.fileFilter (
@@ -102,7 +103,7 @@
         pname = "gaoji-admin-ui";
         version = project.project.version;
         src = ./admin-ui;
-        npmDepsHash = "sha256-+3wsqjBBTgLxUUO8CIMET3PnRayHO1sZEzqsit7C7ec=";
+        npmDepsHash = "sha256-/Qs+7QYbQ7uHibGud6dCk/3vY7+J8ZW5etfUMq2sVZA=";
         npmBuildScript = "build";
         installPhase = ''
           runHook preInstall
@@ -139,6 +140,11 @@
             --run '${pkgs.coreutils}/bin/mkdir -p "$AI_STATE_DIR" "$AI_CACHE_DIR"'
           makeWrapper ${virtualenv}/bin/python "$out/bin/gaoji-db" \
             --add-flags "-m src.bot_storage.cli" \
+            --chdir "$out/share/gaoji" \
+            --set PYTHONDONTWRITEBYTECODE 1 \
+            --set PYTHONUNBUFFERED 1
+          makeWrapper ${virtualenv}/bin/python "$out/bin/gaoji-admin" \
+            --add-flags "-m src.bot_security.cli" \
             --chdir "$out/share/gaoji" \
             --set PYTHONDONTWRITEBYTECODE 1 \
             --set PYTHONUNBUFFERED 1

@@ -11,7 +11,6 @@ export function OpsManagementPanel({ plane }: { plane: Plane }) {
   const capability = fleet.execution_capabilities?.ops_management
   const operations: Record<string, any>[] = fleet.operations?.items ?? []
   const [selected, setSelected] = useState<Record<string, any> | null>(null)
-  const [confirmed, setConfirmed] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [all, setAll] = useState(false)
@@ -33,7 +32,6 @@ export function OpsManagementPanel({ plane }: { plane: Plane }) {
   const load = async (id: string) => {
     setBusy(true)
     setError('')
-    setConfirmed(false)
     try { setSelected(await plane.query(`/fleet/operations/${encodeURIComponent(id)}`)) }
     catch (reason) { setError(reason instanceof Error ? reason.message : '读取失败') }
     finally { setBusy(false) }
@@ -47,8 +45,7 @@ export function OpsManagementPanel({ plane }: { plane: Plane }) {
         contract_hash: selected.contract_hash, resource_version: selected.resource_version,
       } : {}, ['fleet'])
       setSelected(result)
-      setConfirmed(false)
-    } catch (reason) { setError(reason instanceof Error ? reason.message : '操作失败') }
+      } catch (reason) { setError(reason instanceof Error ? reason.message : '操作失败') }
     finally { setBusy(false) }
   }
   useEffect(() => {
@@ -88,12 +85,12 @@ export function OpsManagementPanel({ plane }: { plane: Plane }) {
         <div className="ops-toolbar"><strong>{selected.host_id}</strong><span>{selected.actor_id}</span><StatusBadge value={selected.status} /></div>
         <p>请求参数 · 版本 {selected.resource_version}</p><pre>{JSON.stringify(selected.arguments?.params ?? selected.arguments, null, 2)}</pre>
         <small className="ops-hash">批准绑定：{selected.contract_hash}</small>
-        {selected.status === 'awaiting_approval' && <label className="ops-confirm"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} />确认以上目标和参数；该操作可能以 root 权限修改服务器。</label>}
+        {selected.status === 'awaiting_approval' && <p>请在绑定 QQ 私聊中核对目标和参数，再回复 6 位口令。无需在电脑上批准。</p>}
         {stale && <p role="status">状态已更新，请重新读取后操作。</p>}
         {error && <p role="alert" className="ops-error">{error}</p>}
         <div className="ops-toolbar">
           <button type="button" className="icon-button" title="重新读取请求与结果" aria-label="重新读取请求与结果" disabled={busy} onClick={() => void load(selected.operation_id)}><RefreshCw size={16} /></button>
-          {selected.status === 'awaiting_approval' && <button type="button" className="command-button" disabled={busy || !confirmed || Boolean(stale)} onClick={() => void action('approve')}><ShieldCheck size={16} />批准执行</button>}
+          {selected.status === 'awaiting_approval' && <button type="button" className="command-button" disabled={busy || Boolean(stale)} onClick={() => void action('approve')}><ShieldCheck size={16} />发送手机确认</button>}
           {['awaiting_approval', 'queued', 'running', 'reconciling'].includes(selected.status) && <button type="button" className="command-button" disabled={busy || Boolean(stale)} onClick={() => void action('cancel')}><Square size={15} />{['running', 'reconciling'].includes(selected.status) ? '请求取消' : '取消请求'}</button>}
         </div>
         {selected.backend_operation_id && <p>远端任务：<code>{selected.backend_operation_id}</code></p>}

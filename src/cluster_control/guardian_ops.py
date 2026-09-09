@@ -37,6 +37,7 @@ class GuardianOpsBridge:
         self.targets = targets
         self.inventory = {str(host["host_id"]): host for host in inventory}
         management.guardian_validator = self.validate_dispatch
+        management.guardian_approver = self.approve
 
     async def _binding(self, action: Mapping[str, Any], actor: str) -> str:
         self.management.authorize(actor)
@@ -97,6 +98,8 @@ class GuardianOpsBridge:
         if await asyncio.to_thread(self.store.host_under_maintenance, guardian["host_id"]):
             raise PermissionError("Host is in a deployment maintenance window")
         await self._validate(guardian)
+        if guardian.get("check_lease_owner") != lease_owner or int(guardian.get("check_lease_until") or 0) <= int(time.time()):
+            raise PermissionError("Guardian check lease changed")
         guardian_id = str(guardian["guardian_id"])
         if int(guardian["actions_used"]) > 0:
             previous = await asyncio.to_thread(self.management.store.find_operation,
@@ -114,16 +117,26 @@ class GuardianOpsBridge:
         record = result["operation"]
         if record["status"] != "awaiting_approval":
             return {**record, "action_reserved": True}
+        # A guardian policy only permits proposing a repair. Every concrete repair
+        # still waits for its own administrator phone confirmation.
+        return {**record, "action_reserved": False}
+
+    async def approve(self, record: dict[str, Any], *, actor: str, expected_hash: str,
+                      expected_version: int) -> dict[str, Any]:
+        guardian = await asyncio.to_thread(self.store.guardian, record["arguments"]["guardian_id"])
+        if guardian is None or guardian["actor_id"] != actor:
+            raise PermissionError("Guardian repair must be confirmed by its owner")
+        await self._validate(guardian)
         await self.management.validate_binding(record)
         record = await asyncio.to_thread(self.management.store.approve_operation,
-            record["operation_id"], actor_id=str(guardian["actor_id"]),
-            expected_hash=record["contract_hash"], expected_version=int(record["resource_version"]),
+            record["operation_id"], actor_id=actor,
+            expected_hash=expected_hash, expected_version=expected_version,
             expires_at=min(int(guardian["expires_at"]), int(time.time()) + 300),
-            before_approve=lambda cursor, item, now: self._reserve(cursor, item, guardian, lease_owner, now))
+            before_approve=lambda cursor, item, now: self._reserve(cursor, item, guardian, None, now))
         return {**record, "action_reserved": True}
 
     @staticmethod
-    def _reserve(cursor: Any, operation: dict[str, Any], expected: Mapping[str, Any], owner: str, now: int) -> None:
+    def _reserve(cursor: Any, operation: dict[str, Any], expected: Mapping[str, Any], owner: str | None, now: int) -> None:
         row = cursor.execute("SELECT * FROM fleet_guardians WHERE guardian_id=? FOR UPDATE",
             (expected["guardian_id"],)).fetchone()
         if row is None:
@@ -132,8 +145,8 @@ class GuardianOpsBridge:
         if cursor.execute("SELECT 1 FROM fleet_maintenance_locks WHERE host_id=? AND lease_expires_at>?",
                           (guardian["host_id"], now)).fetchone() is not None:
             raise PermissionError("Host is in a deployment maintenance window")
-        if (guardian["status"] != "active" or guardian["mode"] != "remediate"
-                or guardian["check_lease_owner"] != owner or int(guardian["check_lease_until"] or 0) <= now
+        if (guardian["status"] not in {"active", "needs_attention"} or guardian["mode"] != "remediate"
+                or (owner is not None and (guardian["check_lease_owner"] != owner or int(guardian["check_lease_until"] or 0) <= now))
                 or not int(guardian["starts_at"]) <= now < int(guardian["expires_at"])
                 or int(guardian["actions_used"]) >= int(guardian["max_actions"])
                 or guardian["probe_policy"] != expected["probe_policy"]):

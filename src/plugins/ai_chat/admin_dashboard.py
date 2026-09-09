@@ -17,13 +17,13 @@ ADMIN_FAVICON_SVG = r"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 
 """
 
 
-def dashboard_html(prefix: str, version: str, requires_token: bool) -> str:
+def dashboard_html(prefix: str, version: str) -> str:
     runtime = json.dumps(
         {
             "prefix": prefix,
             "apiBase": f"{prefix}/api/v1",
             "version": version,
-            "requiresToken": requires_token,
+            "requiresLogin": True,
         },
         ensure_ascii=False,
         separators=(",", ":"),

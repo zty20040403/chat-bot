@@ -9,6 +9,9 @@ import {
 } from './api'
 
 const INITIAL_RESOURCES: ResourceName[] = [
+  'accounts',
+  'approvals',
+  'securityAudit',
   'overview',
   'observability',
   'alerts',
@@ -34,7 +37,9 @@ const INITIAL_RESOURCES: ResourceName[] = [
 ]
 
 export function useControlPlane(runtime: GaojiAdminRuntime) {
-  const [token, setTokenState] = useState(() => localStorage.getItem('gaoji.admin.token') ?? '')
+  const [user, setUser] = useState<JsonObject | null>(null)
+  const [checkingSession, setCheckingSession] = useState(true)
+  const [pendingApproval, setPendingApproval] = useState<JsonObject | null>(null)
   const [data, setData] = useState<Partial<Record<ResourceName, JsonObject>>>({})
   const [versions, setVersions] = useState<Record<string, number>>({})
   const [loading, setLoading] = useState<Set<ResourceName>>(new Set())
@@ -42,18 +47,38 @@ export function useControlPlane(runtime: GaojiAdminRuntime) {
   const [error, setError] = useState('')
   const [updatedAt, setUpdatedAt] = useState(0)
   const eventSequence = useRef(0)
-  const client = useMemo(() => new AdminClient(runtime, token), [runtime, token])
-  const authenticated = !runtime.requiresToken || Boolean(token)
+  const client = useMemo(() => new AdminClient(runtime), [runtime])
+  const authenticated = user !== null
+  const isAdmin = user?.role === 'admin'
+  const initialResources = useMemo<ResourceName[]>(() => isAdmin ? INITIAL_RESOURCES : ['status'], [isAdmin])
 
-  const setToken = useCallback((value: string) => {
-    const normalized = value.trim()
-    if (normalized) localStorage.setItem('gaoji.admin.token', normalized)
-    else localStorage.removeItem('gaoji.admin.token')
-    setTokenState(normalized)
-    setData({})
-    setVersions({})
+  const login = useCallback(async (username: string, password: string) => {
     setError('')
-  }, [])
+    try {
+      const result = await client.login(username, password)
+      setUser(result.account)
+      setData({})
+      setVersions({})
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '登录失败')
+      throw reason
+    }
+  }, [client])
+
+  const logout = useCallback(async () => {
+    try { await client.logout() } finally {
+      setUser(null); setData({}); setVersions({}); setOnline(false); setPendingApproval(null)
+    }
+  }, [client])
+
+  useEffect(() => {
+    localStorage.removeItem('gaoji.admin.token')
+    const controller = new AbortController()
+    void client.query('/me', controller.signal).then((result) => setUser(result.account)).catch((reason) => {
+      if (!controller.signal.aborted && (!(reason instanceof AdminApiError) || reason.status !== 401)) setError(reason.message)
+    }).finally(() => { if (!controller.signal.aborted) setCheckingSession(false) })
+    return () => controller.abort()
+  }, [client])
 
   const refresh = useCallback(
     async (resource: ResourceName, signal?: AbortSignal) => {
@@ -76,7 +101,9 @@ export function useControlPlane(runtime: GaojiAdminRuntime) {
         if (signal?.aborted) return
         setOnline(false)
         if (reason instanceof AdminApiError && reason.status === 401) {
-          setError('管理 Token 无效或已过期')
+          setUser(null)
+          setData({})
+          setError('登录已过期，请重新登录')
         } else {
           setError(reason instanceof Error ? reason.message : '管理 API 暂时不可用')
         }
@@ -97,7 +124,7 @@ export function useControlPlane(runtime: GaojiAdminRuntime) {
     },
     [refresh],
   )
-  const refreshAll = useCallback(() => refreshMany(INITIAL_RESOURCES), [refreshMany])
+  const refreshAll = useCallback(() => refreshMany(initialResources), [refreshMany, initialResources])
   const query = useCallback(
     (path: string, signal?: AbortSignal) => client.query(path, signal),
     [client],
@@ -106,13 +133,14 @@ export function useControlPlane(runtime: GaojiAdminRuntime) {
   useEffect(() => {
     if (!authenticated) return
     const controller = new AbortController()
-    void refreshMany(INITIAL_RESOURCES, controller.signal)
+    void refreshMany(initialResources, controller.signal)
     return () => controller.abort()
-  }, [authenticated, refreshMany])
+  }, [authenticated, refreshMany, initialResources])
 
   useEffect(() => {
     if (!authenticated) return
     const controller = new AbortController()
+    if (!isAdmin) return
     const pendingResources = new Set<ResourceName>()
     let refreshTimer: number | null = null
     let retry = 1000
@@ -158,15 +186,15 @@ export function useControlPlane(runtime: GaojiAdminRuntime) {
       controller.abort()
       if (refreshTimer !== null) window.clearTimeout(refreshTimer)
     }
-  }, [authenticated, client, refreshMany])
+  }, [authenticated, isAdmin, client, refreshMany])
 
   useEffect(() => {
     if (!authenticated) return
     const timer = window.setInterval(() => {
-      void refreshMany(['overview', 'observability', 'alerts', 'databases', 'fleet', 'usage', 'subagents', 'contextDebug', 'localModel'])
+      void refreshMany(isAdmin ? ['overview', 'observability', 'alerts', 'databases', 'fleet', 'usage', 'subagents', 'contextDebug', 'localModel', 'approvals', 'accounts', 'securityAudit'] : ['status'])
     }, 30000)
     return () => window.clearInterval(timer)
-  }, [authenticated, refreshMany])
+  }, [authenticated, refreshMany, initialResources])
 
   const mutate = useCallback(
     async (
@@ -177,7 +205,7 @@ export function useControlPlane(runtime: GaojiAdminRuntime) {
       refreshResources: ResourceName[],
     ) => {
       try {
-        const payload = await client.mutate(path, method, body, versions[resource])
+        const payload = await client.mutate(path, method, body, versions[resource], setPendingApproval)
         if (typeof payload.resource_version === 'number') {
           setVersions((current) => ({ ...current, [resource]: payload.resource_version }))
         }
@@ -185,7 +213,9 @@ export function useControlPlane(runtime: GaojiAdminRuntime) {
         setError('')
         return payload
       } catch (reason) {
-        if (reason instanceof AdminApiError && reason.status === 409) {
+        if (reason instanceof AdminApiError && reason.status === 401) {
+          setUser(null); setData({}); setError('账户已更新或登录已失效，请重新登录')
+        } else if (reason instanceof AdminApiError && reason.status === 409 && typeof reason.detail === 'object' && reason.detail !== null && 'code' in reason.detail && reason.detail.code === 'resource_version_conflict') {
           await refreshMany([...refreshResources, 'versions'])
           setError('数据已被其他管理员修改，已加载最新版本，请重试')
         } else {
@@ -198,8 +228,16 @@ export function useControlPlane(runtime: GaojiAdminRuntime) {
   )
 
   return {
-    token,
-    setToken,
+    user,
+    isAdmin,
+    checkingSession,
+    pendingApproval,
+    login,
+    logout,
+    approvalAction: async (id: string, action: 'resend' | 'cancel') => {
+      await client.approvalAction(id, action)
+      await refreshMany(['approvals'])
+    },
     authenticated,
     data,
     versions,

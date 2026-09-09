@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from src.bot_security.service import actor as authenticated_actor, audit_actor
+
 import asyncio
 import re
 from collections.abc import Awaitable, Callable
@@ -205,7 +207,7 @@ def register_fleet_admin_routes(
     async def ops_catalog(operation: str = "", authorization: Optional[str] = Header(default=None)):
         management_auth(authorization)
         try:
-            return await configured_client().ops_catalog(operation, actor="admin:kenneth", origin="admin-console")
+            return await configured_client().ops_catalog(operation, actor=authenticated_actor(), origin="admin-console")
         except FleetControlError as exc:
             raise HTTPException(502, str(exc)) from None
 
@@ -213,7 +215,7 @@ def register_fleet_admin_routes(
     async def ops_call(request: OpsCallRequest, authorization: Optional[str] = Header(default=None)):
         management_auth(authorization)
         try:
-            return await configured_client().ops_call(request.model_dump(), actor="admin:kenneth", origin="admin-console")
+            return await configured_client().ops_call(request.model_dump(), actor=authenticated_actor(), origin="admin-console")
         except FleetControlError as exc:
             raise HTTPException(502, str(exc)) from None
 
@@ -221,7 +223,7 @@ def register_fleet_admin_routes(
     async def operation_detail(operation_id: str, authorization: Optional[str] = Header(default=None)):
         management_auth(authorization)
         try:
-            return await configured_client().operation(operation_id, actor="admin:kenneth", origin="admin-console")
+            return await configured_client().operation(operation_id, actor=authenticated_actor(), origin="admin-console")
         except FleetControlError as exc:
             raise HTTPException(502, str(exc)) from None
 
@@ -354,7 +356,7 @@ def register_fleet_admin_routes(
         host_id = _validate(request.host_id, _HOST_RE, "host id")
         if request.target_id and _TARGET_RE.fullmatch(request.target_id) is None:
             raise HTTPException(status_code=422, detail="invalid target id")
-        actor = " ".join(str(admin_actor or "admin-console").split())[:160]
+        actor = audit_actor()
         try:
             return await configured_client().run_diagnostic(
                 template=request.template,
@@ -374,7 +376,7 @@ def register_fleet_admin_routes(
         management_auth(authorization)
         try:
             return await configured_client().prepare_operation(
-                request.model_dump(), actor="admin:kenneth", origin="admin-console"
+                request.model_dump(), actor=authenticated_actor(), origin="admin-console"
             )
         except FleetControlError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from None
@@ -388,7 +390,7 @@ def register_fleet_admin_routes(
         try:
             return await configured_client().deployment(
                 deployment_id,
-                actor="admin:kenneth",
+                actor=authenticated_actor(),
                 origin="admin-console",
             )
         except FleetControlError as exc:
@@ -403,7 +405,7 @@ def register_fleet_admin_routes(
         try:
             return await configured_client().prepare_deployment(
                 request.model_dump(exclude_none=True),
-                actor="admin:kenneth",
+                actor=authenticated_actor(),
                 origin="admin-console",
             )
         except FleetControlError as exc:
@@ -421,7 +423,7 @@ def register_fleet_admin_routes(
                 deployment_id,
                 request.contract_hash,
                 request.resource_version,
-                actor="admin:kenneth",
+                actor=authenticated_actor(),
                 origin="admin-console",
             )
         except FleetControlError as exc:
@@ -436,7 +438,7 @@ def register_fleet_admin_routes(
         try:
             return await configured_client().cancel_deployment(
                 deployment_id,
-                actor="admin:kenneth",
+                actor=authenticated_actor(),
                 origin="admin-console",
             )
         except FleetControlError as exc:
@@ -452,7 +454,7 @@ def register_fleet_admin_routes(
         try:
             return await configured_client().approve_operation(
                 operation_id, request.contract_hash, request.resource_version,
-                actor="admin:kenneth", origin="admin-console",
+                actor=authenticated_actor(), origin="admin-console",
             )
         except FleetControlError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from None
@@ -465,7 +467,7 @@ def register_fleet_admin_routes(
         management_auth(authorization)
         try:
             return await configured_client().cancel_operation(
-                operation_id, actor="admin:kenneth", origin="admin-console"
+                operation_id, actor=authenticated_actor(), origin="admin-console"
             )
         except FleetControlError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from None
@@ -478,7 +480,7 @@ def register_fleet_admin_routes(
         authorize(authorization)
         try:
             return await configured_client().submit_job(
-                request.model_dump(), actor="admin:kenneth", origin="admin-console"
+                request.model_dump(), actor=authenticated_actor(), origin="admin-console"
             )
         except FleetControlError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from None
@@ -491,7 +493,7 @@ def register_fleet_admin_routes(
         authorize(authorization)
         try:
             return await configured_client().cancel_job(
-                job_id, actor="admin:kenneth", origin="admin-console"
+                job_id, actor=authenticated_actor(), origin="admin-console"
             )
         except FleetControlError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from None
@@ -506,7 +508,7 @@ def register_fleet_admin_routes(
         try:
             return await configured_client().set_worker_availability(
                 _validate(worker_id, _HOST_RE, "worker id"), request.model_dump(),
-                actor="admin:kenneth", origin="admin-console",
+                actor=authenticated_actor(), origin="admin-console",
             )
         except FleetControlError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from None
@@ -521,7 +523,7 @@ def register_fleet_admin_routes(
         try:
             return await configured_client().configure_worker_capacity(
                 _validate(worker_id, _HOST_RE, "worker id"), request.model_dump(),
-                actor="admin:kenneth", origin="admin-console",
+                actor=authenticated_actor(), origin="admin-console",
             )
         except FleetControlError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from None
@@ -534,7 +536,7 @@ def register_fleet_admin_routes(
         authorize(authorization)
         try:
             return await configured_client().create_borrow_grant(
-                request.model_dump(), actor="admin:kenneth", origin="admin-console"
+                request.model_dump(), actor=authenticated_actor(), origin="admin-console"
             )
         except FleetControlError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from None
@@ -549,7 +551,7 @@ def register_fleet_admin_routes(
         try:
             return await configured_client().set_borrow_grant_status(
                 grant_id, request.model_dump(),
-                actor="admin:kenneth", origin="admin-console",
+                actor=authenticated_actor(), origin="admin-console",
             )
         except FleetControlError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from None
@@ -562,7 +564,7 @@ def register_fleet_admin_routes(
         management_auth(authorization)
         try:
             return await configured_client().create_guardian(
-                request.model_dump(), actor="admin:kenneth", origin="admin-console"
+                request.model_dump(), actor=authenticated_actor(), origin="admin-console"
             )
         except FleetControlError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from None
@@ -575,7 +577,7 @@ def register_fleet_admin_routes(
         authorize(authorization)
         try:
             return await configured_client().create_runbook_case(
-                request.model_dump(), actor="admin:kenneth", origin="admin-console"
+                request.model_dump(), actor=authenticated_actor(), origin="admin-console"
             )
         except FleetControlError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from None
@@ -590,7 +592,7 @@ def register_fleet_admin_routes(
         try:
             return await configured_client().set_guardian_status(
                 guardian_id, request.model_dump(),
-                actor="admin:kenneth", origin="admin-console",
+                actor=authenticated_actor(), origin="admin-console",
             )
         except FleetControlError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from None

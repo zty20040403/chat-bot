@@ -11,7 +11,6 @@ import {
   FileClock,
   Gauge,
   Image,
-  KeyRound,
   ListChecks,
   Menu,
   PanelLeftClose,
@@ -22,6 +21,7 @@ import {
   Wrench,
   X,
 } from 'lucide-react'
+import { LoginGate, MemberStatus, AccountsView, ApprovalNotice } from './AccountViews'
 import { StatusBadge } from './components'
 import { ContextDebugView } from './ContextDebugView'
 import { DETAIL_META, DetailView, type DetailViewId } from './detailViews'
@@ -46,12 +46,13 @@ const runtime = window.__GAOJI_ADMIN__ ?? {
   prefix: '/bot-admin',
   apiBase: '/bot-admin/api/v1',
   version: 'dev',
-  requiresToken: false,
+  requiresLogin: true,
 }
 
-type ViewId = 'overview' | 'observability' | 'usage' | 'groups' | 'tasks' | 'tools' | 'traces' | 'context-debug' | 'databases' | 'fleet' | 'sandboxes' | 'media' | 'audit' | 'help'
+type ViewId = 'accounts' | 'overview' | 'observability' | 'usage' | 'groups' | 'tasks' | 'tools' | 'traces' | 'context-debug' | 'databases' | 'fleet' | 'sandboxes' | 'media' | 'audit' | 'help'
 
 const NAVIGATION: Array<{ id: ViewId; label: string; description: string; group: string; icon: ComponentType<{ size?: number }> }> = [
+  { id: 'accounts', label: '账户与手机确认', description: '账户权限、QQ 一次性口令与操作记录', group: '配置', icon: Users },
   { id: 'overview', label: '概览', description: '服务状态、Token 趋势与最近投递', group: '运行', icon: Gauge },
   { id: 'observability', label: '可观测性', description: 'Prometheus、告警、延迟与模型降级', group: '运行', icon: Activity },
   { id: 'tasks', label: '任务与投递', description: 'Agent、持久任务和 QQ 消息回执', group: '运行', icon: ListChecks },
@@ -116,9 +117,9 @@ export function App() {
     return () => window.clearInterval(timer)
   }, [])
 
-  if (!plane.authenticated) {
-    return <TokenGate onSubmit={plane.setToken} />
-  }
+  if (plane.checkingSession) return <main className="boot-state">正在检查登录状态…</main>
+  if (!plane.authenticated) return <LoginGate plane={plane} />
+  if (!plane.isAdmin) return <MemberStatus plane={plane} />
 
   const openView = (view: ViewId) => {
     const next = { active: view, detail: null }
@@ -160,14 +161,16 @@ export function App() {
         <header className="topbar">
           <button className="menu-button" title="打开导航" onClick={() => setSidebarOpen(true)}><Menu size={19} /></button>
           <div className="topbar-title"><h1>{detailEntry?.title ?? activeEntry.label}</h1><p>{detailEntry?.description ?? activeEntry.description}</p></div>
-          <div className="topbar-status"><StatusBadge value={plane.online ? 'online' : 'offline'} label={plane.online ? '实时' : '断开'} /><span>{plane.updatedAt ? `更新于 ${new Date(plane.updatedAt).toLocaleTimeString('zh-CN', { hour12: false })}` : '正在加载'}</span><div className="live-clock" title="当前北京时间"><Clock3 size={14} /><time dateTime={clock.toISOString()}><span className="clock-date">{clock.toLocaleDateString('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit' })}</span>{clock.toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })}</time></div><button className="icon-button topbar-refresh" title="刷新全部数据" onClick={() => void plane.refreshAll()}><RefreshCw className={plane.loading.size ? 'spin' : ''} size={16} /></button>{runtime.requiresToken && <button className="text-button" onClick={() => plane.setToken('')}>退出</button>}</div>
+          <div className="topbar-status"><StatusBadge value={plane.online ? 'online' : 'offline'} label={plane.online ? '实时' : '断开'} /><span>{plane.updatedAt ? `更新于 ${new Date(plane.updatedAt).toLocaleTimeString('zh-CN', { hour12: false })}` : '正在加载'}</span><div className="live-clock" title="当前北京时间"><Clock3 size={14} /><time dateTime={clock.toISOString()}><span className="clock-date">{clock.toLocaleDateString('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit' })}</span>{clock.toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })}</time></div><button className="icon-button topbar-refresh" title="刷新全部数据" onClick={() => void plane.refreshAll()}><RefreshCw className={plane.loading.size ? 'spin' : ''} size={16} /></button><span>{plane.user?.username} · 管理员</span><button className="text-button" onClick={() => void plane.logout()}>退出</button></div>
         </header>
         {plane.error && <div className="error-banner"><span>{plane.error}</span><button title="关闭错误提示" onClick={plane.clearError}><X size={16} /></button></div>}
+        <ApprovalNotice plane={plane} />
         <main>
           {route.detail ? (
             <DetailView detail={route.detail} plane={plane} onBack={() => openView(DETAIL_META[route.detail!].parent)} />
           ) : (
             <>
+              {active === 'accounts' && <AccountsView plane={plane} />}
               {active === 'overview' && <OverviewView plane={plane} onOpenDetail={openDetail} />}
               {active === 'observability' && <ObservabilityView plane={plane} onOpenDetail={openDetail} />}
               {active === 'groups' && <GroupsView plane={plane} />}
@@ -187,20 +190,5 @@ export function App() {
         </main>
       </div>
     </div>
-  )
-}
-
-function TokenGate({ onSubmit }: { onSubmit: (token: string) => void }) {
-  const [value, setValue] = useState('')
-  return (
-    <main className="token-gate">
-      <form onSubmit={(event) => { event.preventDefault(); if (value.trim()) onSubmit(value) }}>
-        <div className="token-mark"><KeyRound size={22} /></div>
-        <h1>gaoji Control</h1>
-        <p>输入管理 Token 以连接内网控制面。</p>
-        <label><span>管理 Token</span><input type="password" autoFocus autoComplete="current-password" value={value} onChange={(event) => setValue(event.target.value)} /></label>
-        <button className="primary-button" type="submit" disabled={!value.trim()}>进入控制台</button>
-      </form>
-    </main>
   )
 }

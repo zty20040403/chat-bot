@@ -103,6 +103,7 @@ class GuardianOpsTests(unittest.IsolatedAsyncioTestCase):
             await self.bridge.validate_dispatch(operation)
 
     async def test_manual_approval_cannot_bypass_guardian_budget(self):
+        self.store.guardian.return_value = None
         self.management.store.get_operation.return_value = {
             "operation": "maxops.execute", "arguments": {"guardian_id": "guardian_test"}}
         with self.assertRaises(PermissionError):
@@ -139,6 +140,7 @@ class GuardianOpsPostgresTests(unittest.TestCase):
                         self.assertEqual(claimed["guardian_id"], created["guardian_id"])
                         with self.assertRaises(PermissionError):
                             await bridge.submit(claimed, "stale-owner")
+                        await bridge.submit(claimed, "test-owner")
                         self.assertEqual(reliability.guardian(created["guardian_id"])["actions_used"], 0)
                         prepared = operations.find_operation("admin:kenneth",
                             f"guardian:{created['guardian_id']}", f"guardian:{created['guardian_id']}:1")
@@ -146,10 +148,15 @@ class GuardianOpsPostgresTests(unittest.TestCase):
                         self.assertIsNone(operations.claim_managed_operation("executor"))
                         with patch.object(operations, "_event", side_effect=RuntimeError("simulate commit interruption")):
                             with self.assertRaises(RuntimeError):
-                                await bridge.submit(claimed, "test-owner")
+                                await management.approve(prepared["operation_id"], actor="admin:kenneth",
+                                    expected_hash=prepared["contract_hash"], expected_version=prepared["resource_version"])
                         self.assertEqual(reliability.guardian(created["guardian_id"])["actions_used"], 0)
                         self.assertEqual(operations.get_operation(prepared["operation_id"])["status"], "awaiting_approval")
                         result = await bridge.submit(claimed, "test-owner")
+                        self.assertEqual(result["status"], "awaiting_approval")
+                        self.assertEqual(reliability.guardian(created["guardian_id"])["actions_used"], 0)
+                        result = await management.approve(prepared["operation_id"], actor="admin:kenneth",
+                            expected_hash=prepared["contract_hash"], expected_version=prepared["resource_version"])
                         self.assertEqual(result["status"], "queued")
                         self.assertEqual(reliability.guardian(created["guardian_id"])["actions_used"], 1)
                         duplicate = await bridge.submit(claimed, "test-owner")

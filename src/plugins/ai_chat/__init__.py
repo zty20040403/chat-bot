@@ -5,7 +5,7 @@ import asyncio
 from src.bot_storage import DatabaseError
 
 from nonebot import get_app, get_driver, logger
-from nonebot.adapters.onebot.v11 import GroupMessageEvent, MessageEvent
+from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, MessageEvent
 from nonebot.exception import IgnoredException
 from nonebot.message import event_preprocessor
 
@@ -27,6 +27,8 @@ from .voice import VoiceError
 from .video_analysis import DeepVideoAnalysisError, DeepVideoAnalyzer
 from . import matchers
 from .handler_constants import BOT_VERSION
+from .mobile_authorization import handle_approval_event, redact_approval_event_logs
+redact_approval_event_logs()
 proactive_check_gate = ProactiveCheckGate()
 
 app_context = build_app_context(
@@ -134,7 +136,9 @@ def _is_group_vision_auto_describe_enabled(group_id: int) -> bool:
 
 
 @event_preprocessor
-async def ignore_disabled_group_event(event: MessageEvent) -> None:
+async def ignore_disabled_group_event(bot: Bot, event: MessageEvent) -> None:
+    if await handle_approval_event(app_context.mobile_authorization, bot, event):
+        raise IgnoredException("Mobile authorization handled outside conversation history")
     if (
         isinstance(event, GroupMessageEvent)
         and not _is_group_enabled(event.group_id)
@@ -154,6 +158,8 @@ TrackedAIResult = ChatTurnResult
 
 
 handlers = HandlerServices(app_context, video_analyzer=video_analyzer)
+from .qq_action_authorization import register_qq_executors
+register_qq_executors(handlers)
 handlers.reference_resolver = reference_resolver
 handlers.proactive_gate = proactive_check_gate
 
@@ -297,6 +303,8 @@ handlers.ingest_adapter = onebot_ingest_adapter
 
 @driver.on_startup
 async def start_background_tasks() -> None:
+    if app_context.mobile_authorization is not None:
+        background_tasks.start("mobile-authorization", app_context.mobile_authorization.run_forever)
     if subagent_coordinator is not None and subagent_coordinator.dispatcher is not None:
         background_tasks.start("subagent-workflows", subagent_coordinator.dispatcher.run_forever)
     if app_context.local_model is not None:

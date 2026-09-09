@@ -95,8 +95,8 @@ h610 的 Tailscale 地址访问 8001；不要将该端口暴露到公网。HTTP 
 
 准备一段至少 32 字符的随机 Token，存入 WSL 上述 root 拥有、权限 0600 的
 文件，并将同一值设置为 h610 私密环境文件中的 `AI_QWEN_CONTROL_TOKEN`。
-管理台还必须设置独立的 `AI_ADMIN_TOKEN`。两者都不要提交到 Git 或写进 Nix
-表达式：WSL 使用 `LoadCredential` 读取，不把 Token 放进 Nix store。
+管理台使用独立的 [账户密码与 QQ 手机授权](account-security.md)，启停模型也需要 6 位一次性口令。
+服务凭据不要提交到 Git 或写进 Nix 表达式：WSL 使用 `LoadCredential` 读取，不把 Token 放进 Nix store。
 
 管理 API 以无特权用户运行；Polkit 只授权此用户启停这一个 unit。
 `GET /status` 只读取 systemd 和 nvidia-smi；`POST /start`、`POST /stop`

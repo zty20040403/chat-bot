@@ -46,6 +46,8 @@ from .media_library import MediaLibrary
 from src.bot_storage.media_cleanup import LegacyMediaCleanup
 from .model_catalog import ModelCatalog
 from .model_preferences import ModelPreferenceStore
+from .mobile_authorization import build_mobile_authorization
+from src.bot_security.service import MobileAuthorization
 from .ocr import RecentImageStore
 from .pins import PinStore
 from .quota import UsageStore
@@ -149,6 +151,7 @@ class AppContext:
     cold_archive: ColdArchiveService | None = None
     alert_store: AlertEventStore | None = None
     fleet_client: FleetControlClient | None = None
+    mobile_authorization: MobileAuthorization | None = None
     _closed: bool = field(default=False, init=False, repr=False)
 
     async def shutdown(self) -> None:
@@ -197,6 +200,7 @@ class AppContext:
             ("semantic index state", self.semantic_index_state),
             ("maintenance state", self.maintenance_state),
             ("turn journal", self.turn_journal),
+            ("account authorization", self.mobile_authorization.store if self.mobile_authorization else None),
         ):
             if resource is None:
                 continue
@@ -340,6 +344,7 @@ def build_app_context(
 
     source_store = ContentSourceStore(database) if database is not None else None
     alert_store = AlertEventStore(database) if database is not None else None
+    mobile_authorization = build_mobile_authorization(settings, database)
     fleet_client: FleetControlClient | None = None
     if settings.cluster_enabled:
         if not settings.cluster_control_token_file:
@@ -351,6 +356,7 @@ def build_app_context(
                 settings.cluster_control_url,
                 settings.cluster_control_token_file,
                 timeout_seconds=settings.cluster_control_timeout_seconds,
+                mobile_authorization=mobile_authorization,
             )
         except ValueError as exc:
             raise RuntimeError(f"Fleet control client could not start: {exc}") from exc
@@ -893,4 +899,5 @@ def build_app_context(
         cold_archive=cold_archive,
         alert_store=alert_store,
         fleet_client=fleet_client,
+        mobile_authorization=mobile_authorization,
     )

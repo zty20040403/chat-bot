@@ -1,0 +1,159 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import re
+import time
+from typing import Any
+
+from src.bot_security.service import MobileAuthorization, approved_request, assert_approved, current_principal
+from src.bot_security.store import SecurityError
+
+
+class FleetAuthorization:
+    def __init__(self, client: Any, mobile: MobileAuthorization):
+        self.client = client
+        self.mobile = mobile
+        mobile.executors["fleet"] = self.execute
+        mobile.http_summary = self.http_summary
+        mobile.pollers.append(self.poll)
+        self.next_discovery = 0.0
+
+    async def account(self, actor: str) -> dict[str, Any]:
+        account = current_principal.get()
+        if account is None and actor.startswith("qq:"):
+            account = await asyncio.to_thread(self.mobile.store.account_for_qq, actor[3:])
+        if not account or account["role"] != "admin" or not account["enabled"]:
+            raise SecurityError("仅绑定 QQ 的管理员可以管理服务器")
+        return account
+
+    async def request(self, method: str, path: str, body: dict[str, Any] | None, *, actor: str, origin: str) -> dict[str, Any]:
+        if method == "GET":
+            if actor.startswith("qq:"):
+                account = await asyncio.to_thread(self.mobile.store.account_for_qq, actor[3:])
+                if account:
+                    actor = "admin:" + account["username"]
+            return await self.client._raw_request(method, path, body, actor=actor, origin=origin)
+        # Diagnostics only observe a fixed, preconfigured target.
+        if path in {"/v1/diagnostics", "/v1/runbook-cases/search"}:
+            return await self.client._raw_request(method, path, body, actor=actor, origin=origin)
+        account = await self.account(actor)
+        actor = "admin:" + account["username"]
+        if path in {"/v1/ops/call", "/v1/operations/prepare", "/v1/deployments/prepare"}:
+            result = await self.client._raw_request(method, path, body, actor=actor, origin=origin)
+            record = result.get("operation", result)
+            if isinstance(record, dict) and (record.get("operation_id") or record.get("deployment_id")):
+                await self.watch(record, account, actor, origin)
+            if isinstance(record, dict) and record.get("status") == "awaiting_approval":
+                approval = await self.propose_record(record, account, actor, origin)
+                return {**result, **approval, "operation": record, "next_action": "手机 QQ 私聊口令确认后才能执行。不要把待确认说成已执行。"}
+            return result
+        if approved_request.get() is not None:
+            # This call is made by a fixed, already approved HTTP/tool/command handler.
+            result = await self.client._raw_request(method, path, body, actor=actor, origin=origin)
+            if result.get("operation_id") or result.get("deployment_id"):
+                await self.watch(result, account, actor, origin)
+            return result
+        payload = {"method": method, "path": path, "body": body, "actor": actor, "origin": origin}
+        summary = f"服务器管理：{method} {path}\n参数：{json.dumps(body, ensure_ascii=False, indent=2)}"
+        if re.fullmatch(r"/v1/(operations|deployments)/[^/]+/approve", path):
+            record = await self.client._raw_request("GET", path.removesuffix("/approve"), actor=actor, origin=origin)
+            self.check_contract(record, body or {})
+            payload["contract"] = self.contract_view(record)
+            summary = self.describe(record)
+        return await self.mobile.propose(account, kind="fleet", payload=payload, summary=summary)
+
+    @staticmethod
+    def contract_view(record: dict[str, Any]) -> dict[str, Any]:
+        # Only immutable, reviewed fields; runtime progress is not authorization data.
+        keys = ("operation_id", "deployment_id", "host_id", "resource_ref", "operation", "arguments",
+                "contract_hash", "resource_version", "intent", "targets", "source", "plan", "artifact",
+                "repository", "repository_id", "revision", "source_revision", "expected_remote_revision", "requested_changes",
+                "canary_host_id", "failure_policy", "ref", "target_hosts", "strategy", "resolved_commit",
+                "deadline_at", "expected_state", "verification", "compensation", "contract", "preflight")
+        return {key: record[key] for key in keys if key in record}
+
+    @classmethod
+    def describe(cls, record: dict[str, Any]) -> str:
+        return "核对本次服务器操作（只批准本次操作）：\n" + json.dumps(cls.contract_view(record), ensure_ascii=False, indent=2)
+
+    @staticmethod
+    def check_contract(record: dict[str, Any], body: dict[str, Any]) -> None:
+        if record.get("status") != "awaiting_approval" or record.get("contract_hash") != body.get("contract_hash") or record.get("resource_version") != body.get("resource_version"):
+            raise SecurityError("操作已变化或不在待批准状态，请重新准备并核对", 409)
+
+    async def http_summary(self, payload: dict[str, Any], summary: str) -> str:
+        path = payload["path"]
+        if re.fullmatch(r"/fleet/(operations|deployments)/[^/]+/approve", path):
+            account = await self.account("")
+            remote_path = "/v1" + path.removeprefix("/fleet").removesuffix("/approve")
+            record = await self.client._raw_request("GET", remote_path, actor="admin:" + account["username"], origin="admin-console")
+            self.check_contract(record, payload["body"] or {})
+            return self.describe(record)
+        return summary
+
+    async def execute(self, request: dict[str, Any]) -> dict[str, Any]:
+        payload = request["payload"]
+        assert_approved("fleet", payload)
+        if "contract" in payload:
+            record = await self.client._raw_request("GET", payload["path"].removesuffix("/approve"), actor=payload["actor"], origin=payload["origin"])
+            self.check_contract(record, payload["body"])
+            if self.contract_view(record) != payload["contract"]:
+                raise SecurityError("操作参数已变化，旧口令不可使用", 409)
+        result = await self.client._raw_request(payload["method"], payload["path"], payload["body"], actor=payload["actor"], origin=payload["origin"])
+        if result.get("operation_id") or result.get("deployment_id"):
+            await self.watch(result, request["account"], payload["actor"], payload["origin"])
+        return {"ok": True, "submitted": result.get("status") in {"queued", "running", "preflight_queued"}, "data": result,
+                "message": "已提交这次已批准的操作；服务器最终结果将另发 QQ 私聊。"}
+
+    @staticmethod
+    def record_path(record: dict[str, Any]) -> str:
+        kind = "deployments" if record.get("deployment_id") else "operations"
+        identifier = record.get("deployment_id") or record.get("operation_id")
+        if not identifier or not re.fullmatch(r"[A-Za-z0-9_.-]+", str(identifier)):
+            raise SecurityError("无效服务器操作编号", 502)
+        return f"/v1/{kind}/{identifier}"
+
+    async def watch(self, record, account, actor, origin):
+        await asyncio.to_thread(self.mobile.store.watch_fleet, self.record_path(record), account,
+                               self.mobile.bot_selector(), actor, origin)
+
+    async def propose_record(self, record, account, actor, origin):
+        path = self.record_path(record)
+        if not record.get("contract_hash") or not record.get("resource_version"):
+            raise SecurityError("操作未提供完整批准信息", 502)
+        payload = {"method": "POST", "path": path + "/approve",
+                   "body": {"contract_hash": record["contract_hash"], "resource_version": record["resource_version"]},
+                   "actor": actor, "origin": origin, "contract": self.contract_view(record)}
+        return await self.mobile.propose(account, kind="fleet", payload=payload, summary=self.describe(record),
+            reference=path + ":" + record["contract_hash"] + ":" + str(record["resource_version"]))
+
+    async def poll(self):
+        # Discover exact guardian repair proposals made while the bot was offline.
+        if time.monotonic() >= self.next_discovery:
+            self.next_discovery = time.monotonic() + 15
+            accounts = {"admin:" + item["username"]: item for item in await asyncio.to_thread(self.mobile.store.accounts)
+                        if item["enabled"] and item["role"] == "admin"}
+            recent = await self.client._raw_request("GET", "/v1/operations?limit=200")
+            for record in recent.get("items", []):
+                if record.get("status") == "awaiting_approval" and record.get("arguments", {}).get("guardian_id"):
+                    account = accounts.get(record.get("actor_id"))
+                    if account:
+                        await self.watch(record, account, record["actor_id"], record["origin_scope"])
+        for item in await asyncio.to_thread(self.mobile.store.fleet_watches):
+            done = False
+            try:
+                record = await self.client._raw_request("GET", item["path"], actor=item["actor"], origin=item["origin"])
+                if record.get("status") == "awaiting_approval":
+                    if self.mobile.bot_selector() == item["bot_id"]:
+                        await self.propose_record(record, item["account"], item["actor"], item["origin"])
+                elif record.get("status") in {"succeeded", "failed", "cancelled", "expired", "needs_attention", "preflight_failed", "rolled_back"}:
+                    await self.mobile.sender(item["bot_id"], item["account"]["qq_id"],
+                        f"服务器执行结果：{item['path'].rsplit('/', 1)[-1]}\n状态：{record['status']}\n"
+                        + json.dumps({k: record[k] for k in ("result", "error", "failure_reason", "verification") if k in record}, ensure_ascii=False)[:3000])
+                    done = True
+            except Exception:
+                # Polling/notification failure never resubmits the server mutation.
+                pass
+            finally:
+                await asyncio.to_thread(self.mobile.store.finish_fleet_watch, item["path"], done=done)

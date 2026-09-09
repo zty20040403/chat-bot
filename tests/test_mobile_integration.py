@@ -1,0 +1,150 @@
+from __future__ import annotations
+
+import copy
+import os
+import re
+import unittest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
+import nonebot
+
+os.environ.setdefault("AI_ALLOW_LEGACY_SQLITE", "true")
+nonebot.init()
+
+from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message, PrivateMessageEvent
+from src.bot_security.service import MobileAuthorization
+from src.bot_security.store import SecurityError, SecurityStore
+from src.plugins.ai_chat.fleet_authorization import FleetAuthorization
+from src.plugins.ai_chat.mobile_authorization import handle_approval_event, redact_approval_event_logs
+from src.plugins.ai_chat.qq_action_authorization import mobile_command, register_qq_executors, requires_mobile_tool, command_targets
+from tests.test_account_security import PASSWORD, QQ, BOT
+
+
+def event(text, *, group=False):
+    raw = dict(time=100, self_id=int(BOT), post_type="message", message_type="group" if group else "private",
+        sub_type="normal" if group else "friend", message_id=42, user_id=int(QQ),
+        message=[{"type": "text", "data": {"text": text}}], raw_message=text, font=0,
+        sender={"user_id": int(QQ), "nickname": "test"})
+    if group:
+        raw["group_id"] = 1234
+    return (GroupMessageEvent if group else PrivateMessageEvent).model_validate(raw)
+
+
+class MobileIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.store = SecurityStore(":memory:", b"x" * 32)
+        self.addCleanup(self.store.close)
+        self.account = self.store.bootstrap("kenneth", PASSWORD, QQ)
+        self.sent = []
+        async def sender(bot, qq, text):
+            self.sent.append((bot, qq, text))
+        self.mobile = MobileAuthorization(self.store, sender=sender, bot_selector=lambda: BOT)
+
+    async def confirm_latest(self):
+        text = next(text for _, _, text in reversed(self.sent) if "一次性口令：" in text)
+        identifier = re.search(r"AP-[A-F0-9]+", text)[0]
+        code = re.search(r"一次性口令：([0-9]{6})", text)[1]
+        reply = await self.mobile.handle_message(qq_id=QQ, bot_id=BOT, private=True, text=f"确认 {identifier} {code}")
+        self.assertIn("已确认", reply)
+        return identifier
+
+    async def test_qq_command_roundtrip_and_fixed_task_target(self):
+        bot = SimpleNamespace(send=AsyncMock())
+        executed = []
+        registry = SimpleNamespace(list_for= lambda _: [SimpleNamespace(task_id="task-original")])
+        context = SimpleNamespace(mobile_authorization=self.mobile, running_tasks=registry)
+        class Commands:
+            def __init__(self):
+                self.context = context
+                self.services = SimpleNamespace(chat=SimpleNamespace(_conversation_id=lambda _: "private"))
+            @mobile_command
+            async def handle_task_stop(self, event, args):
+                executed.append(command_targets()["task_id"])
+        commands = Commands()
+        services = SimpleNamespace(context=context, commands=commands)
+        register_qq_executors(services)
+        with patch("src.plugins.ai_chat.qq_action_authorization.get_bots", return_value={BOT: bot}):
+            await commands.handle_task_stop(event("/停止"), Message(""))
+            self.assertEqual(executed, [])
+            self.assertIn("task-original", self.sent[-1][2])
+            registry.list_for = lambda _: [SimpleNamespace(task_id="task-new")]
+            await self.confirm_latest()
+            self.assertTrue(await self.mobile.run_once())
+            self.assertEqual(executed, ["task-original"])
+            self.assertFalse(await self.mobile.run_once())
+
+    async def test_private_code_interception_and_log_redaction(self):
+        redact_approval_event_logs()
+        text = "确认 AP-123456789ABC 012345"
+        bot = SimpleNamespace(self_id=BOT, send_private_msg=AsyncMock(), send_group_msg=AsyncMock())
+        for group in (False, True):
+            incoming = event(text, group=group)
+            self.assertNotIn("012345", incoming.get_log_string())
+            self.assertTrue(await handle_approval_event(self.mobile, bot, incoming))
+            self.assertNotIn("012345", str(bot.send_private_msg.call_args))
+            self.assertNotIn("012345", str(bot.send_group_msg.call_args))
+        self.assertFalse(await handle_approval_event(self.mobile, bot, event("机器人状态")))
+
+    async def test_side_effect_tool_policy_has_no_shell_or_write_bypass(self):
+        for name in ("sandbox_exec", "sandbox_write_file", "memory_add", "job_cancel", "browser_click", "browser_fill", "unknown_tool"):
+            self.assertTrue(requires_mobile_tool(name), name)
+        for name in ("web_search", "service_inspect", "say"):
+            self.assertFalse(requires_mobile_tool(name), name)
+
+    async def test_deployment_preflight_sends_private_code_and_polls_final_result(self):
+        record = {"deployment_id": "deploy_test", "status": "preflight_queued", "actor_id": "admin:kenneth",
+                  "contract_hash": "before", "resource_version": 1, "target_hosts": ["test-host"]}
+        writes = []
+        async def raw(method, path, body=None, **kwargs):
+            if path == "/v1/operations?limit=200":
+                return {"items": []}
+            if path.endswith("/prepare"):
+                self.assertEqual(kwargs["actor"], "admin:kenneth")
+                return copy.deepcopy(record)
+            if method == "POST":
+                writes.append((path, body))
+                self.assertEqual(record["status"], "awaiting_approval")
+                record["status"] = "queued"
+            return copy.deepcopy(record)
+        fleet = FleetAuthorization(SimpleNamespace(_raw_request=raw), self.mobile)
+        await fleet.request("POST", "/v1/deployments/prepare", {}, actor="qq:" + QQ, origin="test")
+        self.assertEqual(self.sent, [])
+        record.update(status="awaiting_approval", contract_hash="resolved-commit", resource_version=2)
+        await fleet.poll()
+        self.assertIn("resolved-commit", self.sent[-1][2])
+        self.assertEqual(writes, [])
+        self.store.finish_fleet_watch("/v1/deployments/deploy_test")
+        with self.store.transaction() as db:
+            db.execute("UPDATE admin_fleet_watches SET lease_until=0")
+        await fleet.poll()
+        self.assertEqual(len(self.sent), 1)
+        await self.confirm_latest()
+        await self.mobile.run_once()
+        self.assertEqual(len(writes), 1)
+        self.assertIn("等待服务器", self.sent[-1][2])
+        record["status"] = "succeeded"
+        with self.store.transaction() as db:
+            db.execute("UPDATE admin_fleet_watches SET lease_until=0")
+        await fleet.poll()
+        self.assertIn("服务器执行结果", self.sent[-1][2])
+        self.assertEqual(len(writes), 1)
+
+    async def test_changed_remote_contract_cannot_execute_and_member_cannot_propose(self):
+        record = {"operation_id": "op_test", "status": "awaiting_approval", "contract_hash": "original",
+                  "resource_version": 1, "arguments": {"unit": "example.service"}}
+        async def raw(method, path, body=None, **kwargs):
+            self.assertEqual(method, "GET")
+            return copy.deepcopy(record)
+        fleet = FleetAuthorization(SimpleNamespace(_raw_request=raw), self.mobile)
+        with self.assertRaises(SecurityError):
+            await fleet.request("POST", "/v1/operations/prepare", {}, actor="qq:222222222", origin="test")
+        await fleet.propose_record(record, self.account, "admin:kenneth", "test")
+        identifier = await self.confirm_latest()
+        record["arguments"]["unit"] = "different.service"
+        await self.mobile.run_once()
+        self.assertEqual(self.store.get(identifier, self.account["account_id"])["status"], "failed")
+
+
+if __name__ == "__main__":
+    unittest.main()

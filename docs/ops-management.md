@@ -21,7 +21,7 @@ root profile 是真实宿主机权限，不是容器沙盒；批准任意命令�
 2. `ops_catalog(operation="resources.list")` 取得准确参数，再用 `ops_call` 查询资源。
 3. `ops_catalog(operation="exec.run")` 取得命令 schema，选择真实 profile 和目标。
 4. `ops_call(operation=..., params=..., idempotency_key=...)`：只读请求直接返回；写请求生成 `op_...`，并未执行。
-5. 管理员在控制台的「集群」→「服务器操作」点眼睛，检查完整参数，勾选确认再批准。
+5. 机器人私聊管理员 QQ，展示本次完整参数与 6 位口令；本人回复 `确认 AP-操作编号 6位口令` 后执行。部署预检结束后会自动发起这一步，无需回电脑批准。
 6. `operation_status(operation_id=...)` 查询远端任务结果。输出很多时通过 `jobs.logs` / `jobs.result` 分页读取。
 
 每个独立写意图使用独立幂等键；同一请求重试保持原键。
@@ -30,8 +30,9 @@ root profile 是真实宿主机权限，不是容器沙盒；批准任意命令�
 
 ## 控制台与配置
 
-控制台启用 `AI_ADMIN_TOKEN` 后需要登录。未配置 Token 时，管理批准入口直接拒绝服务，
-不会退化成内网免登录 root 操作。认证头由服务器验证，网页 `X-Admin-Actor` 只是标签，不授予权限。
+控制台使用账户密码登录，管理员变更由 QQ 私聊的一次性口令授权；未初始化账户授权服务时拒绝管理请求。
+旧 `AI_ADMIN_TOKEN` 与浏览器 Bearer Token 不再授予权限。服务端从账户生成 `admin:账户名` 身份，忽略网页自报的操作者。
+详见 [账户与手机授权](account-security.md)。下方 Token 是服务器之间的内部凭据，继续保留。
 
 Nix 模块配置：
 

@@ -17,8 +17,8 @@ from src.plugins.ai_chat.admin import (
     AdminEventBroker,
     AdminServices,
     _changed_database_resources,
-    register_admin,
 )
+from tests.admin_session_fixture import ApprovedClient, register_admin
 from src.plugins.ai_chat.delivery import DeliveryStore
 from src.plugins.ai_chat.alert_notifier import AlertNotificationPreferences
 from src.plugins.ai_chat.model_catalog import ModelCatalog
@@ -514,8 +514,8 @@ class AdminTests(unittest.TestCase):
 
             async def run():
                 transport = httpx.ASGITransport(app=app)
-                headers = {"Authorization": "Bearer secret"}
-                async with httpx.AsyncClient(
+                headers = {"X-Test-Login": "admin"}
+                async with ApprovedClient(
                     transport=transport,
                     base_url="http://test",
                 ) as client:
@@ -545,7 +545,7 @@ class AdminTests(unittest.TestCase):
             after.json()["notification_control"]["enabled_override"]
         )
 
-    def test_dashboard_api_requires_token_and_returns_runtime_state(self) -> None:
+    def test_dashboard_api_requires_account_and_returns_runtime_state(self) -> None:
         deliveries = DeliveryStore(":memory:")
         usage = UsageStore(":memory:")
         models = ModelCatalog.from_json(
@@ -628,7 +628,7 @@ class AdminTests(unittest.TestCase):
 
         async def run():
             transport = httpx.ASGITransport(app=app)
-            async with httpx.AsyncClient(
+            async with ApprovedClient(
                 transport=transport,
                 base_url="http://test",
             ) as client:
@@ -637,20 +637,20 @@ class AdminTests(unittest.TestCase):
                 denied = await client.get("/bot-admin/api/overview")
                 allowed = await client.get(
                     "/bot-admin/api/overview",
-                    headers={"Authorization": "Bearer secret"},
+                    headers={"X-Test-Login": "admin"},
                 )
                 v1_allowed = await client.get(
                     "/bot-admin/api/v1/overview",
-                    headers={"Authorization": "Bearer secret"},
+                    headers={"X-Test-Login": "admin"},
                 )
                 sandboxes = await client.get(
                     "/bot-admin/api/sandboxes",
-                    headers={"Authorization": "Bearer secret"},
+                    headers={"X-Test-Login": "admin"},
                 )
                 sandbox_start = await client.post(
                     "/bot-admin/api/v1/sandboxes/s456def/action",
                     headers={
-                        "Authorization": "Bearer secret",
+                        "X-Test-Login": "admin",
                         "If-Match": '"0"',
                         "X-Admin-Actor": "Kenneth",
                     },
@@ -659,7 +659,7 @@ class AdminTests(unittest.TestCase):
                 sandbox_destroy_denied = await client.post(
                     "/bot-admin/api/v1/sandboxes/s456def/action",
                     headers={
-                        "Authorization": "Bearer secret",
+                        "X-Test-Login": "admin",
                         "If-Match": '"1"',
                     },
                     json={"action": "destroy"},
@@ -667,7 +667,7 @@ class AdminTests(unittest.TestCase):
                 sandbox_destroy = await client.post(
                     "/bot-admin/api/v1/sandboxes/s456def/action",
                     headers={
-                        "Authorization": "Bearer secret",
+                        "X-Test-Login": "admin",
                         "If-Match": '"1"',
                         "X-Admin-Actor": "Kenneth",
                     },
@@ -675,36 +675,36 @@ class AdminTests(unittest.TestCase):
                 )
                 stickers = await client.get(
                     "/bot-admin/api/stickers",
-                    headers={"Authorization": "Bearer secret"},
+                    headers={"X-Test-Login": "admin"},
                 )
                 group_models = await client.get(
                     "/bot-admin/api/group-models",
-                    headers={"Authorization": "Bearer secret"},
+                    headers={"X-Test-Login": "admin"},
                 )
                 media = await client.get(
                     "/bot-admin/api/media",
-                    headers={"Authorization": "Bearer secret"},
+                    headers={"X-Test-Login": "admin"},
                 )
                 sources = await client.get(
                     "/bot-admin/api/sources",
-                    headers={"Authorization": "Bearer secret"},
+                    headers={"X-Test-Login": "admin"},
                 )
                 context_plans = await client.get(
                     "/bot-admin/api/context-plans",
-                    headers={"Authorization": "Bearer secret"},
+                    headers={"X-Test-Login": "admin"},
                 )
                 context_debug = await client.get(
                     "/bot-admin/api/v1/context-debug",
-                    headers={"Authorization": "Bearer secret"},
+                    headers={"X-Test-Login": "admin"},
                 )
                 context_detail = await client.get(
                     "/bot-admin/api/v1/context-debug/3",
-                    headers={"Authorization": "Bearer secret"},
+                    headers={"X-Test-Login": "admin"},
                 )
                 context_feedback = await client.put(
                     "/bot-admin/api/v1/context-debug/3/feedback",
                     headers={
-                        "Authorization": "Bearer secret",
+                        "X-Test-Login": "admin",
                         "If-Match": '"0"',
                         "X-Admin-Actor": "Kenneth",
                     },
@@ -712,19 +712,19 @@ class AdminTests(unittest.TestCase):
                 )
                 databases = await client.get(
                     "/bot-admin/api/databases",
-                    headers={"Authorization": "Bearer secret"},
+                    headers={"X-Test-Login": "admin"},
                 )
                 fleet = await client.get(
                     "/bot-admin/api/v1/fleet",
-                    headers={"Authorization": "Bearer secret"},
+                    headers={"X-Test-Login": "admin"},
                 )
                 observability = await client.get(
                     "/bot-admin/api/observability",
-                    headers={"Authorization": "Bearer secret"},
+                    headers={"X-Test-Login": "admin"},
                 )
                 alerts = await client.get(
                     "/bot-admin/api/v1/alerts?days=30&limit=50",
-                    headers={"Authorization": "Bearer secret"},
+                    headers={"X-Test-Login": "admin"},
                 )
                 return (
                     page,
@@ -916,8 +916,8 @@ class AdminTests(unittest.TestCase):
 
         async def run():
             transport = httpx.ASGITransport(app=app)
-            headers = {"Authorization": "Bearer secret"}
-            async with httpx.AsyncClient(
+            headers = {"X-Test-Login": "admin"}
+            async with ApprovedClient(
                 transport=transport,
                 base_url="http://test",
             ) as client:
@@ -1058,17 +1058,17 @@ class AdminTests(unittest.TestCase):
         async def run():
             transport = httpx.ASGITransport(app=app)
             headers = {
-                "Authorization": "Bearer secret",
+                "X-Test-Login": "admin",
                 "If-Match": '"0"',
                 "X-Admin-Actor": "Kenneth",
             }
-            async with httpx.AsyncClient(
+            async with ApprovedClient(
                 transport=transport,
                 base_url="http://test",
             ) as client:
                 before = await client.get(
                     "/bot-admin/api/v1/tools",
-                    headers={"Authorization": "Bearer secret"},
+                    headers={"X-Test-Login": "admin"},
                 )
                 changed = await client.put(
                     "/bot-admin/api/v1/tools/web_search/enabled",
@@ -1082,11 +1082,11 @@ class AdminTests(unittest.TestCase):
                 )
                 audit = await client.get(
                     "/bot-admin/api/v1/audit",
-                    headers={"Authorization": "Bearer secret"},
+                    headers={"X-Test-Login": "admin"},
                 )
                 versions = await client.get(
                     "/bot-admin/api/v1/resource-versions",
-                    headers={"Authorization": "Bearer secret"},
+                    headers={"X-Test-Login": "admin"},
                 )
                 return before, changed, stale, audit, versions
 
@@ -1100,7 +1100,8 @@ class AdminTests(unittest.TestCase):
             "resource_version_conflict",
         )
         self.assertEqual(versions.json()["versions"]["tools"], 1)
-        self.assertEqual(audit.json()["items"][0]["actor"], "Kenneth")
+        self.assertTrue(audit.json()["items"][0]["actor"].startswith("account:"))
+        self.assertTrue(audit.json()["items"][0]["actor"].endswith(":kenneth"))
         self.assertEqual(audit.json()["items"][0]["action"], "tool.enabled.set")
 
 

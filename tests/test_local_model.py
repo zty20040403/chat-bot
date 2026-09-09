@@ -15,7 +15,8 @@ from fastapi import FastAPI
 
 nonebot.init()
 
-from src.plugins.ai_chat.admin import AdminServices, register_admin
+from src.plugins.ai_chat.admin import AdminServices, register_admin as locked_register_admin
+from tests.admin_session_fixture import ApprovedClient, register_admin
 from src.plugins.ai_chat.deepseek import DeepSeekTrace, _invoke_completion
 from src.plugins.ai_chat.llm_gateway import (
     LLMConnectionError, LLMGateway, LLMRateLimitError, LLMUnavailableError,
@@ -184,10 +185,10 @@ class LocalModelTests(unittest.IsolatedAsyncioTestCase):
         register_admin(app, AdminServices(
             version="test", started_at=1, local_model=self.local, llm_gateway=gateway,
         ), token="")
-        async with httpx.AsyncClient(
+        async with ApprovedClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test",
         ) as client:
-            status = (await client.get("/bot-admin/api/v1/local-model")).json()
+            status = (await client.get("/bot-admin/api/v1/local-model", headers={"X-Test-Login": "admin"})).json()
         self.assertFalse(status["circuit_breaker_enabled"])
 
         self.models = []
@@ -245,9 +246,9 @@ class LocalModelTests(unittest.IsolatedAsyncioTestCase):
     async def test_admin_control_auth_version_schema_and_audit(self):
         app = FastAPI()
         register_admin(app, AdminServices(version="test", started_at=123, local_model=self.local, llm_gateway=self.gateway, settings=SimpleNamespace(model_simple_chat_profile=QWEN.name)), token="admin-secret")
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        async with ApprovedClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
             url = "/bot-admin/api/v1/local-model"
-            headers = {"Authorization": "Bearer admin-secret"}
+            headers = {"X-Test-Login": "admin"}
             self.assertEqual((await client.get(url)).status_code, 401)
             status = (await client.get(url, headers=headers)).json()
             self.assertTrue(status["can_control"])
@@ -264,9 +265,9 @@ class LocalModelTests(unittest.IsolatedAsyncioTestCase):
             audit = (await client.get("/bot-admin/api/v1/audit", headers=headers)).json()
             self.assertIn("local_model.start", json.dumps(audit))
 
-    async def test_power_control_is_closed_when_console_has_no_token(self):
+    async def test_power_control_is_closed_when_accounts_uninitialized(self):
         app = FastAPI()
-        register_admin(app, AdminServices(version="test", started_at=1, local_model=self.local), token="")
+        locked_register_admin(app, AdminServices(version="test", started_at=1, local_model=self.local))
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
             response = await client.post("/bot-admin/api/v1/local-model/control", headers={"If-Match": "0"}, json={"action": "stop", "request_id": str(uuid.uuid4())})
-            self.assertEqual(response.status_code, 403)
+            self.assertEqual(response.status_code, 503)

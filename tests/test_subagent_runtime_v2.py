@@ -437,13 +437,14 @@ class RuntimeV2Tests(unittest.IsolatedAsyncioTestCase):
     async def test_admin_models_are_versioned_and_dispatch_is_not_exposed(self):
         import httpx
         from fastapi import FastAPI
-        from src.plugins.ai_chat.admin import AdminServices, register_admin
+        from src.plugins.ai_chat.admin import AdminServices
+        from tests.admin_session_fixture import ApprovedClient, register_admin
         task = self.submit()
         app = FastAPI()
         register_admin(app, AdminServices(version="test", started_at=1, subagent_store=self.store,
             subagent_coordinator=self.coordinator, model_catalog=self.catalog), token="test-token")
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-            headers = {"Authorization": "Bearer test-token", "If-Match": '"0"'}
+        async with ApprovedClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            headers = {"X-Test-Login": "admin", "If-Match": '"0"'}
             response = await client.get(f"/bot-admin/api/subagents/{task.task_id}", headers=headers)
             self.assertEqual(response.status_code, 200)
             self.assertNotIn("dispatch", response.json()["control"])

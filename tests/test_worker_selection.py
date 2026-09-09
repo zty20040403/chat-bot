@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -9,6 +10,10 @@ import nonebot
 from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message
 
 from src.cluster_control.execution_service import ClusterExecutionService
+from src.bot_security.service import MobileAuthorization
+from src.bot_security.store import SecurityStore
+from src.plugins.ai_chat.qq_action_authorization import register_qq_executors
+from tests.test_account_security import PASSWORD, QQ, BOT
 
 nonebot.init()
 
@@ -47,6 +52,13 @@ class WorkerSelectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_model_tool_preserves_executor_separately_from_probe_target(self):
         control = service()
         calls = []
+        sent = []
+        store = SecurityStore(":memory:", b"test-worker-selection-secret-0000")
+        self.addCleanup(store.close)
+        store.bootstrap("kenneth", PASSWORD, QQ)
+        async def sender(bot, qq, text):
+            sent.append(text)
+        mobile = MobileAuthorization(store, sender=sender, bot_selector=lambda: BOT)
 
         async def submit(payload, *, actor, origin):
             calls.append((actor, origin))
@@ -59,14 +71,17 @@ class WorkerSelectionTests(unittest.IsolatedAsyncioTestCase):
             names = {tool["function"]["name"] for tool in tools}
             self.assertIn("cluster_job_submit", names)
             result = json.loads(await execute_tool("cluster_job_submit", requested))
-            self.assertEqual(result["status"], "queued", result)
-            return "queued"
+            self.assertFalse(result["executed"], result)
+            self.assertIn("approval_id", result)
+            return "awaiting phone approval"
 
-        event = GroupMessageEvent(time=1, self_id=999, post_type="message", sub_type="normal",
-            user_id=321, message_type="group", message_id=654, message=Message("check worker"),
+        event = GroupMessageEvent(time=1, self_id=int(BOT), post_type="message", sub_type="normal",
+            user_id=int(QQ), message_type="group", message_id=654, message=Message("check worker"),
             original_message=Message("check worker"), raw_message="check worker", font=0,
-            sender={"user_id": 321, "nickname": "tester", "role": "member"}, group_id=789)
+            sender={"user_id": int(QQ), "nickname": "tester", "role": "member"}, group_id=789)
         with (
+            patch.object(ai_chat.app_context, "mobile_authorization", mobile, create=True),
+            patch("src.plugins.ai_chat.qq_action_authorization.get_bots", return_value={BOT: AsyncMock()}),
             patch.object(ai_chat.app_context, "fleet_client", client),
             patch.object(ai_chat.app_context, "subagent_coordinator", None),
             patch.object(ai_chat.app_context, "message_ledger", None),
@@ -77,6 +92,7 @@ class WorkerSelectionTests(unittest.IsolatedAsyncioTestCase):
             patch.object(ai_chat.app_context.memory, "append_turn"),
             patch("src.plugins.ai_chat.tool_executor.ask_deepseek_with_tools", new=model),
         ):
+            register_qq_executors(ai_chat.handlers)
             for index, worker in enumerate(("h310-worker", "h610-worker", "tank-worker", "")):
                 requested["idempotency_key"] = "worker-selection-" + str(index)
                 if worker:
@@ -85,9 +101,18 @@ class WorkerSelectionTests(unittest.IsolatedAsyncioTestCase):
                     requested.pop("worker_id", None)
                 await ai_chat.handlers.tools._ask_ai(AsyncMock(), event, "check worker",
                     available_image_sources=[])
+                self.assertEqual(len(control.store.records), index)
+                challenge = next(text for text in reversed(sent) if "一次性口令：" in text)
+                identifier = re.search(r"AP-[A-F0-9]+", challenge)[0]
+                code = re.search(r"一次性口令：([0-9]{6})", challenge)[1]
+                reply = await mobile.handle_message(qq_id=QQ, bot_id=BOT, private=True,
+                    text=f"确认 {identifier} {code}")
+                self.assertIn("已确认", reply)
+                self.assertTrue(await mobile.run_once())
                 record = control.store.records[-1]
                 self.assertEqual(record["constraints"]["worker_id"], worker)
                 self.assertEqual(record["payload"]["target_id"], "h610-worker")
-                self.assertEqual(record["actor_id"], "qq:321")
+                self.assertEqual(record["actor_id"], "qq:" + QQ)
                 self.assertEqual(record["origin_scope"], "onebot-v11:group:789")
+                self.assertFalse(await mobile.run_once())
         self.assertEqual(len(calls), 4)

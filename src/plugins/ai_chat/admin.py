@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import hmac
 import json
 import re
 import threading
@@ -25,6 +24,9 @@ from .admin_control import (
 )
 from .admin_dashboard import ADMIN_FAVICON_SVG, admin_asset_path, dashboard_html
 from .admin_fleet import register_fleet_admin_routes
+from .admin_security import register_security_routes, register_http_executor, secure_route, require_admin, SESSION_COOKIE
+from src.bot_security.service import MobileAuthorization, audit_actor
+from src.bot_security.store import SecurityError
 from .conversation_scope import ConversationScope
 from .model_catalog import SUPPORTED_REASONING_EFFORTS
 from .local_model import LocalModelControlError
@@ -86,6 +88,7 @@ class AdminServices:
     alert_store: Any = None
     alert_preferences: Any = None
     fleet_client: Any = None
+    mobile_authorization: MobileAuthorization | None = None
 
 
 @dataclass(frozen=True)
@@ -424,11 +427,13 @@ def register_admin(
     services: AdminServices,
     *,
     path: str = "/bot-admin",
-    token: str = "",
+    token: str = "",  # Obsolete: accepted only to reject old callers without reopening token login.
 ) -> None:
     prefix = "/" + path.strip("/")
-    router = APIRouter(prefix=prefix)
-    expected_token = token.strip()
+    mobile = services.mobile_authorization
+    origin = str(getattr(services.settings, "admin_origin", "") or "")
+    router = APIRouter(prefix=prefix, route_class=secure_route(mobile, prefix=prefix, origin=origin))
+    register_security_routes(router, mobile, services, prefix=prefix, origin=origin)
     control_store = AdminControlStore(services.database)
     configure_tool_overrides(control_store.tool_overrides())
     event_broker = AdminEventBroker(control_store.versions)
@@ -441,17 +446,9 @@ def register_admin(
     realtime_monitor = AdminRealtimeMonitor(services, event_broker)
 
     def authorize(authorization: Optional[str] = Header(default=None)) -> None:
-        if not expected_token:
-            return
-        supplied = ""
-        if authorization and authorization.lower().startswith("bearer "):
-            supplied = authorization[7:].strip()
-        if not hmac.compare_digest(supplied, expected_token):
-            raise HTTPException(status_code=401, detail="invalid admin token")
+        require_admin()
 
     def authorize_management(authorization: Optional[str] = None) -> None:
-        if not expected_token:
-            raise HTTPException(status_code=503, detail="服务器管理需先配置 AI_ADMIN_TOKEN")
         authorize(authorization)
 
     def mutation_context(
@@ -464,7 +461,7 @@ def register_admin(
             raise HTTPException(status_code=400, detail=str(exc)) from None
         return AdminMutationContext(
             expected_version=expected_version,
-            actor=" ".join(str(admin_actor or "admin-console").split())[:160],
+            actor=audit_actor(),
         )
 
     def mutate(
@@ -553,7 +550,7 @@ def register_admin(
 
     @router.get("", response_class=HTMLResponse, include_in_schema=False)
     async def dashboard() -> str:
-        return dashboard_html(prefix, services.version, bool(expected_token))
+        return dashboard_html(prefix, services.version)
 
     @router.get("/assets/{asset_path:path}", include_in_schema=False)
     async def dashboard_asset(asset_path: str) -> FileResponse:
@@ -593,10 +590,10 @@ def register_admin(
         snapshot = runtime.snapshot()
         health = services.llm_gateway.health_snapshot().get(runtime.profile.name, {}) if services.llm_gateway else {}
         selected = getattr(services.settings, "model_simple_chat_profile", "") == runtime.profile.name
-        can_control = bool(expected_token and snapshot["control_configured"])
+        can_control = bool(mobile and snapshot["control_configured"])
         return versioned("local-model", {
             **snapshot, "configured": True, "can_control": can_control,
-            "control_reason": "" if can_control else "启停需要同时配置管理台 Token 和 WSL 管理接口凭据",
+            "control_reason": "" if can_control else "启停需要管理员账户、QQ 口令授权和 WSL 管理接口凭据",
             "simple_chat_selected": selected,
             "serving_simple_chat": bool(selected and snapshot["ready"] and health.get("status") != "open"),
             "circuit_state": health.get("status", "unknown"),
@@ -613,8 +610,6 @@ def register_admin(
         context: AdminMutationContext = Depends(mutation_context),
     ) -> dict[str, object]:
         authorize(authorization)
-        if not expected_token:
-            raise HTTPException(status_code=403, detail="启停千问必须先设置 AI_ADMIN_TOKEN")
         if context.expected_version is None:
             raise HTTPException(status_code=428, detail="启停操作必须携带 If-Match 资源版本")
         runtime = services.local_model
@@ -710,6 +705,14 @@ def register_admin(
                 yield "retry: 2000\n"
                 yield f"data: {json.dumps(ready, separators=(',', ':'))}\n\n"
                 while not await request.is_disconnected():
+                    try:
+                        if mobile is None:
+                            break
+                        active = await asyncio.to_thread(mobile.store.session, request.cookies.get(SESSION_COOKIE, ""))
+                        if active["role"] != "admin":
+                            break
+                    except SecurityError:
+                        break
                     try:
                         payload = await asyncio.wait_for(
                             queue.get(),
@@ -2079,6 +2082,8 @@ def register_admin(
         )
 
     app.include_router(router)
+    if mobile is not None:
+        register_http_executor(app, mobile, prefix)
 
 
 def _context_debug_summary(plan: dict[str, Any]) -> dict[str, object]:

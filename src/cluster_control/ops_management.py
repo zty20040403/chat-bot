@@ -26,6 +26,7 @@ class OpsManagementService:
         self.owner = uuid.uuid4().hex
         self.closed = False
         self.guardian_validator: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+        self.guardian_approver = None
         self.deployment_validator: Callable[[dict[str, Any]], Awaitable[None]] | None = None
 
     def authorize(self, actor: str) -> None:
@@ -125,7 +126,7 @@ class OpsManagementService:
         awaiting = record["status"] == "awaiting_approval"
         return {"ok": True, "executed": record["status"] == "succeeded", "approval_required": awaiting, "operation": record,
                 "next_action": (
-                    "Administrator must review the exact parameters and approve in the console. Do not claim execution."
+                    "Administrator must review the exact parameters and confirm the one-time code in private QQ. Do not claim execution."
                     if awaiting else "Inspect this existing operation; do not submit the same effect under a new key."
                 )}
 
@@ -136,7 +137,10 @@ class OpsManagementService:
         if not record or record["operation"] != "maxops.execute":
             raise LookupError("Management proposal not found")
         if record["arguments"].get("guardian_id"):
-            raise PermissionError("Guardian actions must consume their bounded guardian authorization")
+            if self.guardian_approver is None:
+                raise PermissionError("Guardian phone approval service unavailable")
+            return await self.guardian_approver(record, actor=actor, expected_hash=expected_hash,
+                                                expected_version=expected_version)
         if record["arguments"].get("deployment"):
             raise PermissionError("Deployment actions require the matching two-phase deployment contract")
         await self.validate_binding(record)

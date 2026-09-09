@@ -1,6 +1,6 @@
 [project]
 name = "gaojibot"
-version = "0.19.1"
+version = "0.20.0"
 description = "gaoji: a multi-model conversational agent with durable tools and cluster collaboration."
 authors = [{name = "Kenneth"}]
 license = "MIT"
@@ -26,6 +26,7 @@ dependencies = [
   "opentelemetry-api>=1.36.0,<2.0.0",
   "opentelemetry-sdk>=1.36.0,<2.0.0",
   "opentelemetry-exporter-otlp-proto-http>=1.36.0,<2.0.0",
+  "argon2-cffi>=25.1.0,<26.0.0",
 ]
 
 [project.urls]

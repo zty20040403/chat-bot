@@ -1,0 +1,152 @@
+from __future__ import annotations
+
+import os
+import re
+import unittest
+from types import SimpleNamespace
+
+import httpx
+import nonebot
+from fastapi import FastAPI
+
+os.environ.setdefault("AI_ALLOW_LEGACY_SQLITE", "true")
+nonebot.init()
+
+from src.bot_security.passwords import hash_password
+from src.bot_security.service import MobileAuthorization
+from src.bot_security.store import SecurityStore
+from src.plugins.ai_chat.admin import AdminServices, register_admin
+from tests.test_account_security import PASSWORD, QQ, BOT
+
+
+class Preferences:
+    def __init__(self):
+        self.value = None
+        self.writes = 0
+
+    def enabled_override(self):
+        return self.value
+
+    def effective_enabled(self, default):
+        return default if self.value is None else self.value
+
+    def set_enabled(self, value):
+        self.value = value
+        self.writes += 1
+
+
+class AdminAccountApiTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.store = SecurityStore(":memory:", b"t" * 32)
+        self.addCleanup(self.store.close)
+        self.account = self.store.bootstrap("kenneth", PASSWORD, QQ)
+        self.store.apply_account_change(self.account, {"action": "create", "username": "viewer", "password_hash": hash_password(PASSWORD), "role": "member", "qq_id": None})
+        self.sent = []
+        async def send(bot, qq, message):
+            self.sent.append((bot, qq, message))
+        self.mobile = MobileAuthorization(self.store, sender=send, bot_selector=lambda: BOT)
+        self.preferences = Preferences()
+        self.app = FastAPI()
+        register_admin(self.app, AdminServices(version="test", started_at=1,
+            settings=SimpleNamespace(admin_origin="https://test", alert_notify_enabled=False),
+            mobile_authorization=self.mobile, alert_preferences=self.preferences), token="obsolete-token")
+        self.client = httpx.AsyncClient(transport=httpx.ASGITransport(app=self.app), base_url="https://test", headers={"Origin": "https://test"})
+        self.addAsyncCleanup(self.client.aclose)
+
+    async def login(self, username="kenneth"):
+        response = await self.client.post("/bot-admin/api/v1/auth/login", json={"username": username, "password": PASSWORD})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.client.headers["X-CSRF-Token"] = self.client.cookies.get("gaoji_csrf")
+        return response
+
+    async def approve(self, response):
+        self.assertEqual(response.status_code, 202, response.text)
+        identifier = response.json()["approval_id"]
+        code = re.search(r"一次性口令：([0-9]{6})", self.sent[-1][2])[1]
+        self.store.confirm(identifier, QQ, BOT, code)
+        self.assertTrue(await self.mobile.run_once())
+        return await self.client.get(f"/bot-admin/api/v1/approvals/{identifier}")
+
+    async def test_old_bearer_and_empty_configuration_never_grant_access(self):
+        for prefix in ("/bot-admin/api", "/bot-admin/api/v1"):
+            response = await self.client.get(prefix + "/overview", headers={"Authorization": "Bearer obsolete-token"})
+            self.assertEqual(response.status_code, 401)
+        locked = FastAPI()
+        register_admin(locked, AdminServices(version="test", started_at=1))
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=locked), base_url="https://test") as client:
+            self.assertEqual((await client.get("/bot-admin/api/v1/overview")).status_code, 503)
+
+    async def test_member_only_gets_basic_status_and_own_session(self):
+        response = await self.login("viewer")
+        self.assertIn("HttpOnly", response.headers.get_list("set-cookie")[0])
+        self.assertIn("Secure", response.headers.get_list("set-cookie")[0])
+        for prefix in ("/bot-admin/api", "/bot-admin/api/v1"):
+            status = await self.client.get(prefix + "/status")
+            self.assertEqual(status.status_code, 200)
+            self.assertEqual(set(status.json()), {"version", "uptime_seconds", "process", "qq_connected"})
+            for resource in ("overview", "traces", "context-debug", "accounts", "fleet", "audit", "events", "security-audit", "approvals"):
+                self.assertEqual((await self.client.get(prefix + "/" + resource)).status_code, 403, resource)
+            response = await self.client.put(prefix + "/alert-notifications/control", json={"enabled": True})
+            self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.preferences.writes, 0)
+        self.assertFalse(self.sent)
+
+    async def test_all_registered_mutation_routes_deny_member_before_execution(self):
+        await self.login("viewer")
+        for route, operations in self.app.openapi()["paths"].items():
+            if not route.startswith("/bot-admin/api/") or route.endswith(("/auth/login", "/auth/logout")):
+                continue
+            for method in {key.upper() for key in operations} & {"POST", "PUT", "DELETE", "PATCH"}:
+                path = re.sub(r"\{[^}]+\}", "1", route)
+                response = await self.client.request(method, path, json={})
+                self.assertEqual(response.status_code, 403, f"{method} {path}: {response.text}")
+
+    async def test_csrf_and_origin_cannot_be_bypassed(self):
+        await self.login()
+        path = "/bot-admin/api/v1/alert-notifications/control"
+        for headers in ({"Origin": "https://evil.test"}, {"X-CSRF-Token": "wrong"}, {"Origin": ""}):
+            response = await self.client.put(path, json={"enabled": True}, headers=headers)
+            self.assertEqual(response.status_code, 403)
+        self.assertFalse(self.sent)
+        self.assertEqual(self.preferences.writes, 0)
+
+    async def test_write_waits_for_qq_and_then_executes_once(self):
+        await self.login()
+        response = await self.client.put("/bot-admin/api/v1/alert-notifications/control", json={"enabled": True}, headers={"X-Admin-Actor": "spoofed-person"})
+        self.assertEqual(self.preferences.writes, 0)
+        result = await self.approve(response)
+        self.assertEqual(result.json()["status"], "succeeded", result.text)
+        self.assertTrue(self.preferences.value)
+        self.assertEqual(self.preferences.writes, 1)
+        self.assertFalse(await self.mobile.run_once())
+        audit = await self.client.get("/bot-admin/api/v1/audit")
+        self.assertNotIn("spoofed-person", audit.text)
+        self.assertIn(self.account["account_id"], audit.text)
+
+    async def test_account_creation_and_binding_change_also_require_qq(self):
+        await self.login()
+        response = await self.client.post("/bot-admin/api/v1/accounts", json={"username": "newadmin", "password": PASSWORD, "role": "admin", "qq_id": "333333333"})
+        self.assertNotIn(PASSWORD, response.text)
+        self.assertNotIn(PASSWORD, self.sent[-1][2])
+        self.assertNotIn("argon2", self.sent[-1][2])
+        self.assertIsNone(self.store.account_for_qq("333333333"))
+        result = await self.approve(response)
+        self.assertEqual(result.json()["status"], "succeeded", result.text)
+        self.assertIsNotNone(self.store.account_for_qq("333333333"))
+
+    async def test_logout_invalidates_pending_approval(self):
+        await self.login()
+        response = await self.client.put("/bot-admin/api/v1/alert-notifications/control", json={"enabled": True})
+        identifier = response.json()["approval_id"]
+        await self.client.post("/bot-admin/api/v1/auth/logout")
+        self.assertEqual(self.store.get(identifier, self.account["account_id"])["status"], "cancelled")
+        self.assertEqual((await self.client.get("/bot-admin/api/v1/me")).status_code, 401)
+
+    async def test_no_web_code_confirmation_endpoint_exists(self):
+        await self.login()
+        response = await self.client.post("/bot-admin/api/v1/approvals/AP-123456789ABC/confirm", json={"code": "123456"})
+        self.assertEqual(response.status_code, 404)
+
+
+if __name__ == "__main__":
+    unittest.main()

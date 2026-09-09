@@ -62,6 +62,7 @@ from .handler_services import HandlerService
 from .handler_constants import (BOT_VERSION, EMPTY_MENTION_FOLLOW_UP, SHANGHAI_TZ)
 from .matchers import (ai, ai_reset, clear_data, control_command, effort_command, image_ocr, memory_command, mention_ai, model_command, pin_command, pins_command, qq_face, shell_command, sticker, sticker_status, task_status, task_stop, unpin_command, usage_command, voice_answer, voice_transcription, web_search)
 from .sandbox import SandboxError
+from .qq_action_authorization import mobile_command, command_targets
 
 
 class CommandHandlers(HandlerService):
@@ -509,6 +510,7 @@ class CommandHandlers(HandlerService):
             args.extract_plain_text().strip(),
         )
 
+    @mobile_command
     async def handle_model_command(self,
         event: MessageEvent,
         args: Message = CommandArg(),
@@ -626,6 +628,7 @@ class CommandHandlers(HandlerService):
             ),
         )
 
+    @mobile_command
     async def handle_effort_command(self,
         event: MessageEvent,
         args: Message = CommandArg(),
@@ -735,6 +738,7 @@ class CommandHandlers(HandlerService):
             parts.append(f"[退出码 {result.returncode}]")
         return "\n".join(parts) or "（命令执行成功，无输出）"
 
+    @mobile_command
     async def handle_shell_command(self,
         event: MessageEvent,
         args: Message = CommandArg(),
@@ -783,6 +787,7 @@ class CommandHandlers(HandlerService):
                 sandboxes = await self.context.sandbox_manager.list(owner)
                 shell_sandboxes = [
                     item for item in sandboxes if item.get("purpose") == "shell"
+                    and str(item["sandbox_id"]) in command_targets().get("sandbox_ids", [])
                 ]
                 for item in shell_sandboxes:
                     await self.context.sandbox_manager.destroy(owner, str(item["sandbox_id"]))
@@ -808,6 +813,7 @@ class CommandHandlers(HandlerService):
             self.services.replies._reply_message(event, text),
         )
 
+    @mobile_command
     async def handle_memory_command(self,
         event: MessageEvent,
         args: Message = CommandArg(),
@@ -1000,6 +1006,7 @@ class CommandHandlers(HandlerService):
             raise FinishedException
         await self.services.replies._finish_safely(matcher, self.services.replies._reply_message(event, fallback))
 
+    @mobile_command
     async def handle_control_command(self, bot: Bot, event: MessageEvent) -> None:
         plain = event.message.extract_plain_text().strip()
         matched = re.match(r"^/([A-Za-z]+)(?:\s+(.*))?$", plain, re.DOTALL)
@@ -1062,7 +1069,7 @@ class CommandHandlers(HandlerService):
             )
 
         if verb == "kill":
-            task_id = body or None
+            task_id = command_targets().get("task_id") or body or None
             stopped = (
                 self.context.running_tasks.cancel_for_group(event.group_id, task_id)
                 if isinstance(event, GroupMessageEvent)
@@ -1176,6 +1183,7 @@ class CommandHandlers(HandlerService):
                 ),
             )
 
+    @mobile_command
     async def handle_pin_command(self,
         event: MessageEvent,
         args: Message = CommandArg(),
@@ -1211,6 +1219,7 @@ class CommandHandlers(HandlerService):
             self.services.replies._reply_message(event, message),
         )
 
+    @mobile_command
     async def handle_unpin_command(self,
         event: MessageEvent,
         args: Message = CommandArg(),
@@ -1280,11 +1289,12 @@ class CommandHandlers(HandlerService):
             self.services.replies._reply_message(event, self._usage_text(event)),
         )
 
+    @mobile_command
     async def handle_task_stop(self,
         event: MessageEvent,
         args: Message = CommandArg(),
     ) -> None:
-        task_id = args.extract_plain_text().strip() or None
+        task_id = command_targets().get("task_id") or args.extract_plain_text().strip() or None
         subagent_match = re.fullmatch(r"task#?([1-9][0-9]*)", task_id or "", re.IGNORECASE)
         if subagent_match and self.context.subagent_coordinator is not None:
             subagent_id = int(subagent_match.group(1))
@@ -1350,6 +1360,7 @@ class CommandHandlers(HandlerService):
             ),
         )
 
+    @mobile_command
     async def handle_ai_reset(self, event: MessageEvent) -> None:
         conversation_id = self.services.chat._conversation_id(event)
         self.context.memory.clear(conversation_id)
@@ -1374,6 +1385,7 @@ class CommandHandlers(HandlerService):
             self.services.replies._reply_message(event, "已清空当前会话记忆。"),
         )
 
+    @mobile_command
     async def handle_clear_data(self, event: MessageEvent) -> None:
         conversation_id = self.services.chat._conversation_id(event)
         self.context.memory.clear(conversation_id)

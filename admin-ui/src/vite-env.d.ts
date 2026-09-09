@@ -4,7 +4,7 @@ interface GaojiAdminRuntime {
   prefix: string
   apiBase: string
   version: string
-  requiresToken: boolean
+  requiresLogin: boolean
 }
 
 interface Window {

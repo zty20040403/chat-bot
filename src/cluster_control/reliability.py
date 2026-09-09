@@ -602,6 +602,7 @@ class ReliabilityStore:
                 item = dict(row)
                 item["status"] = "active"
                 item["check_lease_owner"] = owner
+                item["check_lease_until"] = now + min(max(lease_seconds, 15), 300)
                 claimed.append(self._guardian(item))
             connection.commit()
             return claimed

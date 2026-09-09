@@ -10,6 +10,9 @@ from typing import Any
 from urllib.parse import quote, urlsplit
 
 import httpx
+from src.bot_security.service import MobileAuthorization
+from src.bot_security.store import SecurityError
+from .fleet_authorization import FleetAuthorization
 
 
 class FleetControlError(RuntimeError):
@@ -27,6 +30,7 @@ class FleetControlClient:
         *,
         timeout_seconds: float = 12.0,
         transport: httpx.AsyncBaseTransport | None = None,
+        mobile_authorization: MobileAuthorization | None = None,
     ) -> None:
         normalized = base_url.strip().rstrip("/")
         parsed = urlsplit(normalized)
@@ -36,6 +40,7 @@ class FleetControlClient:
             raise ValueError("Fleet control URL contains unsupported components")
         self.base_url = normalized
         self.token_file = Path(token_file)
+        self.authorization = FleetAuthorization(self, mobile_authorization) if mobile_authorization else None
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(min(max(float(timeout_seconds), 1.0), 30.0)),
             follow_redirects=False,
@@ -65,6 +70,18 @@ class FleetControlClient:
         return token.decode("ascii")
 
     async def _request(
+        self, method: str, path: str, payload: dict[str, Any] | None = None, *, actor: str = "", origin: str = "",
+    ) -> dict[str, Any]:
+        try:
+            if self.authorization is not None:
+                return await self.authorization.request(method, path, payload, actor=actor, origin=origin)
+            if method != "GET" and path not in {"/v1/diagnostics", "/v1/runbook-cases/search"}:
+                raise SecurityError("手机口令授权未初始化，管理操作已锁定", 503)
+            return await self._raw_request(method, path, payload, actor=actor, origin=origin)
+        except SecurityError as exc:
+            raise FleetControlError("approval_required", str(exc)) from None
+
+    async def _raw_request(
         self,
         method: str,
         path: str,

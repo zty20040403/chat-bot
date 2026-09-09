@@ -254,7 +254,9 @@ class Settings:
     dream_min_entries: int
     dream_check_seconds: int
     admin_enabled: bool
-    admin_token: str
+    admin_secret_file: str
+    admin_origin: str
+    admin_bot_id: str
     admin_path: str
     admin_user_ids: set[int]
     observability_enabled: bool
@@ -809,7 +811,9 @@ class Settings:
                 30,
             ),
             admin_enabled=_get_bool("AI_ADMIN_ENABLED", False),
-            admin_token=os.getenv("AI_ADMIN_TOKEN", "").strip(),
+            admin_secret_file=os.getenv("AI_ADMIN_SECRET_FILE", "").strip(),
+            admin_origin=os.getenv("AI_ADMIN_ORIGIN", "").strip().rstrip("/"),
+            admin_bot_id=os.getenv("AI_ADMIN_BOT_ID", "").strip(),
             admin_path=(
                 os.getenv("AI_ADMIN_PATH", "/bot-admin").strip()
                 or "/bot-admin"

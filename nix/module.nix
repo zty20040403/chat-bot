@@ -93,6 +93,25 @@ in {
       '';
     };
 
+    admin = {
+      secretFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Private persistent mobile-authorization key file; kept outside the Nix store and loaded as a systemd credential.";
+      };
+      origin = lib.mkOption {
+        type = lib.types.str;
+        default = "";
+        example = "https://bot.example.com";
+        description = "Public HTTPS origin of the account console, without a path.";
+      };
+      botId = lib.mkOption {
+        type = lib.types.str;
+        default = "";
+        description = "QQ bot account receiving private six-digit confirmations; required if multiple bots connect.";
+      };
+    };
+
     environment = lib.mkOption {
       type = lib.types.attrsOf lib.types.str;
       default = {};
@@ -352,6 +371,12 @@ in {
         description = "OneBot reverse WebSocket URL used by NapCat.";
       };
 
+      reverseWebsocketTokenFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Private OneBot token file; updates only the matching configured reverse-WebSocket client before NapCat starts.";
+      };
+
       webuiAddress = lib.mkOption {
         type = lib.types.str;
         default = "127.0.0.1";
@@ -429,6 +454,11 @@ in {
           PORT = toString cfg.port;
           PYTHONUNBUFFERED = "1";
         }
+        // lib.optionalAttrs (cfg.admin.secretFile != null) {
+          AI_ADMIN_SECRET_FILE = "/run/credentials/${serviceName}.service/admin-authorization-key";
+          AI_ADMIN_ORIGIN = cfg.admin.origin;
+          AI_ADMIN_BOT_ID = cfg.admin.botId;
+        }
         // lib.optionalAttrs cfg.browser.enable {
           AI_BROWSER_ENABLED = "true";
           AI_BROWSER_EXECUTABLE_PATH = lib.getExe cfg.browser.package;
@@ -487,7 +517,8 @@ in {
           Restart = "on-failure";
           RestartSec = 5;
           UMask = "0077";
-          LoadCredential = lib.optional (cfg.cluster.enable && cfg.cluster.tokenFile != null) "fleet-control-token:${cfg.cluster.tokenFile}";
+          LoadCredential = lib.optional (cfg.cluster.enable && cfg.cluster.tokenFile != null) "fleet-control-token:${cfg.cluster.tokenFile}"
+            ++ lib.optional (cfg.admin.secretFile != null) "admin-authorization-key:${cfg.admin.secretFile}";
 
           NoNewPrivileges = true;
           PrivateTmp = true;
@@ -629,6 +660,14 @@ in {
     systemd.services.${napcatServiceName} = lib.mkIf cfg.napcat.enable {
       wants = ["${serviceName}.service"];
       after = ["${serviceName}.service"];
+      serviceConfig.LoadCredential = lib.optional (cfg.napcat.reverseWebsocketTokenFile != null)
+        "onebot-token:${cfg.napcat.reverseWebsocketTokenFile}";
+      preStart = lib.mkIf (cfg.napcat.reverseWebsocketTokenFile != null) (lib.mkBefore ''
+        ${pkgs.python3}/bin/python ${./napcat-auth.py} \
+          ${lib.escapeShellArg "${cfg.napcat.dataDirectory}/config/onebot11_${cfg.napcat.account}.json"} \
+          "$CREDENTIALS_DIRECTORY/onebot-token" \
+          ${lib.escapeShellArg cfg.napcat.reverseWebsocketUrl}
+      '');
     };
 
     systemd.tmpfiles.rules = lib.optionals cfg.napcat.enable [

@@ -144,7 +144,9 @@ from .stickers import (
 from .turn_journal import (
     tool_catalog_fingerprint,
 )
-from .tool_policy import approval_from_user_text, tool_enabled
+from .tool_policy import approval_from_user_text, tool_enabled, ToolApproval
+from .qq_action_authorization import requires_mobile_tool, propose_tool
+from src.bot_security.service import assert_approved
 from .web_search import (
     SearchError,
     SearchResult,
@@ -175,6 +177,10 @@ from .fleet_tools import fleet_overview, inspect_host, model_status, requires_lo
 
 
 class ToolExecutor(HandlerService):
+    def _registered_admin(self, user_id: int) -> bool:
+        mobile = getattr(self.context, "mobile_authorization", None)
+        return mobile is not None and mobile.store.account_for_qq(str(user_id)) is not None
+
     def _private_vision_required(self,
         event: MessageEvent,
         user_text: str,
@@ -224,7 +230,7 @@ class ToolExecutor(HandlerService):
 
     def _alert_tools_allowed(self, event: MessageEvent) -> bool:
         return bool(
-            event.user_id in self.context.settings.admin_user_ids
+            self._registered_admin(event.user_id)
             or (
                 isinstance(event, GroupMessageEvent)
                 and event.group_id == self.context.settings.alert_notify_group_id
@@ -233,7 +239,7 @@ class ToolExecutor(HandlerService):
 
     def _fleet_tools_allowed(self, event: MessageEvent) -> bool:
         return bool(
-            event.user_id in self.context.settings.admin_user_ids
+            self._registered_admin(event.user_id)
             or (
                 isinstance(event, GroupMessageEvent)
                 and event.group_id in self.context.settings.fleet_allowed_groups
@@ -242,7 +248,7 @@ class ToolExecutor(HandlerService):
 
     def _fleet_logs_allowed(self, event: MessageEvent) -> bool:
         return bool(
-            event.user_id in self.context.settings.admin_user_ids
+            self._registered_admin(event.user_id)
             or (
                 isinstance(event, GroupMessageEvent)
                 and event.group_id in self.context.settings.fleet_log_allowed_groups
@@ -321,7 +327,11 @@ class ToolExecutor(HandlerService):
         task_mode: bool = False,
         simple_chat_profile: str = "",
         resume_task_id: int | None = None,
+        _approved_call: dict[str, Any] | None = None,
     ) -> Message | str:
+        if _approved_call is not None:
+            assert_approved("tool", _approved_call)
+
         if isinstance(event, GroupMessageEvent) and not self.services.group_enabled(event.group_id):
             return "这个群暂时没有开启 AI。"
 
@@ -429,7 +439,8 @@ class ToolExecutor(HandlerService):
             has_media=bool(available_image_sources or available_video),
         )
         semantic_entry_enabled = bool(
-            self.context.subagent_coordinator is not None
+            _approved_call is None
+            and self.context.subagent_coordinator is not None
             and self.context.settings.subagent_entry_enabled
             and isinstance(event, GroupMessageEvent)
             and not task_mode
@@ -503,7 +514,7 @@ class ToolExecutor(HandlerService):
             include_alert_tools=alert_tools_enabled,
             include_fleet_tools=fleet_tools_enabled,
             include_fleet_logs=fleet_logs_enabled,
-            include_ops_management=fleet_tools_enabled and event.user_id in self.context.settings.admin_user_ids,
+            include_ops_management=fleet_tools_enabled and self._registered_admin(event.user_id),
             include_image_ocr=(
                 self.context.settings.ocr_enabled and bool(available_image_sources)
             ),
@@ -1591,7 +1602,7 @@ class ToolExecutor(HandlerService):
                         {"ok": False, "error": "当前会话无权读取服务器日志。"},
                         ensure_ascii=False,
                     )
-                if name in {OPS_CATALOG_TOOL_NAME, OPS_CALL_TOOL_NAME} and event.user_id not in self.context.settings.admin_user_ids:
+                if name in {OPS_CATALOG_TOOL_NAME, OPS_CALL_TOOL_NAME} and not self._registered_admin(event.user_id):
                     return json.dumps({"ok": False, "error": "仅管理员可以访问服务器管理接口。"}, ensure_ascii=False)
                 host_id = str(arguments.get("host_id") or "").strip()
                 unit = str(arguments.get("unit") or "").strip()
@@ -1791,18 +1802,18 @@ class ToolExecutor(HandlerService):
                             "bge-m3+lexical" if semantic_scores else "lexical"
                         )
                     elif name == CLUSTER_GUARDIAN_STATUS_TOOL_NAME:
-                        if event.user_id not in self.context.settings.admin_user_ids:
+                        if not self._registered_admin(event.user_id):
                             return json.dumps(
                                 {"ok": False, "error": "只有登记管理员能查看目标守护。"},
                                 ensure_ascii=False,
                             )
                         payload = await client.guardian(
                             str(arguments.get("guardian_id") or ""),
-                            actor="admin:kenneth",
+                            actor=f"qq:{event.user_id}",
                             origin=self.services.chat._conversation_scope(event).key,
                         )
                     elif name == CLUSTER_GUARDIAN_CREATE_TOOL_NAME:
-                        if event.user_id not in self.context.settings.admin_user_ids:
+                        if not self._registered_admin(event.user_id):
                             return json.dumps(
                                 {"ok": False, "error": "只有登记管理员能创建目标守护。"},
                                 ensure_ascii=False,
@@ -1818,7 +1829,7 @@ class ToolExecutor(HandlerService):
                                 "probe_policy": {},
                                 "authorized_action": {},
                             },
-                            actor="admin:kenneth",
+                            actor=f"qq:{event.user_id}",
                             origin=self.services.chat._conversation_scope(event).key,
                         )
                     elif name == DIAGNOSE_INCIDENT_TOOL_NAME:
@@ -2196,8 +2207,13 @@ class ToolExecutor(HandlerService):
                 ensure_ascii=False,
             )
 
+        if _approved_call is not None:
+            return await _execute_tool_impl(_approved_call["tool"], _approved_call["arguments"])
+
         async def execute_tool(name: str, arguments: dict[str, object]) -> str:
             assert_job_owned()
+            if requires_mobile_tool(name):
+                return await propose_tool(self.context, name, arguments, event, user_text)
             async with telemetry.tool(name):
                 return await _execute_tool_impl(name, arguments)
 
@@ -2212,7 +2228,7 @@ class ToolExecutor(HandlerService):
                 else None
             ),
             approval_checker=(
-                lambda _policy, name, arguments: approval_from_user_text(
+                lambda _policy, name, arguments: ToolApproval(True, "mobile-challenge", "进入 QQ 手机确认流程") if requires_mobile_tool(name) else approval_from_user_text(
                     user_text,
                     name,
                     arguments,
@@ -2313,7 +2329,7 @@ class ToolExecutor(HandlerService):
                     "存储告警时，优先调用 diagnose_incident 取得一组可审计证据；"
                     "不要自己串联零散状态后武断下结论。服务器修改必须通过受控接口。"
                     "有 ops_catalog 时先查看目录及资源授权，再用 ops_call 查询或提交管理请求；"
-                    "包括命令、服务、工作区文件和部署。写操作等待管理员在控制台逐项审阅批准，"
+                    "包括命令、服务、工作区文件和部署。写操作等待管理员在 QQ 私聊逐项审阅批准，"
                     "用 operation_status 跟踪，不得通过聊天、工具或沙盒自行批准。"
                     "未开放该工具时可用 operation_prepare 提议服务操作；返回 not_configured 时说明写后端尚未接入，"
                     "绝不能用 SSH 或沙盒命令绕过。需要远程校验 PDF、媒体或发布静态预览时，"
@@ -2964,7 +2980,7 @@ class ToolExecutor(HandlerService):
                     final_text_sink=final_stream_sink,
                     final_stream_state=final_stream_state,
                     approval_checker=(
-                        lambda _policy, name, arguments: approval_from_user_text(
+                        lambda _policy, name, arguments: ToolApproval(True, "mobile-challenge", "进入 QQ 手机确认流程") if requires_mobile_tool(name) else approval_from_user_text(
                             user_text,
                             name,
                             arguments,

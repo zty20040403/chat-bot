@@ -1,4 +1,8 @@
 export type ResourceName =
+  | 'status'
+  | 'accounts'
+  | 'approvals'
+  | 'securityAudit'
   | 'overview'
   | 'observability'
   | 'alerts'
@@ -33,6 +37,10 @@ export interface RealtimeEvent {
 }
 
 export const RESOURCE_PATHS: Record<ResourceName, string> = {
+  status: '/status',
+  accounts: '/accounts',
+  approvals: '/approvals',
+  securityAudit: '/security-audit',
   overview: '/overview',
   observability: '/observability',
   alerts: '/alerts?days=1&limit=200',
@@ -94,7 +102,6 @@ export class AdminApiError extends Error {
 export class AdminClient {
   constructor(
     private readonly runtime: GaojiAdminRuntime,
-    private readonly token: string,
   ) {}
 
   async resource(name: ResourceName, signal?: AbortSignal): Promise<JsonObject> {
@@ -110,10 +117,10 @@ export class AdminClient {
     method: 'POST' | 'PUT' | 'DELETE',
     body: unknown,
     expectedVersion: number | undefined,
+    onPending?: (pending: JsonObject | null) => void,
   ): Promise<JsonObject> {
     const headers = this.headers()
     headers.set('Content-Type', 'application/json')
-    headers.set('X-Admin-Actor', 'gaoji-react-console')
     if (expectedVersion !== undefined) {
       headers.set('If-Match', `"${expectedVersion}"`)
     }
@@ -122,7 +129,39 @@ export class AdminClient {
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
     })
-    return this.decode(response)
+    const payload = await this.decode(response)
+    if (!payload.approval_id) return payload
+    onPending?.(payload)
+    try {
+      while (true) {
+        await new Promise((resolve) => window.setTimeout(resolve, 1500))
+        const pending = await this.query(`/approvals/${encodeURIComponent(payload.approval_id)}`)
+        onPending?.(pending)
+        if (pending.status === 'succeeded') return pending.kind === 'fleet' ? pending.result.data : pending.result
+        const errors: Record<string, string> = {
+          failed: '操作执行失败', expired: '口令已过期，请在待确认操作中重发',
+          cancelled: '操作已取消或账户权限发生变化', locked: '口令输错 5 次，已作废',
+          delivery_failed: 'QQ 私聊发送失败，操作未执行',
+          needs_attention: '执行结果需要核对，系统不会自动重放',
+        }
+        if (errors[pending.status]) {
+          throw new AdminApiError(pending.result?.status_code ?? 409,
+            pending.result?.detail ?? pending.result?.error ?? errors[pending.status])
+        }
+      }
+    } finally { onPending?.(null) }
+  }
+
+  async login(username: string, password: string): Promise<JsonObject> {
+    return this.request('/auth/login', { method: 'POST', body: JSON.stringify({ username, password }), headers: { 'Content-Type': 'application/json' } })
+  }
+
+  async logout(): Promise<void> {
+    await this.request('/auth/logout', { method: 'POST' })
+  }
+
+  async approvalAction(id: string, action: 'resend' | 'cancel'): Promise<JsonObject> {
+    return this.request(`/approvals/${encodeURIComponent(id)}/${action}`, { method: 'POST' })
   }
 
   async events(
@@ -178,7 +217,8 @@ export class AdminClient {
   private headers(existing?: HeadersInit): Headers {
     const headers = new Headers(existing)
     headers.set('Accept', 'application/json')
-    if (this.token) headers.set('Authorization', `Bearer ${this.token}`)
+    const csrf = document.cookie.split('; ').find((part) => part.startsWith('gaoji_csrf='))?.split('=').slice(1).join('=')
+    if (csrf) headers.set('X-CSRF-Token', decodeURIComponent(csrf))
     return headers
   }
 
