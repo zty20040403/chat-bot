@@ -168,6 +168,7 @@ FLEET_OVERVIEW_TOOL: ToolDefinition = {
             "查询已授权服务器集群的当前概况、数据来源和观测时间。用于回答哪些机器"
             "在线、异常、未接入或观测已过期。结果来自 gaoji 控制服务与 Ops，"
             "不能把查询入口失败解释成所有机器关机。"
+            "同时列出 Worker 编号、所在主机、心跳和接单状态；指定执行机器前先查这里。"
         ),
         "parameters": {
             "type": "object",
@@ -391,11 +392,14 @@ CLUSTER_JOB_SUBMIT_TOOL: ToolDefinition = {
         "description": (
             "提交一个有资源预留、租约和回执的远程 Worker 任务。HTTP 探测只能传已配置"
             " target_id；文件校验或静态预览必须先用 cluster_artifact_upload 获得 artifact_id。"
+            "用户指定执行主机时，先从 fleet_overview 查到对应 worker_id 并传入；"
+            "target_id 是被探测对象，不是执行节点。省略 worker_id 才允许自动调度。"
         ),
         "parameters": {
             "type": "object", "additionalProperties": False,
             "properties": {
                 "kind": {"type": "string", "enum": ["probe.http", "artifact.inspect", "document.verify", "media.inspect", "preview.static"]},
+                "worker_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$", "description": "fleet_overview 返回的执行 Worker 编号；指定后不得换到其他节点。"},
                 "target_id": {"type": "string"},
                 "artifact_id": {"type": "string", "pattern": "^artifact_[a-f0-9]{32}$"},
                 "ttl_seconds": {"type": "integer", "minimum": 300, "maximum": 604800},

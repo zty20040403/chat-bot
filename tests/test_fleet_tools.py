@@ -10,10 +10,11 @@ import nonebot
 
 nonebot.init()
 
-from src.plugins.ai_chat.ai_tools import HOST_INSPECT_TOOL, SERVICE_INSPECT_TOOL
+from src.plugins.ai_chat.ai_tools import CLUSTER_JOB_SUBMIT_TOOL, HOST_INSPECT_TOOL, SERVICE_INSPECT_TOOL
 from src.plugins.ai_chat.fleet_client import FleetControlError
 from src.plugins.ai_chat.fleet_tools import (
     inspect_host,
+    fleet_overview,
     model_status,
     requires_local_model_status,
     summarize_fleet,
@@ -58,6 +59,41 @@ def fleet_payload(now: int) -> dict:
 
 
 class FleetProjectionTests(unittest.IsolatedAsyncioTestCase):
+    def test_job_tool_accepts_exact_worker_selection(self) -> None:
+        catalog = ToolCatalog([CLUSTER_JOB_SUBMIT_TOOL])
+        args = {"kind": "probe.http", "target_id": "h610-worker", "idempotency_key": "worker-selection"}
+        self.assertTrue(catalog.validate("cluster_job_submit", args).ok)
+        for host in ("h310", "h610", "tank"):
+            self.assertTrue(catalog.validate("cluster_job_submit", {**args, "worker_id": host + "-worker"}).ok)
+        for invalid in ("", "../tank", "tank;reboot", "*", "x" * 65):
+            self.assertFalse(catalog.validate("cluster_job_submit", {**args, "worker_id": invalid}).ok)
+
+    async def test_worker_overview_distinguishes_stale_and_draining(self) -> None:
+        workers = [{"worker_id": host + "-worker", "host_id": host, "last_seen_at": seen,
+                    "availability": "available", "capabilities": ["probe.http"],
+                    "capacity": {"cpu_millis": 2000, "secret": "not-for-model"}}
+                   for host, seen in (("h310", 995), ("h610", 900), ("tank", 995))]
+        policies = [{"worker_id": host + "-worker", "desired_availability": state}
+                    for host, state in (("h310", "available"), ("h610", "available"), ("tank", "draining"))]
+        client = SimpleNamespace(fleet=AsyncMock(return_value=fleet_payload(1000)),
+            workers=AsyncMock(return_value={"items": workers}),
+            resource_policies=AsyncMock(return_value={"items": policies}))
+        result = await fleet_overview(client, now=1000)
+        items = result["workers"]["items"]
+        self.assertEqual([x["ready_for_scheduling"] for x in items], [True, False, False])
+        self.assertEqual([x["host_id"] for x in items], ["h310", "h610", "tank"])
+        self.assertNotIn("not-for-model", json.dumps(result))
+        client.resource_policies.side_effect = FleetControlError("unavailable", "not available")
+        result = await fleet_overview(client, now=1000)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["workers"]["status"], "partial")
+        self.assertTrue(all(not x["ready_for_scheduling"] for x in result["workers"]["items"]))
+        client.workers.side_effect = FleetControlError("timeout", "not available")
+        result = await fleet_overview(client, now=1000)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["workers"]["status"], "unavailable")
+        self.assertEqual(result["workers"]["items"], [])
+
     def test_qwen_status_follow_up_requires_a_fresh_read(self) -> None:
         self.assertTrue(requires_local_model_status("现在千问呢"))
         self.assertTrue(requires_local_model_status("看下千问寄了吗"))

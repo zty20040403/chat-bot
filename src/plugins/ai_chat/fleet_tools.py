@@ -188,6 +188,52 @@ def summarize_fleet(
     }
 
 
+async def fleet_overview(client: Any, *, now: int | None = None) -> dict[str, Any]:
+    async def read(call: Any) -> dict[str, Any]:
+        try:
+            return await call
+        except FleetControlError as exc:
+            return {"status": "unavailable", "error": {"code": exc.code, "message": str(exc)}}
+
+    fleet, workers, policies = await asyncio.gather(
+        read(client.fleet()), read(client.workers()), read(client.resource_policies())
+    )
+    timestamp = int(time.time()) if now is None else now
+    summary = summarize_fleet(fleet, now=timestamp)
+    policies_by_id = {
+        str(item.get("worker_id")): item for item in _items(policies.get("items"))
+    }
+    items = []
+    for worker in _items(workers.get("items")):
+        policy = policies_by_id.get(str(worker.get("worker_id")), {})
+        seen = worker.get("last_seen_at")
+        fresh = isinstance(seen, (int, float)) and 0 <= timestamp - seen <= 45
+        state = str(policy.get("desired_availability") or "unknown")
+        ready = fresh and worker.get("availability") == "available" and state == "available"
+        items.append({
+            "worker_id": worker.get("worker_id"),
+            "host_id": worker.get("host_id"),
+            "last_seen_at": seen,
+            "heartbeat_fresh": fresh,
+            "availability": worker.get("availability", "unknown"),
+            "owner_availability": state,
+            "ready_for_scheduling": ready,
+            "capabilities": worker.get("capabilities", []),
+            "capacity": {key: value for key, value in _object(worker.get("capacity")).items()
+                         if key in {"cpu_millis", "memory_bytes", "gpu_slots"}},
+            "owner_limits": {key: policy[key] for key in
+                             ("cpu_limit_millis", "memory_limit_bytes", "gpu_limit_slots") if key in policy},
+        })
+    summary["workers"] = {
+        "source": "gaoji-control/worker-heartbeat",
+        "status": "unavailable" if workers.get("error") else "partial" if policies.get("error") else "observed",
+        "items": items,
+        "error": _error(workers) or _error(policies),
+        "guidance": "接单状态不等于当前用户有借用权限或剩余配额。指定机器请使用其 worker_id；离线或让路时不能擅自换机。",
+    }
+    return summary
+
+
 async def inspect_host(client: Any, host_id: str) -> dict[str, Any]:
     async def read(call: Any) -> dict[str, Any]:
         try:

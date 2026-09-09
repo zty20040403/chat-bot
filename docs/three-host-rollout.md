@@ -25,6 +25,26 @@ the gaoji worker for controlled recovery tests. Keep evidence and operation IDs.
 
 ## Scoped Release and Live Recovery (2026-09-09)
 
+### Conversational Node Selection Follow-up
+
+The acceptance audit found a separate gap: the control API accepted a pinned
+`worker_id`, but the LLM job tool did not expose or forward it. A user asking to
+run on tank could therefore still receive an automatically scheduled job.
+The follow-up adds Worker identity, host, heartbeat freshness and owner
+availability to `fleet_overview`, and carries the optional exact `worker_id`
+through `cluster_job_submit`. `target_id` remains the probe destination, not
+the executor. Unknown or non-compute Worker targets are rejected before enqueue.
+No pin preserves automatic scheduling; a pin must never silently fall back.
+Ready state does not grant borrowing rights or guarantee remaining capacity.
+
+Example: call `fleet_overview`, then submit `probe.http` with
+`worker_id=tank-worker` and `target_id=h610-worker` to probe h610 from tank.
+Use `cluster_job_status` to verify the actual assigned Worker and receipt.
+23 focused tests passed on the exact staged snapshot, covering the model-tool
+callback, control validation, freshness, owner draining and existing execution
+boundaries. Live publication of this follow-up is tracked separately from the
+preceding `e175de0` release below.
+
 Bot release `e175de051e7d47411b86834056099e5cfa3728e9` includes the queue and
 receipt fixes plus the previously committed independent QQ alert switch.
 Concurrent account/OTP work and migration 0026 were excluded. Exact-release

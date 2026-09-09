@@ -171,7 +171,7 @@ from .handler_constants import (TURN_PROMPT_VERSION)
 from .fleet_client import FleetControlError
 from .ai_tools import OPS_CATALOG_TOOL_NAME, OPS_CALL_TOOL_NAME
 from .fleet_case_recall import semantic_runbook_scores
-from .fleet_tools import inspect_host, model_status, requires_local_model_status, summarize_fleet
+from .fleet_tools import fleet_overview, inspect_host, model_status, requires_local_model_status, summarize_fleet
 
 
 class ToolExecutor(HandlerService):
@@ -1617,7 +1617,7 @@ class ToolExecutor(HandlerService):
                         payload = await client.ops_call(arguments,
                             actor=f"qq:{event.user_id}", origin=self.services.chat._conversation_scope(event).key)
                     elif name == FLEET_OVERVIEW_TOOL_NAME:
-                        payload = summarize_fleet(await client.fleet())
+                        payload = await fleet_overview(client)
                     elif name == MODEL_STATUS_TOOL_NAME:
                         payload = await model_status(self.context, str(arguments.get("profile") or ""))
                     elif name == OPERATION_PREPARE_TOOL_NAME:
@@ -1689,6 +1689,7 @@ class ToolExecutor(HandlerService):
                                 "kind": kind,
                                 "payload": job_payload,
                                 "constraints": {
+                                    "worker_id": str(arguments.get("worker_id") or "").strip(),
                                     "cpu_millis": int(arguments.get("cpu_millis") or 500),
                                     "memory_bytes": int(arguments.get("memory_bytes") or 268435456),
                                     "gpu_slots": int(arguments.get("gpu_slots") or 0),

@@ -198,6 +198,11 @@ class ClusterExecutionService:
     ) -> dict[str, Any]:
         now = int(time.time())
         proposal = WorkerJobProposal.parse(raw, now=now)
+        worker_id = str(proposal.constraints.get("worker_id") or "")
+        if worker_id:
+            host = self.inventory.get(self.worker_hosts.get(worker_id, ""), {})
+            if not host.get("compute"):
+                raise PermissionError("requested worker is not registered for compute")
         payload = dict(proposal.payload)
         if proposal.kind == "probe.http":
             target = self.diagnostic_targets.get(str(payload["target_id"]))
