@@ -1,0 +1,53 @@
+"""Bind file acceptance to immutable artifacts, independently of workflow success."""
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from typing import Any
+
+
+ACCEPTANCE_VERSION = 2
+
+
+def artifact_identity(artifact: Mapping[str, Any]) -> str:
+    return str(artifact.get("snapshot") or artifact.get("handle") or "")
+
+
+def artifact_verdicts(
+    checks: Sequence[Mapping[str, Any]],
+    result: Mapping[str, Any],
+    *,
+    executed: bool,
+) -> list[dict[str, Any]]:
+    metadata = result.get("metadata")
+    reviews = metadata.get("artifact_reviews", []) if isinstance(metadata, Mapping) else []
+    by_key: dict[str, list[Mapping[str, Any]]] = {}
+    if isinstance(reviews, list):
+        for review in reviews:
+            if isinstance(review, Mapping) and isinstance(review.get("artifact_key"), str):
+                by_key.setdefault(review["artifact_key"], []).append(review)
+    verdicts = []
+    for check in checks:
+        key = str(check.get("artifact_key") or "")
+        matching = by_key.get(key, [])
+        # Missing, duplicated or contradictory declarations never authorize a file.
+        review = matching[0] if len(matching) == 1 else {}
+        passed = bool(key and check.get("ok") is True and executed
+                      and review.get("status") == "passed")
+        verdicts.append({
+            "artifact_key": key, "step": check.get("step"),
+            "name": check.get("artifact"), "status": "passed" if passed else "failed",
+            "reason": (str(check.get("error") or "格式或校验和检查失败") if not check.get("ok")
+                       else "缺少独立工具验收证据" if not executed
+                       else str(review.get("reason") or ("独立文件验收通过" if passed else "缺少此文件的独立验收结论"))),
+        })
+    return verdicts
+
+
+def artifact_delivery_allowed(artifact: Mapping[str, Any], validation: Mapping[str, Any]) -> bool:
+    key = artifact_identity(artifact)
+    reviews = validation.get("artifacts")
+    if isinstance(reviews, list):
+        matching = [r for r in reviews if isinstance(r, Mapping) and r.get("artifact_key") == key]
+        return bool(key and len(matching) == 1 and matching[0].get("status") == "passed")
+    # Compatibility for already-completed legacy acceptance, never a failed review.
+    return validation.get("status") == "passed"

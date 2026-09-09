@@ -881,6 +881,11 @@ class SubAgentCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 "src.plugins.ai_chat.subagents.ask_deepseek",
                 new=AsyncMock(return_value="PDF 已发到群里。"),
             ),
+            patch.object(coordinator, "_validate_workflow", new=AsyncMock(return_value={
+                "status": "failed", "artifacts": [{
+                    "artifact_key": "s123abc:/workspace/output.pdf", "status": "passed",
+                }],
+            })),
         ):
             answer = await coordinator.run(
                 scope_key="qq:group:1",

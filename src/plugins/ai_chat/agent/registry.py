@@ -93,6 +93,8 @@ AGENT_SPECS: dict[SubAgentRole, AgentSpec] = {
         instructions=(
             "所有代码和命令必须在任务沙盒中执行。完成前检查实际输出；需要交付时"
             "返回真实文件句柄，由宿主验收后发送，并报告执行结果和未解决问题。"
+            "已上传集群的产物，在对应 artifacts 条目保留工具返回的 artifact_id；"
+            "验证或转交未修改的上游文件时一并保留该 ID，供发布步骤复用。"
         ),
         allowed_tools=COMMON_READ_TOOLS | BROWSER_TOOLS | SANDBOX_TOOLS | {
             "use_skill", "cluster_artifact_upload", "cluster_job_submit"
@@ -116,6 +118,8 @@ AGENT_SPECS: dict[SubAgentRole, AgentSpec] = {
             "存在且可读取，并通过文件句柄交付。含中文的 PDF 必须使用沙盒里的 "
             "gaoji-pdf 生成，再用 pdffonts 检查字体嵌入、pdftotext 检查中文；"
             "验收失败不得发送。"
+            "已上传集群的产物，在对应 artifacts 条目保留工具返回的 artifact_id；"
+            "验证或转交未修改的上游文件时一并保留该 ID，供发布步骤复用。"
         ),
         allowed_tools=(
             COMMON_READ_TOOLS
@@ -183,6 +187,14 @@ AGENT_SPECS: dict[SubAgentRole, AgentSpec] = {
         instructions=(
             "默认只读检查。涉及停止、重启、删除或修改服务时必须遵守宿主审批策略；"
             "报告影响范围、当前状态和建议动作。"
+            "发布静态预览时先检查上游索引的 cluster_artifacts，并用 read_agent_result"
+            "读取对应 artifacts、handoff 或 metadata 核对文件和 artifact_id；"
+            "已有已上传文件的 artifact_id 可直接传给 cluster_job_submit(kind=preview.static)，不要重复上传。"
+            "若只有宿主快照，先 sandbox_create 创建自己的隔离沙盒，再用 import_agent_artifact"
+            "导入直接依赖步骤的目标文件，使用返回的 path 调用 cluster_artifact_upload，"
+            "再提交预览任务。不得访问上游原容器或使用 SSH、主机命令绕过授权。"
+            "多个产物时核对可发布的静态站点包，不把源码包自动当作可发布站点；"
+            "没有读取交接内容前不得声称缺少 ID。用 cluster_job_status 确认发布结果与 URL。"
         ),
         allowed_tools=(
             COMMON_READ_TOOLS
@@ -199,6 +211,8 @@ AGENT_SPECS: dict[SubAgentRole, AgentSpec] = {
                 "ops_call",
                 "operation_cancel",
                 "cluster_job_submit",
+                "cluster_artifact_upload",
+                "sandbox_create",
                 "sandbox_list",
                 "job_status",
                 "group_members",

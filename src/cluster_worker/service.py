@@ -346,18 +346,27 @@ class ClusterWorker:
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     with archive.open(member) as source, destination.open("wb") as output:
                         shutil.copyfileobj(source, output)
-            if not (temporary / "index.html").is_file():
-                raise ValueError("static preview requires index.html at archive root")
+            publish_root = temporary
+            if not (publish_root / "index.html").is_file():
+                roots = list(temporary.iterdir())
+                top_levels = {path.parts[0] for member in members
+                    if (path := PurePosixPath(member.filename)).parts}
+                if (len(top_levels) != 1 or len(roots) != 1 or not roots[0].is_dir()
+                        or not (roots[0] / "index.html").is_file()):
+                    raise ValueError("static preview requires index.html at archive root or in its only top-level directory")
+                publish_root = roots[0]
             public_url = f"{self.settings.public_base_url}/previews/{preview_id}/"
             metadata = {
                 "preview_id": preview_id,
                 "public_url": public_url,
                 "expires_at": int(payload["expires_at"]),
             }
-            (temporary / ".gaoji-preview.json").write_text(
+            (publish_root / ".gaoji-preview.json").write_text(
                 json.dumps(metadata), encoding="utf-8"
             )
-            os.replace(temporary, target)
+            os.replace(publish_root, target)
+            if publish_root != temporary:
+                temporary.rmdir()
         except Exception:
             shutil.rmtree(temporary, ignore_errors=True)
             raise

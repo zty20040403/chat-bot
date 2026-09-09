@@ -32,7 +32,6 @@ from src.plugins.ai_chat.subagents import (
     TaskStep,
     StepOutcome,
     _delivery_outcomes,
-    _only_deferred_delivery_unresolved,
     _settled_task_status,
     _apply_completed_repairs,
     _interrupted_run_ids,
@@ -535,14 +534,6 @@ class RuntimeV2Tests(unittest.IsolatedAsyncioTestCase):
             {"status": "success", "artifacts": [{"handle": "s222222:/workspace/app.zip"}]}, DeepSeekTrace(), "success")
         selected = _delivery_outcomes(task, {"design": design, "design__repair_1": repair})
         self.assertEqual([item.step.key for item in selected], ["design__repair_1"])
-
-    async def test_delivery_only_acceptance_gap_does_not_block_upload(self):
-        self.assertTrue(_only_deferred_delivery_unresolved({
-            "unresolved": ["将压缩包发送到当前 QQ 群并确认群文件"],
-        }))
-        self.assertFalse(_only_deferred_delivery_unresolved({
-            "unresolved": ["还没有运行集成测试", "还没有发到群里"],
-        }))
 
     async def test_successful_repair_and_delivery_settle_task_as_completed(self):
         task = self.submit()

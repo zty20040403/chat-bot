@@ -1664,10 +1664,13 @@ class ToolExecutor(HandlerService):
                     elif name == CLUSTER_ARTIFACT_UPLOAD_TOOL_NAME:
                         if agent_executor is None:
                             return json.dumps({"ok": False, "error": "当前会话没有沙盒文件权限。"}, ensure_ascii=False)
+                        artifact_path = str(arguments.get("path") or "")
+                        if artifact_path.startswith("/workspace/"):
+                            artifact_path = artifact_path.removeprefix("/workspace/")
                         content = await agent_executor.sandbox_manager.read_file(
                             agent_executor.owner,
                             str(arguments.get("sandbox_id") or ""),
-                            str(arguments.get("path") or ""),
+                            artifact_path,
                             max_bytes=25 * 1024 * 1024,
                         )
                         payload = await client.upload_artifact(
@@ -2335,7 +2338,8 @@ class ToolExecutor(HandlerService):
                     "用 operation_status 跟踪，不得通过聊天、工具或沙盒自行批准。"
                     "未开放该工具时可用 operation_prepare 提议服务操作；返回 not_configured 时说明写后端尚未接入，"
                     "绝不能用 SSH 或沙盒命令绕过。需要远程校验 PDF、媒体或发布静态预览时，"
-                    "先把真实沙盒文件用 cluster_artifact_upload 登记，再调用 "
+                    "优先复用当前授权上游已上传文件的 artifact_id；没有 ID 时，"
+                    "把真实文件导入自己的沙盒，用 cluster_artifact_upload 登记后再调用 "
                     "cluster_job_submit；用 cluster_job_status 查看执行、检查点与回执。"
                     "排查重复故障可以用 cluster_case_search 找已验证案例，但返回的"
                     "适用条件必须用当前证据重新核对。管理员要求在明确期限内看住"

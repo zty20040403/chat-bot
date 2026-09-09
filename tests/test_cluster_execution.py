@@ -283,6 +283,42 @@ class WorkerSafetyTests(unittest.TestCase):
             self.assertTrue(worker._publish_preview(archive, payload)["reconciled"])
             asyncio.run(worker.client.close())
 
+    def test_preview_accepts_one_wrapper_directory_and_preserves_asset_routes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            worker = ClusterWorker(self._settings(root))
+            self.addCleanup(lambda: asyncio.run(worker.client.close()))
+            archive = root / "site.zip"
+            with zipfile.ZipFile(archive, "w") as output:
+                output.writestr("server-status-snapshot/", "")
+                output.writestr("server-status-snapshot/index.html", "<h1>Status</h1>")
+                output.writestr("server-status-snapshot/assets/app.css", "body{}")
+            payload = {"preview_id": "preview_" + "d" * 32, "expires_at": int(time.time()) + 3600}
+            first = worker._publish_preview(archive, payload)
+            self.assertEqual(worker.preview_file(payload["preview_id"], "index.html")[0].read_text(), "<h1>Status</h1>")
+            self.assertEqual(worker.preview_file(payload["preview_id"], "assets/app.css")[0].read_text(), "body{}")
+            self.assertIsNone(worker.preview_file(payload["preview_id"], "server-status-snapshot/index.html"))
+            self.assertIsNone(worker.preview_file(payload["preview_id"], "../token"))
+            self.assertEqual(worker._publish_preview(archive, payload), {"public_url": first["public_url"], "reconciled": True})
+
+    def test_preview_does_not_guess_nested_or_multiple_project_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            worker = ClusterWorker(self._settings(root))
+            self.addCleanup(lambda: asyncio.run(worker.client.close()))
+            archive = root / "ambiguous.zip"
+            payload = {"preview_id": "preview_" + "e" * 32, "expires_at": int(time.time()) + 3600}
+            for names in (("outer/inner/index.html",), ("one/index.html", "two/index.html"),
+                          ("site/index.html", "README.txt"), ("site/index.html", "empty/")):
+                with self.subTest(names=names):
+                    with zipfile.ZipFile(archive, "w") as output:
+                        for name in names:
+                            output.writestr(name, "" if name.endswith("/") else "content")
+                    with self.assertRaises(ValueError):
+                        worker._publish_preview(archive, payload)
+                    self.assertFalse((worker.previews / payload["preview_id"]).exists())
+                    self.assertFalse((worker.previews / f".{payload['preview_id']}.tmp").exists())
+
     def test_preview_rejects_archive_path_traversal(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

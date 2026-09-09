@@ -373,7 +373,7 @@ CLUSTER_ARTIFACT_UPLOAD_TOOL: ToolDefinition = {
     "type": "function",
     "function": {
         "name": CLUSTER_ARTIFACT_UPLOAD_TOOL_NAME,
-        "description": "把当前会话沙盒中不超过 25MiB 的已生成文件登记为集群产物，返回 artifact_ 句柄和 SHA-256。",
+        "description": "把自己沙盒中不超过 25MiB 的已生成文件登记为集群产物，返回 artifact_id 和 SHA-256。上游已有 artifact_id 时直接复用；仅有授权快照时先导入自己的沙盒再上传。将返回的 artifact_id 保留在对应 artifacts 条目中交给后续验证或发布步骤。",
         "parameters": {
             "type": "object", "additionalProperties": False,
             "properties": {
@@ -393,7 +393,8 @@ CLUSTER_JOB_SUBMIT_TOOL: ToolDefinition = {
         "name": CLUSTER_JOB_SUBMIT_TOOL_NAME,
         "description": (
             "提交一个有资源预留、租约和回执的远程 Worker 任务。HTTP 探测只能传已配置"
-            " target_id；文件校验或静态预览必须先用 cluster_artifact_upload 获得 artifact_id。"
+            " target_id；文件校验或静态预览需要真实 artifact_id，可直接复用当前授权上游"
+            "已上传产物的 ID；没有 ID 时才用 cluster_artifact_upload 上传。"
             "用户指定执行主机时，先从 fleet_overview 查到对应 worker_id 并传入；"
             "target_id 是被探测对象，不是执行节点。省略 worker_id 才允许自动调度。"
         ),
