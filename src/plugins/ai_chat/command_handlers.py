@@ -768,6 +768,7 @@ class CommandHandlers(HandlerService):
             )
             return
 
+        outcome = "succeeded"
         try:
             if action in {"status", "状态"}:
                 sandboxes = await self.context.sandbox_manager.list(owner)
@@ -785,9 +786,10 @@ class CommandHandlers(HandlerService):
                 )
             elif action in {"reset", "重建", "destroy", "销毁"}:
                 sandboxes = await self.context.sandbox_manager.list(owner)
+                approved_targets = command_targets().get("sandbox_ids")
                 shell_sandboxes = [
                     item for item in sandboxes if item.get("purpose") == "shell"
-                    and str(item["sandbox_id"]) in command_targets().get("sandbox_ids", [])
+                    and (approved_targets is None or str(item["sandbox_id"]) in approved_targets)
                 ]
                 for item in shell_sandboxes:
                     await self.context.sandbox_manager.destroy(owner, str(item["sandbox_id"]))
@@ -806,7 +808,15 @@ class CommandHandlers(HandlerService):
                 )
                 text = self._format_shell_result(result)
         except SandboxError as exc:
+            outcome = "failed"
             text = f"命令行沙盒执行失败：{exc}"
+
+        self.context.logger.info(
+            "Sandbox shell action handled: user=%s owner=%s action=%s outcome=%s",
+            event.user_id, owner,
+            action if action in {"status", "状态", "reset", "重建", "destroy", "销毁"} else "exec",
+            outcome,
+        )
 
         await self.services.replies._finish_safely(
             shell_command,

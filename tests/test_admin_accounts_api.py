@@ -4,6 +4,7 @@ import os
 import re
 import unittest
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import nonebot
@@ -46,10 +47,16 @@ class AdminAccountApiTests(unittest.IsolatedAsyncioTestCase):
             self.sent.append((bot, qq, message))
         self.mobile = MobileAuthorization(self.store, sender=send, bot_selector=lambda: BOT)
         self.preferences = Preferences()
+        self.sandbox = SimpleNamespace(
+            admin_snapshot=AsyncMock(return_value={"items": [{"sandbox_id": "s123abc",
+                "owner": "group:another:user:7", "activities": [], "workspace_file_count": 3}]}),
+            destroy=AsyncMock(), start_owned=AsyncMock(), stop_owned=AsyncMock(),
+        )
         self.app = FastAPI()
         register_admin(self.app, AdminServices(version="test", started_at=1,
             settings=SimpleNamespace(admin_origin="https://test", alert_notify_enabled=False),
-            mobile_authorization=self.mobile, alert_preferences=self.preferences), token="obsolete-token")
+            mobile_authorization=self.mobile, alert_preferences=self.preferences,
+            sandbox_manager=self.sandbox), token="obsolete-token")
         self.client = httpx.AsyncClient(transport=httpx.ASGITransport(app=self.app), base_url="https://test", headers={"Origin": "https://test"})
         self.addAsyncCleanup(self.client.aclose)
 
@@ -122,6 +129,34 @@ class AdminAccountApiTests(unittest.IsolatedAsyncioTestCase):
         audit = await self.client.get("/bot-admin/api/v1/audit")
         self.assertNotIn("spoofed-person", audit.text)
         self.assertIn(self.account["account_id"], audit.text)
+
+    async def test_admin_sandbox_actions_are_direct_versioned_and_audited(self):
+        await self.login()
+        path = "/bot-admin/api/v1/sandboxes/s123abc/action"
+        for version, action in enumerate(("start", "stop", "destroy")):
+            response = await self.client.post(path, json={"action": action}, headers={"If-Match": str(version)})
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["resource_version"], version + 1)
+        self.sandbox.destroy.assert_awaited_once_with("group:another:user:7", "s123abc")
+        self.assertFalse(self.sent)
+        audit = (await self.client.get("/bot-admin/api/v1/audit")).json()["items"]
+        self.assertEqual({item["action"] for item in audit}, {"sandbox.start", "sandbox.stop", "sandbox.destroy"})
+        response = await self.client.post(path, json={"action": "destroy"}, headers={"If-Match": "0"})
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(self.sandbox.destroy.await_count, 1)
+
+    async def test_direct_sandbox_actions_still_require_admin_origin_csrf_and_version(self):
+        path = "/bot-admin/api/v1/sandboxes/s123abc/action"
+        response = await self.client.post(path, json={"action": "destroy"}, headers={"If-Match": "0"})
+        self.assertEqual(response.status_code, 401)
+        await self.login()
+        for headers in ({"Origin": "https://evil.test"}, {"X-CSRF-Token": "wrong"}):
+            response = await self.client.post(path, json={"action": "destroy"}, headers={"If-Match": "0", **headers})
+            self.assertEqual(response.status_code, 403)
+        response = await self.client.post(path, json={"action": "destroy"})
+        self.assertEqual(response.status_code, 428)
+        self.sandbox.destroy.assert_not_awaited()
+        self.assertFalse(self.sent)
 
     async def test_account_creation_and_binding_change_also_require_qq(self):
         await self.login()

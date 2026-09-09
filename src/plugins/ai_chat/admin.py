@@ -1206,11 +1206,6 @@ def register_admin(
             )
         if SANDBOX_ID_PATTERN.fullmatch(sandbox_id) is None:
             raise HTTPException(status_code=400, detail="invalid sandbox id")
-        if body.action == "destroy" and body.confirmation != sandbox_id:
-            raise HTTPException(
-                status_code=400,
-                detail="destroy confirmation must equal the sandbox id",
-            )
 
         async with sandbox_action_lock:
             current_version = control_store.version("sandboxes")

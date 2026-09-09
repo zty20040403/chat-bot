@@ -32,6 +32,7 @@ COMMON_READ_TOOLS = frozenset(
 SANDBOX_TOOLS = frozenset(
     {
         "sandbox_create",
+        "sandbox_destroy",
         "sandbox_list",
         "nix_search",
         "sandbox_exec",

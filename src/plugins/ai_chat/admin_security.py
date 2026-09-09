@@ -112,9 +112,13 @@ def secure_route(mobile: MobileAuthorization | None, *, prefix: str, origin: str
                                 raise SecurityError("操作参数必须是 JSON", 400) from None
                             payload = {"method": request.method, "path": suffix, "query": request.url.query,
                                        "if_match": request.headers.get("if-match", ""), "body": body}
+                            sandbox_action = (request.method == "POST" and
+                                re.fullmatch(r"/sandboxes/s[0-9a-f]{6}/action", suffix) is not None)
+                            # Sandbox actions keep admin authentication, CSRF, versioning
+                            # and audit, but do not require another phone challenge.
                             # Preparations may query remote state, but never grant execution.
                             # They are processed by the route and its fleet adapter first.
-                            if suffix not in {"/fleet/ops/call", "/fleet/operations", "/fleet/deployments", "/fleet/runbook-cases/search", "/fleet/diagnostics"}:
+                            if not sandbox_action and suffix not in {"/fleet/ops/call", "/fleet/operations", "/fleet/deployments", "/fleet/runbook-cases/search", "/fleet/diagnostics"}:
                                 result = await mobile.propose(require_admin(), kind="http", payload=payload,
                                     summary=await mutation_summary(mobile, payload))
                                 return JSONResponse(result, status_code=202, headers={"Cache-Control": "no-store"})

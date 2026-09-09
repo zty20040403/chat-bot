@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import nonebot
 
@@ -694,6 +694,22 @@ class AgentToolExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(lifecycle["stopped"], ("s123abc",))
         self.assertEqual(self.sandbox.destroyed, [])
+
+    async def test_requested_destroy_does_not_wait_for_unconfirmed_artifacts(self):
+        self.executor._task_sandbox_ids.add("s123abc")
+        self.executor._pending_artifacts["s123abc"] = {"unsent.pdf"}
+        result = json.loads(await self.executor.execute("sandbox_destroy", {"sandbox_id": "s123abc"}))
+        self.assertTrue(result["ok"])
+        self.assertEqual(self.sandbox.destroyed, ["s123abc"])
+        self.assertNotIn("s123abc", self.executor._pending_artifacts)
+        self.assertEqual((await self.executor.retain_task_sandboxes())["stopped"], ())
+
+    async def test_destroy_uses_existing_scope_and_propagates_ownership_refusal(self):
+        from src.plugins.ai_chat.sandbox import SandboxError
+        self.sandbox.destroy = AsyncMock(side_effect=SandboxError("你无权访问这个沙盒。"))
+        result = json.loads(await self.executor.execute("sandbox_destroy", {"sandbox_id": "s123abc"}))
+        self.assertFalse(result["ok"])
+        self.sandbox.destroy.assert_awaited_once_with(self.executor.owner, "s123abc")
 
     async def test_forward_expansion_never_exposes_native_user_or_forward_ids(self) -> None:
         await self.executor.ensure_canonical_message(1)

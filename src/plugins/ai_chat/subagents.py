@@ -1293,11 +1293,14 @@ class SubAgentCoordinator:
         ):
             return
         retention_ready, artifact_digests = self._artifact_retention_state(task)
+        cleanup_ready = retention_ready and task.status == "completed"
         try:
             await hooks.workspaces.finalize_task(
                 task_id,
                 self.store.runs(task_id),
                 artifact_digests=artifact_digests if retention_ready else (),
+                cleanup_revision=self.store.control(task_id)["revision"] if cleanup_ready else None,
+                finished_at=task.finished_at if cleanup_ready else None,
             )
             self.store.append_event(
                 task_id,
@@ -1310,6 +1313,7 @@ class SubAgentCoordinator:
                     ),
                     "containers": "stopped",
                     "workspace": "retained",
+                    "automatic_cleanup": cleanup_ready,
                 },
             )
         except Exception as exc:
@@ -1329,11 +1333,12 @@ class SubAgentCoordinator:
             if isinstance(contract, Mapping)
             else bool(_DELIVERY_REQUEST_PATTERN.search(task.objective))
         )
-        if not delivery_required:
-            return (True, ())
         expected: set[str] = set()
         snapshots: set[str] = set()
-        for run in self.store.runs(task.task_id):
+        runs = self.store.runs(task.task_id)
+        selected = {outcome.run.run_id for outcome in _delivery_outcomes(
+            task, {run.step_key: _outcome_from_run(task, run) for run in runs})}
+        for run in runs:
             artifacts = run.result.get("artifacts")
             if not isinstance(artifacts, list):
                 continue
@@ -1341,17 +1346,20 @@ class SubAgentCoordinator:
                 if not isinstance(artifact, Mapping):
                     continue
                 key = str(artifact.get("snapshot") or artifact.get("handle") or "")
-                if key:
+                if key and run.run_id in selected:
                     expected.add(key)
                 snapshot = str(artifact.get("snapshot") or "")
                 if re.fullmatch(r"[a-f0-9]{64}", snapshot):
                     snapshots.add(snapshot)
         if not expected:
-            return (True, ())
+            return (not delivery_required, ())
+        if not expected.issubset(snapshots):
+            return (False, ())
         acknowledged = {
             str(delivery.get("key") or "")
             for delivery in self.store.deliveries(task.task_id)
             if delivery.get("state") == "acknowledged"
+            and delivery.get("revision") == self.store.control(task.task_id)["revision"]
         }
         ready = expected.issubset(acknowledged)
         return (ready, tuple(sorted(snapshots)) if ready else ())

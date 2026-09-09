@@ -37,6 +37,7 @@ from .ai_tools import (
     LIST_RECENT_FILES_TOOL_NAME,
     NIX_SEARCH_TOOL_NAME,
     SANDBOX_CREATE_TOOL_NAME,
+    SANDBOX_DESTROY_TOOL_NAME,
     SANDBOX_EXEC_TOOL_NAME,
     SANDBOX_LIST_TOOL_NAME,
     SANDBOX_READ_FILE_TOOL_NAME,
@@ -98,8 +99,11 @@ AGENT_TOOL_PROMPT = (
     "生成含中文的 PDF 时必须使用沙盒内的 gaoji-pdf input.md output.pdf，"
     "再用 pdffonts 确认字体已嵌入、pdftotext 确认中文可提取；"
     "禁止用 Helvetica 等默认西文字体直接生成中文 PDF。"
-    "任务沙盒不会由模型销毁；任务结束后宿主会停止容器并保留 /workspace，"
-    "下次可用 sandbox_list 找到后继续使用。sandbox_exec 会自动启动已停止的沙盒。"
+    "沙盒创建、写入、依赖安装、构建、测试、打包和发文件在现有权限内自动执行，无需手机审批。"
+    "用户要求删除或重建时可直接使用 sandbox_destroy，包含未交付文件也不再二次确认。"
+    "正常任务收尾仍交给宿主，不能在下游使用或文件交付前自行删除沙盒；任务结束后宿主会停止容器。"
+    "任务成功且产物确认送达后，工作区和本地副本最多保留一小时再自动回收，不能承诺永久保留。"
+    "尚未回收的沙盒可用 sandbox_list 查找，sandbox_exec 会自动启动已停止的沙盒。"
     "需要交付的文件会先形成宿主持有的不可变快照，再独立发送到 QQ；"
     "上传结果未确认时，快照和工作区都必须保留。"
     "只有工具结果明确成功时才能说任务已完成。"
@@ -288,6 +292,7 @@ class AgentToolExecutor:
             GET_MESSAGE_BY_ID_TOOL_NAME: self._get_message_by_id,
             SEARCH_MESSAGES_TOOL_NAME: self._search_messages,
             SANDBOX_CREATE_TOOL_NAME: self._sandbox_create,
+            SANDBOX_DESTROY_TOOL_NAME: self._sandbox_destroy,
             SANDBOX_LIST_TOOL_NAME: self._sandbox_list,
             SANDBOX_EXEC_TOOL_NAME: self._sandbox_exec,
             NIX_SEARCH_TOOL_NAME: self._nix_search,
@@ -388,7 +393,7 @@ class AgentToolExecutor:
             sandbox_id=sandbox_id,
             message=(
                 "任务已由持久队列接管，机器人重启后也会继续；"
-                "完成后沙盒会保留，便于后续读取和发送产物。"
+                "未交付产物的沙盒会保留；成功任务确认交付后最多保留一小时。"
             ),
             delivery_semantics="at-least-once with idempotent enqueue",
         )
@@ -787,6 +792,13 @@ class AgentToolExecutor:
         del arguments
         sandboxes = await self.sandbox_manager.list(self.owner)
         return _json_result(ok=True, sandboxes=sandboxes)
+
+    async def _sandbox_destroy(self, arguments: dict[str, object]) -> str:
+        sandbox_id = str(arguments.get("sandbox_id") or "")
+        await self.sandbox_manager.destroy(self.owner, sandbox_id)
+        self._task_sandbox_ids.discard(sandbox_id)
+        self._pending_artifacts.pop(sandbox_id, None)
+        return _json_result(ok=True, sandbox_id=sandbox_id, state="destroyed")
 
     async def retain_task_sandboxes(self) -> dict[str, tuple[str, ...]]:
         """Stop this turn's containers while preserving their workspaces."""

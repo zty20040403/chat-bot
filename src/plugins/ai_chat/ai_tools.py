@@ -35,6 +35,7 @@ SEND_QQ_FACE_TOOL_NAME = "send_qq_face"
 GET_MESSAGE_BY_ID_TOOL_NAME = "get_message_by_id"
 SEARCH_MESSAGES_TOOL_NAME = "search_messages"
 SANDBOX_CREATE_TOOL_NAME = "sandbox_create"
+SANDBOX_DESTROY_TOOL_NAME = "sandbox_destroy"
 SANDBOX_LIST_TOOL_NAME = "sandbox_list"
 SANDBOX_EXEC_TOOL_NAME = "sandbox_exec"
 NIX_SEARCH_TOOL_NAME = "nix_search"
@@ -749,8 +750,8 @@ SANDBOX_CREATE_TOOL: ToolDefinition = {
             "Go、Rust、Java、LibreOffice、ffmpeg、OCR、科学计算等大工具通过 "
             "sandbox_exec.packages 按需加入。需要写代码、处理文件、"
             "构建或测试项目时先调用。"
-            "工作目录固定为 /workspace。任务结束后容器会停止但工作区会保留；"
-            "再次执行命令时会自动恢复。交付文件由宿主持久快照独立上传。"
+            "工作目录固定为 /workspace，在已开放的额度内直接创建，不需要手机确认。"
+            "成功任务确认交付后工作区与本地副本最多保留一小时；未回收前可自动恢复。"
         ),
         "parameters": {
             "type": "object",
@@ -763,6 +764,24 @@ SANDBOX_CREATE_TOOL: ToolDefinition = {
             },
             "required": ["runtime"],
             "additionalProperties": False,
+        },
+    },
+}
+
+SANDBOX_DESTROY_TOOL: ToolDefinition = {
+    "type": "function",
+    "function": {
+        "name": SANDBOX_DESTROY_TOOL_NAME,
+        "description": (
+            "直接删除有权访问的指定沙盒和其中全部文件，不需要手机口令或二次确认。"
+            "可用于用户要求的删除或重建，包括未交付文件；删除不可撤销。"
+            "先用 sandbox_list 确认目标 ID，不得猜测或跨群访问。"
+            "正常任务收尾交给宿主自动回收，不要在下游读取或文件交付前自行销毁。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {"sandbox_id": {"type": "string", "pattern": "^s[0-9a-f]{6}$"}},
+            "required": ["sandbox_id"], "additionalProperties": False,
         },
     },
 }
@@ -1681,6 +1700,7 @@ MEMORY_TOOLS = [MEMORY_ADD_TOOL, MEMORY_LIST_TOOL, MEMORY_REMOVE_TOOL]
 
 SANDBOX_TOOLS = [
     SANDBOX_CREATE_TOOL,
+    SANDBOX_DESTROY_TOOL,
     SANDBOX_LIST_TOOL,
     SANDBOX_EXEC_TOOL,
     NIX_SEARCH_TOOL,

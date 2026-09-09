@@ -195,6 +195,55 @@ class DockerSandboxCancellationTests(unittest.IsolatedAsyncioTestCase):
             await manager.destroy("owner", "sabc123")
         self.assertEqual(manager._run.await_count, 1)
 
+    async def test_automatic_reclaim_never_forces_a_running_or_foreign_container(self):
+        manager = DockerSandboxManager(image="gaoji-sandbox:latest")
+        labels = {"qqbot.sandbox": "true", "qqbot.id": "sabc123",
+                  "qqbot.owner": manager._owner_hash("owner"), "qqbot.purpose": "task"}
+        for running, changes in ((True, {}), (False, {"qqbot.purpose": "shell"}),
+                                 (False, {"qqbot.owner": "foreign"})):
+            with self.subTest(running=running, changes=changes):
+                manager._run = AsyncMock(return_value=SandboxResult(json.dumps([{**labels, **changes}, running, [], "1970-01-01T00:00:10Z"]), "", 0))
+                with self.assertRaises(SandboxError):
+                    await manager.reclaim_stopped("owner", "sabc123", eligible=lambda: True)
+                self.assertEqual(manager._run.await_count, 1)
+
+    async def test_automatic_reclaim_removes_only_owned_workspace_without_force(self):
+        manager = DockerSandboxManager(image="gaoji-sandbox:latest")
+        labels = {"qqbot.sandbox": "true", "qqbot.id": "sabc123",
+                  "qqbot.owner": manager._owner_hash("owner"), "qqbot.purpose": "task"}
+        mounts = [{"Type": "volume", "Destination": "/workspace", "Name": "gaoji-work-sabc123"},
+                  {"Type": "volume", "Destination": "/nix", "Name": "gaoji-nix-v2"}]
+        manager._run = AsyncMock(side_effect=[SandboxResult(json.dumps([labels, False, mounts, "1970-01-01T00:00:10Z"]), "", 0),
+                                              SandboxResult("", "", 0), SandboxResult("", "", 0)])
+        await manager.reclaim_stopped("owner", "sabc123", eligible=lambda: True)
+        self.assertEqual(manager._run.await_args_list[1].args, ("docker", "rm", "qqbot-sabc123"))
+        self.assertEqual(manager._run.await_args_list[2].args, ("docker", "volume", "rm", "-f", "gaoji-work-sabc123"))
+
+    async def test_automatic_reclaim_rechecks_task_before_removal(self):
+        manager = DockerSandboxManager()
+        labels = {"qqbot.sandbox": "true", "qqbot.id": "sabc123",
+                  "qqbot.owner": manager._owner_hash("owner"), "qqbot.purpose": "task"}
+        manager._run = AsyncMock(return_value=SandboxResult(json.dumps([labels, False, [], "1970-01-01T00:00:10Z"]), "", 0))
+        with self.assertRaises(SandboxError):
+            await manager.reclaim_stopped("owner", "sabc123", eligible=lambda: False)
+        self.assertEqual(manager._run.await_count, 1)
+
+    async def test_automatic_reclaim_protects_a_workspace_used_again_after_delivery(self):
+        manager = DockerSandboxManager()
+        labels = {"qqbot.sandbox": "true", "qqbot.id": "sabc123",
+                  "qqbot.owner": manager._owner_hash("owner"), "qqbot.purpose": "task"}
+        manager._run = AsyncMock(return_value=SandboxResult(json.dumps([labels, False, [], "1970-01-01T00:02:00Z"]), "", 0))
+        with self.assertRaises(SandboxError):
+            await manager.reclaim_stopped("owner", "sabc123", eligible=lambda: True, not_used_since=100)
+        self.assertEqual(manager._run.await_count, 1)
+
+    async def test_automatic_reclaim_retries_volume_removal_after_container_was_removed(self):
+        manager = DockerSandboxManager()
+        manager._run = AsyncMock(side_effect=[SandboxResult("", "Error: No such object", 1),
+                                              SandboxResult("", "", 0), SandboxResult("", "", 0)])
+        await manager.reclaim_stopped("owner", "sabc123", eligible=lambda: True)
+        self.assertTrue(all(c.args[:3] == ("docker", "volume", "rm") for c in manager._run.await_args_list[1:]))
+
     async def test_stop_preserves_the_owned_workspace_volume(self) -> None:
         manager = DockerSandboxManager(image="gaoji-sandbox:latest")
         manager._owned_container = AsyncMock(return_value="qqbot-sabc123")  # type: ignore[method-assign]

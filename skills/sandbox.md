@@ -15,7 +15,9 @@ Summary: 在隔离 Docker 沙盒中创建、修改、测试并交付项目。
    `pdffonts output.pdf` 确认字体已嵌入，并用 `pdftotext output.pdf -`
    确认中文可提取。不要用默认 Helvetica 生成中文 PDF。
 5. 先运行测试或最小启动检查，再声称完成。工具失败时报告实际错误，不可伪造成功。
-6. 交付用 `send_file_from_sandbox` 或 `send_image_from_sandbox`；不再需要时销毁沙盒。
+6. 交付用 `send_file_from_sandbox` 或 `send_image_from_sandbox`。以上沙盒操作无需手机审批。
+   用户要求删除/重建时可直接调用 `sandbox_destroy`，包括未交付文件也不二次确认；正常任务
+   收尾仍交给宿主，确认交付后最多保留一小时，不能在下游读取或文件发送之前自行销毁。
 7. 沙盒不是公网部署环境，也不能访问宿主机、机器人密钥或其他用户的数据。
 8. `packages` 只对本次命令生效。执行沙盒对共享 Nix 缓存只有读取权限；
    下载由参数受限的辅助容器完成，不能把任意安装脚本伪装成软件包名。

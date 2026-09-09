@@ -9,6 +9,7 @@ from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message, MessageSegme
 
 from .control import JobFence, LeaseLost, active_job_fence
 from .workspaces import StepWorkspaces, prune_acknowledged_artifacts
+from .workspace_cleanup import prune_task_workspaces
 from ..onebot_codec import scope_from_event, decode_onebot_message
 from ..deepseek import DeepSeekTrace
 from ..workers.durable_jobs import DurableJobWorker
@@ -68,25 +69,31 @@ class SubAgentDispatcher:
                         self.context.logger.warning("Sub-Agent delivery reconciliation failed for task#%s: %s", task_id, type(exc).__name__)
                 now = time.time()
                 if now >= next_artifact_prune:
-                    deleted, invalid = await asyncio.to_thread(
-                        prune_acknowledged_artifacts,
-                        self.context.state_dir / "subagent_artifacts",
-                    )
-                    if deleted:
-                        self.context.logger.info(
-                            "Pruned %s acknowledged Sub-Agent artifact snapshot(s).",
-                            deleted,
-                        )
-                    if invalid:
-                        self.context.logger.warning(
-                            "Skipped %s invalid Sub-Agent artifact retention marker(s).",
-                            invalid,
-                        )
-                    next_artifact_prune = now + 3600
+                    try:
+                        await self.prune_workspaces()
+                    except Exception as exc:
+                        self.context.logger.warning("Task workspace cleanup failed; retained for retry: %s", type(exc).__name__)
+                    next_artifact_prune = now + 30
                 await asyncio.sleep(10)
         async with asyncio.TaskGroup() as group:
             group.create_task(reconcile_queue())
             group.create_task(self.worker.run_forever())
+
+    async def prune_workspaces(self):
+        root = self.context.state_dir / "subagent_artifacts"
+        reclaimed, deferred = await prune_task_workspaces(root, self.context.sandbox_manager, self.coordinator)
+
+        def can_prune(task_id, digest):
+            task = self.store.get(task_id)
+            if task is None or task.status != "completed":
+                return False
+            ready, digests = self.coordinator._artifact_retention_state(task)
+            return ready and digest in digests
+
+        deleted, invalid = await asyncio.to_thread(prune_acknowledged_artifacts, root, can_prune=can_prune)
+        if reclaimed or deleted or deferred or invalid:
+            self.context.logger.info("Task cleanup: %s sandboxes, %s legacy snapshots reclaimed; %s deferred",
+                reclaimed, deleted, deferred + invalid)
 
     async def reconcile(self, task_id: int):
         control = self.store.control(task_id)
@@ -128,7 +135,7 @@ class SubAgentDispatcher:
                 workspaces = StepWorkspaces(
                     self.context.state_dir,
                     lifecycle_executor,
-                    retention_days=self.context.settings.subagent_artifact_retention_days,
+                    retention_seconds=self.context.settings.subagent_retention_seconds,
                 )
                 retention_ready, artifact_digests = self.coordinator._artifact_retention_state(task)
                 if retention_ready:
@@ -136,6 +143,8 @@ class SubAgentDispatcher:
                         task_id,
                         self.store.runs(task_id),
                         artifact_digests=artifact_digests,
+                        cleanup_revision=control["revision"] if task.status == "completed" else None,
+                        finished_at=task.finished_at if task.status == "completed" else None,
                     )
                     self.store.append_event(
                         task_id,

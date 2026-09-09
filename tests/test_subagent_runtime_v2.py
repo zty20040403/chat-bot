@@ -282,7 +282,7 @@ class RuntimeV2Tests(unittest.IsolatedAsyncioTestCase):
                 logger=Mock(),
                 state_dir=Path(self.tmp.name),
                 sandbox_manager=manager,
-                settings=SimpleNamespace(subagent_artifact_retention_days=7),
+                settings=SimpleNamespace(subagent_retention_seconds=3600),
             )
         )
         try:
@@ -366,6 +366,34 @@ class RuntimeV2Tests(unittest.IsolatedAsyncioTestCase):
             workspaces.finalize_task.await_args.kwargs["artifact_digests"],
             (snapshot,),
         )
+        self.assertIsNone(workspaces.finalize_task.await_args.kwargs["cleanup_revision"])
+        self.store.set_task_state(task.task_id, "completed")
+        await self.coordinator._finalize_finished_task(task.task_id, AgentExecutionHooks(workspaces=workspaces))
+        self.assertEqual(workspaces.finalize_task.await_args.kwargs["cleanup_revision"], self.store.control(task.task_id)["revision"])
+
+    async def test_cleanup_requires_current_revision_receipts_but_not_intermediate_delivery(self):
+        task = self.submit()
+        self.store.set_task_state(task.task_id, "running", plan={
+            "contract": {"delivery_required": True},
+            "steps": [{"id": "draft"}, {"id": "final", "depends_on": ["draft"]}],
+        })
+        for key, digest in (("draft", "a" * 64), ("final", "b" * 64)):
+            run = self.store.create_run(task.task_id, TaskStep(key, "coder", "build", "zip"),
+                allowed_tools=[], model_profile="qwen-local")
+            self.store.finish_run(run.run_id, "succeeded", result={"status": "success",
+                "artifacts": [{"handle": "s123abc:/workspace/" + key + ".zip", "snapshot": digest}]})
+        self.store.begin_delivery(task.task_id, "b" * 64, {"filename": "final.zip"})
+        self.store.finish_delivery(task.task_id, "b" * 64, "acknowledged", {"ok": True})
+        self.store.set_task_state(task.task_id, "completed")
+        current = self.store.get(task.task_id)
+        self.assertEqual(self.coordinator._artifact_retention_state(current), (True, ("a" * 64, "b" * 64)))
+        with patch.object(self.store, "control", return_value={"revision": 999}):
+            self.assertEqual(self.coordinator._artifact_retention_state(current), (False, ()))
+
+    async def test_missing_required_delivery_does_not_authorize_cleanup(self):
+        task = self.submit()
+        self.store.set_task_state(task.task_id, "completed", plan={"contract": {"delivery_required": True}})
+        self.assertEqual(self.coordinator._artifact_retention_state(self.store.get(task.task_id)), (False, ()))
 
     async def test_delivery_prefers_final_or_repair_artifact(self):
         task = self.submit()
@@ -515,7 +543,7 @@ class RuntimeV2Tests(unittest.IsolatedAsyncioTestCase):
         workspaces = StepWorkspaces(
             Path(self.tmp.name),
             executor,
-            retention_days=1,
+            retention_seconds=3600,
         )
         acknowledged = workspaces._persist(1, b"acknowledged")
         unconfirmed = workspaces._persist(2, b"unconfirmed")
@@ -532,7 +560,7 @@ class RuntimeV2Tests(unittest.IsolatedAsyncioTestCase):
 
         deleted, invalid = prune_acknowledged_artifacts(
             workspaces.root,
-            now=int(time.time()) + 86401,
+            now=int(time.time()) + 3601,
         )
         self.assertEqual((deleted, invalid), (1, 0))
         self.assertFalse(workspaces._path(1, acknowledged).exists())
@@ -546,7 +574,7 @@ class RuntimeV2Tests(unittest.IsolatedAsyncioTestCase):
         workspaces = StepWorkspaces(
             Path(self.tmp.name),
             executor,
-            retention_days=1,
+            retention_seconds=3600,
         )
         digest = workspaces._persist(1, b"same-artifact")
         workspaces._mark_for_retention(1, digest, int(time.time()) - 172800)

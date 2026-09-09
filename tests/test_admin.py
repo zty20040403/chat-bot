@@ -660,7 +660,7 @@ class AdminTests(unittest.TestCase):
                     "/bot-admin/api/v1/sandboxes/s456def/action",
                     headers={
                         "X-Test-Login": "admin",
-                        "If-Match": '"1"',
+                        "If-Match": '"0"',
                     },
                     json={"action": "destroy"},
                 )
@@ -671,7 +671,7 @@ class AdminTests(unittest.TestCase):
                         "If-Match": '"1"',
                         "X-Admin-Actor": "Kenneth",
                     },
-                    json={"action": "destroy", "confirmation": "s456def"},
+                    json={"action": "destroy"},
                 )
                 stickers = await client.get(
                     "/bot-admin/api/stickers",
@@ -806,7 +806,7 @@ class AdminTests(unittest.TestCase):
         self.assertEqual(sandboxes.json()["resource"], "sandboxes")
         self.assertEqual(sandbox_start.status_code, 200)
         self.assertEqual(sandbox_start.json()["resource_version"], 1)
-        self.assertEqual(sandbox_destroy_denied.status_code, 400)
+        self.assertEqual(sandbox_destroy_denied.status_code, 409)
         self.assertEqual(sandbox_destroy.status_code, 200)
         self.assertEqual(sandbox_destroy.json()["resource_version"], 2)
         self.assertEqual(

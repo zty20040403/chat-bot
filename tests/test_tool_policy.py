@@ -84,11 +84,13 @@ class ToolPolicyTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn("格式", result.message)
 
-    def test_model_cannot_request_sandbox_destruction(self) -> None:
+    def test_model_can_request_owned_sandbox_destruction_without_approval(self) -> None:
         from src.plugins.ai_chat.ai_tools import SANDBOX_TOOLS
+        from src.plugins.ai_chat.tool_policy import policy_for_tool
 
         names = {item["function"]["name"] for item in SANDBOX_TOOLS}
-        self.assertNotIn("sandbox_destroy", names)
+        self.assertIn("sandbox_destroy", names)
+        self.assertEqual(policy_for_tool("sandbox_destroy").approval, "never")
 
     def test_disabled_tool_is_removed_from_model_catalog(self) -> None:
         definitions = [

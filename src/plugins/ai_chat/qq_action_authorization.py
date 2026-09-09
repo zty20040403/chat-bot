@@ -23,14 +23,22 @@ COMMANDS = {
     "handle_clear_data": "清空数据与配置", "handle_control_command": "修改任务或消息",
 }
 
+AUTOMATIC_SANDBOX_TOOLS = frozenset({
+    "sandbox_create", "sandbox_list", "sandbox_exec", "sandbox_destroy",
+    "sandbox_write_file", "sandbox_read_file", "nix_search",
+    "import_file_to_sandbox", "import_agent_artifact",
+    "send_file_from_sandbox", "send_image_from_sandbox",
+})
+
 
 def requires_mobile_tool(name: str) -> bool:
-    # Conversation replies and read-only retrieval remain ordinary chat. Agent
-    # delegation can propose work, but each actual write still passes this gate.
+    # Sandbox quotas and ownership remain in the executor. Remote host operations
+    # still require their separate, parameter-bound authorization.
+    if name in AUTOMATIC_SANDBOX_TOOLS:
+        return False
     if name in {"ops_call", "operation_prepare", "delegate_agent", "run_subagents", "resume_subagent",
                 "browser_navigate", "browser_snapshot", "browser_scroll", "browser_wait_for", "browser_close",
-                "say", "reply_send", "reply_with_voice", "send_sticker", "send_qq_face",
-                "send_file_from_sandbox", "send_image_from_sandbox"}:
+                "say", "reply_send", "reply_with_voice", "send_sticker", "send_qq_face"}:
         return False
     effects = policy_for_tool(name).side_effects
     safe = {"read", "read:fleet", "read:sandbox", "download:remote-media", "probe:fixed-target", "write:diagnostic-ledger"}
@@ -87,7 +95,7 @@ def mobile_command(function):
         bound = signature.bind(*args, **kwargs)
         service, event = bound.arguments["self"], bound.arguments["event"]
         command_args = bound.arguments.get("args")
-        if not command_changes_state(function.__name__, event, command_args):
+        if function.__name__ == "handle_shell_command" or not command_changes_state(function.__name__, event, command_args):
             return await function(*args, **kwargs)
         payload = command_payload(function.__name__, event, command_args)
         if approved_request.get() is not None:

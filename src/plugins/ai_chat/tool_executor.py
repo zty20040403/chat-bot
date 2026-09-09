@@ -2222,7 +2222,7 @@ class ToolExecutor(HandlerService):
                 StepWorkspaces(
                     self.context.state_dir,
                     agent_executor,
-                    retention_days=self.context.settings.subagent_artifact_retention_days,
+                    retention_seconds=self.context.settings.subagent_retention_seconds,
                 )
                 if agent_executor
                 else None

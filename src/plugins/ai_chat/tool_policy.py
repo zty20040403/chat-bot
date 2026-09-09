@@ -259,6 +259,11 @@ def _policy_registry() -> dict[str, ToolPolicy]:
         compensation="none",
         max_identical_calls=1,
     )
+    policies["sandbox_destroy"] = ToolPolicy(
+        risk="high", idempotency="non-idempotent",
+        side_effects=("write:sandbox", "destructive"), approval="never",
+        timeout_seconds=90.0, max_identical_calls=1,
+    )
     policies["run_subagents"] = ToolPolicy(
         risk="medium",
         idempotency="non-idempotent",

@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import nonebot
 
@@ -18,6 +18,7 @@ from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message, PrivateMessa
 from src.bot_security.service import MobileAuthorization, assert_approved
 from src.bot_security.store import SecurityError, SecurityStore
 from src.plugins.ai_chat.fleet_authorization import FleetAuthorization
+from src.plugins.ai_chat.command_handlers import CommandHandlers
 from src.plugins.ai_chat.mobile_authorization import handle_approval_event, redact_approval_event_logs
 from src.plugins.ai_chat.qq_action_authorization import mobile_command, register_qq_executors, requires_mobile_tool, command_targets
 from tests.test_account_security import PASSWORD, QQ, BOT
@@ -91,11 +92,56 @@ class MobileIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("012345", str(bot.send_group_msg.call_args))
         self.assertFalse(await handle_approval_event(self.mobile, bot, event("机器人状态")))
 
-    async def test_side_effect_tool_policy_has_no_shell_or_write_bypass(self):
-        for name in ("sandbox_exec", "sandbox_write_file", "memory_add", "job_cancel", "browser_click", "browser_fill", "unknown_tool"):
+    async def test_only_isolated_sandbox_operations_skip_phone_approval(self):
+        for name in ("memory_add", "job_cancel", "browser_click", "browser_fill", "unknown_tool", "sandbox_host_exec", "cluster_job_submit"):
             self.assertTrue(requires_mobile_tool(name), name)
-        for name in ("web_search", "service_inspect", "say"):
+        for name in ("web_search", "service_inspect", "say", "sandbox_create", "sandbox_exec",
+                     "sandbox_write_file", "sandbox_read_file", "sandbox_destroy", "import_file_to_sandbox",
+                     "import_agent_artifact", "send_file_from_sandbox", "send_image_from_sandbox"):
             self.assertFalse(requires_mobile_tool(name), name)
+
+    async def test_shell_command_executes_without_qq_challenge(self):
+        executed = []
+        class Commands:
+            @mobile_command
+            async def handle_shell_command(self, event, args):
+                executed.append(args.extract_plain_text())
+        commands = Commands()
+        commands.context = SimpleNamespace(mobile_authorization=self.mobile)
+        for text in ("python --version", "reset", "destroy"):
+            await commands.handle_shell_command(event("/shell " + text), Message(text))
+        self.assertEqual(executed, ["python --version", "reset", "destroy"])
+        self.assertFalse(self.sent)
+
+    async def test_shell_reset_deletes_only_current_shell_and_keeps_access_checks(self):
+        manager = SimpleNamespace(
+            list=AsyncMock(return_value=[
+                {"sandbox_id": "s123abc", "purpose": "shell"},
+                {"sandbox_id": "s456def", "purpose": "task"},
+            ]),
+            destroy=AsyncMock(),
+        )
+        allowed = Mock(return_value=True)
+        context = SimpleNamespace(
+            sandbox_manager=manager, mobile_authorization=self.mobile, logger=Mock(),
+            settings=SimpleNamespace(is_sandbox_user_allowed=allowed),
+        )
+        replies = SimpleNamespace(_finish_safely=AsyncMock(), _reply_message=lambda _, text: text)
+        commands = CommandHandlers(SimpleNamespace(context=context, replies=replies))
+        for is_group in (True, False):
+            incoming = event("/shell reset", group=is_group)
+            await commands.handle_shell_command(incoming, Message("reset"))
+            owner = "shell:group:1234" if is_group else "shell:private:" + QQ
+            manager.list.assert_awaited_once_with(owner)
+            manager.destroy.assert_awaited_once_with(owner, "s123abc")
+            manager.list.reset_mock()
+            manager.destroy.reset_mock()
+
+        allowed.return_value = False
+        await commands.handle_shell_command(event("/shell reset", group=True), Message("reset"))
+        manager.list.assert_not_awaited()
+        manager.destroy.assert_not_awaited()
+        self.assertFalse(self.sent)
 
     async def test_deployment_preflight_sends_private_code_and_polls_final_result(self):
         record = {"deployment_id": "deploy_test", "status": "preflight_queued", "actor_id": "admin:kenneth",

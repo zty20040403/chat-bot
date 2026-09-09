@@ -10,8 +10,10 @@ import shlex
 import time
 import tempfile
 from pathlib import Path, PurePosixPath
+from typing import Callable
 
 from .control import assert_job_owned
+from .workspace_cleanup import MAX_RETENTION_SECONDS, schedule_cleanup
 
 
 IMPORT_AGENT_ARTIFACT = {"type": "function", "function": {
@@ -29,9 +31,9 @@ class ArtifactCaptureError(ValueError):
 
 
 class StepWorkspaces:
-    def __init__(self, root: Path, executor, *, retention_days: int = 7):
+    def __init__(self, root: Path, executor, *, retention_seconds: int = 3600):
         self.root = root / "subagent_artifacts"
-        self.retention_seconds = max(int(retention_days), 1) * 86400
+        self.retention_seconds = min(max(int(retention_seconds), 0), MAX_RETENTION_SECONDS)
         self.executor = executor
         self.manager = executor.sandbox_manager
 
@@ -165,16 +167,20 @@ class StepWorkspaces:
         runs,
         *,
         artifact_digests: tuple[str, ...] = (),
+        cleanup_revision: int | None = None,
+        finished_at: int | None = None,
     ):
         """Stop task containers and retain their persistent workspace volumes."""
         base_owner = getattr(self.executor, "base_owner", None)
         if not isinstance(base_owner, str) or not base_owner:
             base_owner = str(self.executor.owner)
+        sandboxes = []
         for run in runs:
             owner = f"{base_owner}:task#{task_id}/{run.step_key}"
             for sandbox in await self.manager.list(owner):
                 if sandbox.get("purpose", "task") == "task":
                     await self.manager.stop_owned(owner, sandbox["sandbox_id"])
+                    sandboxes.append({"owner": owner, "sandbox_id": sandbox["sandbox_id"]})
         acknowledged_at = int(time.time())
         for digest in artifact_digests:
             await asyncio.to_thread(
@@ -183,7 +189,10 @@ class StepWorkspaces:
                 digest,
                 acknowledged_at,
             )
-        await asyncio.to_thread(prune_acknowledged_artifacts, self.root)
+        if cleanup_revision is not None and finished_at is not None:
+            await asyncio.to_thread(schedule_cleanup, self.root, task_id=task_id,
+                revision=cleanup_revision, finished_at=finished_at, sandboxes=sandboxes,
+                snapshots=artifact_digests, retention_seconds=self.retention_seconds)
 
     def _retention_marker(self, task_id: int, digest: str) -> Path:
         if not re.fullmatch(r"[a-f0-9]{64}", digest):
@@ -202,6 +211,9 @@ class StepWorkspaces:
         marker = self._retention_marker(task_id, digest)
         if not self._path(task_id, digest).is_file():
             return
+        if marker.is_file() and not marker.is_symlink():
+            previous = json.loads(marker.read_text(encoding="utf-8"))
+            acknowledged_at = min(acknowledged_at, int(previous["acknowledged_at"]))
         marker.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         payload = json.dumps(
             {
@@ -219,7 +231,8 @@ class StepWorkspaces:
         os.replace(name, marker)
 
 
-def prune_acknowledged_artifacts(root: Path, *, now: int | None = None) -> tuple[int, int]:
+def prune_acknowledged_artifacts(root: Path, *, now: int | None = None,
+                                 can_prune: Callable[[int, str], bool] | None = None) -> tuple[int, int]:
     """Delete only snapshots whose confirmed-delivery retention period expired."""
 
     retention_root = root / ".retention"
@@ -247,8 +260,17 @@ def prune_acknowledged_artifacts(root: Path, *, now: int | None = None) -> tuple
                 if (
                     int(payload.get("task_id")) != int(task_dir.name)
                     or payload.get("sha256") != digest
-                    or int(payload.get("delete_after")) > current
                 ):
+                    continue
+                # Old seven-day tickets obey the new one-hour ceiling as well.
+                if min(int(payload["delete_after"]), int(payload["acknowledged_at"]) + MAX_RETENTION_SECONDS) > current:
+                    continue
+                if can_prune is not None and not can_prune(int(task_dir.name), digest):
+                    continue
+                if (root / ".workspace-cleanup" / f"{task_dir.name}.json").exists():
+                    continue
+                if (root / task_dir.name).is_symlink():
+                    invalid += 1
                     continue
                 artifact = root / task_dir.name / digest
                 if artifact.is_symlink():
@@ -257,7 +279,7 @@ def prune_acknowledged_artifacts(root: Path, *, now: int | None = None) -> tuple
                 artifact.unlink(missing_ok=True)
                 marker.unlink(missing_ok=True)
                 deleted += 1
-            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            except (OSError, TypeError, ValueError, KeyError, json.JSONDecodeError):
                 invalid += 1
         try:
             task_dir.rmdir()

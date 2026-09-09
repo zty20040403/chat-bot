@@ -1019,16 +1019,13 @@ export function SandboxesView({ plane }: { plane: Plane }) {
   const runAction = async (sandbox: any, action: 'start' | 'stop' | 'destroy') => {
     const sandboxId = String(sandbox.sandbox_id ?? '')
     if (!sandboxId || pendingSandbox) return
-    if (action === 'destroy' && !window.confirm(
-      `确认永久删除沙盒 ${sandboxId}？容器和 /workspace 都会被删除，此操作不能撤销。`,
-    )) return
     setPendingSandbox(sandboxId)
     try {
       await plane.mutate(
         'sandboxes',
         `/sandboxes/${sandboxId}/action`,
         'POST',
-        { action, confirmation: action === 'destroy' ? sandboxId : '' },
+        { action },
         ['sandboxes', 'overview'],
       )
     } finally {
@@ -1038,7 +1035,7 @@ export function SandboxesView({ plane }: { plane: Plane }) {
 
   return (
     <>
-      <PageHeader title="沙盒" description="停止后保留工作区；删除只由管理员明确执行" action={<RefreshButton onClick={() => void plane.refresh('sandboxes')} />} />
+      <PageHeader title="沙盒" description="成功任务确认交付后最多保留一小时；管理员删除直接执行，包括未交付文件" action={<RefreshButton onClick={() => void plane.refresh('sandboxes')} />} />
       <div className="metric-grid compact">
         <Metric label="保留沙盒" value={sandboxes.length} />
         <Metric label="运行中" value={sandboxes.filter((item) => item.running).length} />
@@ -1058,7 +1055,7 @@ export function SandboxesView({ plane }: { plane: Plane }) {
                 <div className="sandbox-actions">
                   {!sandbox.running && <button className="icon-button success" title="恢复沙盒" aria-label={`恢复沙盒 ${sandboxId}`} disabled={Boolean(pendingSandbox)} onClick={() => void runAction(sandbox, 'start')}><Play size={15} /></button>}
                   {sandbox.running && <button className="icon-button" title="停止并保留工作区" aria-label={`停止沙盒 ${sandboxId}`} disabled={busy} onClick={() => void runAction(sandbox, 'stop')}><Square size={15} /></button>}
-                  <button className="icon-button danger" title="永久删除沙盒和工作区" aria-label={`删除沙盒 ${sandboxId}`} disabled={busy} onClick={() => void runAction(sandbox, 'destroy')}><Trash2 size={15} /></button>
+                  <button className="icon-button danger" title="直接永久删除沙盒和工作区（含未交付文件）" aria-label={`删除沙盒 ${sandboxId}`} disabled={busy} onClick={() => void runAction(sandbox, 'destroy')}><Trash2 size={15} /></button>
                 </div>
               </div>
               <dl>

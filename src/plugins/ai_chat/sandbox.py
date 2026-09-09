@@ -8,7 +8,9 @@ import secrets
 import shlex
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import PurePosixPath
+from typing import Callable
 
 
 SANDBOX_ID_PATTERN = re.compile(r"^s[0-9a-f]{6}$")
@@ -359,6 +361,52 @@ class DockerSandboxManager:
             if workspace_volume:
                 await self._remove_volume(workspace_volume)
         self._exec_locks.pop(sandbox_id, None)
+
+    async def reclaim_stopped(self, owner: str, sandbox_id: str, *, eligible: Callable[[], bool],
+                              not_used_since: int | None = None) -> None:
+        """Reclaim an expired host-issued ticket, without killing running work."""
+        if not SANDBOX_ID_PATTERN.fullmatch(sandbox_id):
+            raise SandboxError("沙盒 ID 格式错误。")
+        self._ensure_idle(sandbox_id)
+        lock = self._exec_locks.setdefault(sandbox_id, asyncio.Lock())
+        async with lock:
+            self._ensure_idle(sandbox_id)
+            name = self._container_name(sandbox_id)
+            result = await self._run("docker", "inspect", "--format",
+                "[{{json .Config.Labels}},{{json .State.Running}},{{json .Mounts}},{{json .State.StartedAt}}]", name, timeout=20)
+            allowed_volumes = {self._workspace_volume_name(sandbox_id), f"kennethbot-work-{sandbox_id}"}
+            volumes = []
+            if result.returncode:
+                detail = (result.stderr or result.stdout).lower()
+                if "no such object" not in detail and "no such container" not in detail:
+                    raise SandboxError(self._docker_error(result.stderr or result.stdout))
+                # Resume a cleanup interrupted after container removal but before volume removal.
+                volumes = sorted(allowed_volumes)
+            else:
+                labels, running, mounts, started_at = json.loads(result.stdout)
+                if (labels.get("qqbot.sandbox") != "true" or labels.get("qqbot.id") != sandbox_id
+                        or labels.get("qqbot.owner") != self._owner_hash(owner)
+                        or labels.get("qqbot.purpose", "task") != "task"):
+                    raise SandboxError("沙盒不属于到期任务，已跳过自动回收。")
+                if running:
+                    raise SandboxError("沙盒已重新运行，已跳过自动回收。")
+                if not_used_since is not None and datetime.fromisoformat(started_at.replace("Z", "+00:00")).timestamp() > not_used_since:
+                    raise SandboxError("沙盒在交付后被重新使用，已保留新的工作内容。")
+                for mount in mounts:
+                    if mount.get("Destination") == "/workspace" and mount.get("Type") == "volume":
+                        if mount.get("Name") not in allowed_volumes:
+                            raise SandboxError("工作区卷不属于当前沙盒，已跳过自动回收。")
+                        volumes.append(mount["Name"])
+                if not eligible():
+                    raise SandboxError("任务状态已变化，已取消自动回收。")
+                removed = await self._run("docker", "rm", name, timeout=30)
+                if removed.returncode:
+                    raise SandboxError(self._docker_error(removed.stderr or removed.stdout))
+            for volume in volumes:
+                if not eligible():
+                    raise SandboxError("任务状态已变化，已保留工作区。")
+                await self._remove_volume(volume)
+            self._last_execs.pop(sandbox_id, None)
 
     async def exec(
         self,
