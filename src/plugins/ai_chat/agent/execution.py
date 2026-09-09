@@ -32,7 +32,9 @@ execution 需要动手执行，不能 direct；project 或 research_delivery 需
 “写脚本并在沙盒运行验证”是 delegate。“多路找资料，比较后生成 PDF”是 workflow。
 “继续/改成 Java/加购物车”必须结合当前已授权的话题及任务；不要新建一个无关项目。
 持久文件写入、项目实现、构建和交付必须由子任务执行。主控保留解释、检索及最终回复。
-任务需要 objective、deliverables、constraints、acceptance。用户需要把产物发回当前会话时设置 delivery_required。
+任务需要 objective、deliverables、constraints、acceptance。
+delivery_required 专指必须上传文件（如 PDF、源码包、图片附件），不是普通文字回复。
+“把巡检结果/前后对比发群里”若未要求文件，delivery_required=false；最终文字始终由宿主消息队列发送。
 acceptance 只列发送前可验证的内容质量和可运行性，不把“已发送到群”列为文件验收条件。
 发送和回执由宿主在验收通过后执行，不要规划只负责群文件上传的子 Agent；最后的子步骤负责打包和运行说明。
 不得把完整项目偷偷缩成演示并宣称完成。
@@ -58,7 +60,7 @@ DECISION_TOOL = {
                 "answer": {"type": "string", "description": "direct 的最终答复；需要工具时为空"},
                 "objective": {"type": "string"},
                 "deliverables": _STRINGS, "constraints": _STRINGS, "acceptance": _STRINGS,
-                "delivery_required": {"type": "boolean"},
+                "delivery_required": {"type": "boolean", "description": "是否必须上传文件附件；仅发送文字结论/巡检报告为 false，宿主仍会发送最终文字"},
                 "steps": {
                     "type": "array", "maxItems": 12,
                     "items": {

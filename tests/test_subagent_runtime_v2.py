@@ -89,6 +89,25 @@ class RuntimeV2Tests(unittest.IsolatedAsyncioTestCase):
         checkpoint = self.store.checkpoints(task.task_id)[-1]["state"]
         self.assertEqual(checkpoint["previous_runs"][0]["result"]["summary"], "frontend")
 
+    async def test_revision_explicitly_corrects_file_delivery_without_disabling_text(self):
+        task = self.submit()
+        self.store.create_run(task.task_id, TaskStep("frontend", "analyst", "report", "text"),
+            allowed_tools=[], model_profile="qwen-local")
+        self.store.set_task_state(task.task_id, "partial")
+        self.coordinator.revise(task.task_id, scope_key=task.scope_key, requester_user_id=2,
+            instruction="只需群内文字报告，不需要文件", step_keys=["frontend"], expected_version=1,
+            file_delivery_required=False)
+        current = self.store.get(task.task_id)
+        self.assertIs(current.plan["contract"]["delivery_required"], False)
+        self.assertTrue(self.store.control(task.task_id)["dispatch"])
+        checkpoint = self.store.checkpoints(task.task_id)[-1]["state"]
+        self.assertIs(checkpoint["file_delivery_required"], False)
+        self.assertIn("previous_contract", checkpoint)
+        execute = AsyncMock()
+        self.assertEqual(await self.coordinator._deliver_requested_artifacts(current, {},
+            execute_tool=execute, delivered_artifacts=set(), progress=None), [])
+        execute.assert_not_awaited()
+
     async def test_lost_lease_fences_state_writes(self):
         task = self.submit()
         token = active_job_fence.set(JobFence(1, "worker", 1, lambda: False))

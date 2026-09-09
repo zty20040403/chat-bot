@@ -51,6 +51,7 @@ class SubAgentRevisionUpdate(BaseModel):
     expected_version: int = Field(ge=0)
     instruction: str = Field(min_length=1, max_length=12000)
     step_keys: list[str] = Field(min_length=1, max_length=14)
+    file_delivery_required: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -1032,7 +1033,8 @@ def register_admin(
             try:
                 return services.subagent_coordinator.revise(task_id, scope_key=task.scope_key,
                     requester_user_id=task.requester_user_id, instruction=payload.instruction,
-                    step_keys=payload.step_keys, expected_version=payload.expected_version)
+                    step_keys=payload.step_keys, expected_version=payload.expected_version,
+                    file_delivery_required=payload.file_delivery_required)
             except ValueError as exc:
                 raise HTTPException(409, str(exc)) from exc
         result = mutate(mutation_info, "subagents", action="subagent.revise", target=f"task#{task_id}", operation=operation)

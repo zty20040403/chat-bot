@@ -1235,7 +1235,8 @@ class SubAgentCoordinator:
         return result
 
     def revise(self, task_id: int, *, scope_key: str, requester_user_id: int, instruction: str,
-               step_keys: Sequence[str], expected_version: int) -> dict[str, Any]:
+               step_keys: Sequence[str], expected_version: int,
+               file_delivery_required: bool | None = None) -> dict[str, Any]:
         task = self.store.get(task_id)
         if task is None or task.scope_key != scope_key or task.requester_user_id != requester_user_id:
             raise ValueError("Cannot revise a task belonging to another user or conversation")
@@ -1243,6 +1244,8 @@ class SubAgentCoordinator:
             raise ValueError("Wait for the running task or cancel it before revising")
         if not instruction.strip() or len(instruction) > 12000:
             raise ValueError("Revision instruction must contain 1-12000 characters")
+        if file_delivery_required is not None and type(file_delivery_required) is not bool:
+            raise ValueError("file_delivery_required must be a boolean")
         control = self.store.control(task_id)
         if not control["dispatch"]:
             raise ValueError("Legacy task has no restart-safe dispatch context; submit a new task")
@@ -1264,6 +1267,11 @@ class SubAgentCoordinator:
             or _repair_target(r.step_key) in selected}
         checkpoint = {"revision": updated["revision"], "instruction": instruction, "steps": sorted(selected),
             "previous_result": task.result, "previous_runs": [{"run_id": r.run_id, "result": r.result, "status": r.status} for r in runs]}
+        plan = dict(task.plan)
+        if file_delivery_required is not None:
+            checkpoint["previous_contract"] = plan.get("contract", {})
+            plan["contract"] = {**plan.get("contract", {}), "delivery_required": file_delivery_required}
+            checkpoint["file_delivery_required"] = file_delivery_required
         with self.store._transaction() as cursor:
             cursor.execute("UPDATE subagent_controls SET version=?, revision=?, dispatch_json=?, updated_at=? WHERE task_id=? AND version=?",
                 (updated["version"], updated["revision"], json.dumps(updated["dispatch"]), int(time.time()), task_id, expected_version))
@@ -1285,8 +1293,8 @@ class SubAgentCoordinator:
                     cursor.execute("""UPDATE subagent_runs SET status='pending', result_json='{}', last_error='',
                         started_at=NULL, finished_at=NULL, objective=? WHERE run_id=?""",
                         (run.objective + "\n[用户追加修订]\n" + instruction, run.run_id))
-            cursor.execute("UPDATE subagent_tasks SET status='queued', cancel_requested=?, objective=?, result_json='{}', last_error='', finished_at=NULL WHERE task_id=?",
-                (False, task.objective + "\n[修订要求]\n" + instruction, task_id))
+            cursor.execute("UPDATE subagent_tasks SET status='queued', cancel_requested=?, objective=?, plan_json=?, result_json='{}', last_error='', finished_at=NULL WHERE task_id=?",
+                (False, task.objective + "\n[修订要求]\n" + instruction, _json_dump(plan), task_id))
             event_sequence = cursor.execute("SELECT COALESCE(MAX(sequence),0)+1 AS next_sequence FROM subagent_events WHERE task_id=?", (task_id,)).fetchone()["next_sequence"]
             cursor.execute("""INSERT INTO subagent_events (task_id, run_id, sequence, event_type, payload_json, created_at)
                 VALUES (?, NULL, ?, 'task.revised', ?, ?)""",
@@ -2088,7 +2096,8 @@ class SubAgentCoordinator:
         )
         final_trace = DeepSeekTrace(trace_id=task.trace_id)
         final_profile = self._profile_for("supervisor", selected_profile)
-        final_input = _synthesis_input(task.objective, completed) + "\n[宿主实际验收与交付状态]\n" + json.dumps({"validation": validation, "deliveries": delivery_results}, ensure_ascii=False)
+        final_input = _synthesis_input(task.objective, completed) + "\n[宿主实际文件验收与附件交付状态]\n" + json.dumps({"validation": validation, "deliveries": delivery_results}, ensure_ascii=False)
+        final_input += "\n上述 deliveries 只表示文件附件，不表示最终文字是否发送。你的回答正文随后由宿主持久消息队列发送；不要声称本文已发出或未发出。附件失败只能说附件失败。"
         final_text = await self._supervisor_text(
             final_input,
             [],
