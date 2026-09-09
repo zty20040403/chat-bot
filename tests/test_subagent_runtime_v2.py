@@ -38,6 +38,7 @@ from src.plugins.ai_chat.subagents import (
     _interrupted_run_ids,
     _repair_with_evidence,
     _synthesis_input,
+    _workflow_runs,
 )
 from src.plugins.ai_chat.deepseek import DeepSeekTrace
 
@@ -130,6 +131,27 @@ class RuntimeV2Tests(unittest.IsolatedAsyncioTestCase):
                 tools=[], execute_tool=AsyncMock(), parent_trace=None, progress=None, hooks=None)
         self.assertEqual(self.store.runs(task.task_id)[0].status, "succeeded")
 
+    async def test_revision_retires_old_repairs_instead_of_skipping_fresh_work(self):
+        task = self.submit()
+        for key in ("baseline", "baseline__repair_1", "acceptance_r1_test", "unrelated"):
+            run = self.store.create_run(task.task_id, TaskStep(key, "operator", key, "facts"),
+                allowed_tools=[], model_profile="qwen-local")
+            self.store.finish_run(run.run_id, "succeeded", result={"status": "success", "summary": key})
+        self.store.set_task_state(task.task_id, "completed")
+        self.coordinator.revise(task.task_id, scope_key=task.scope_key, requester_user_id=2,
+            instruction="重新采样", step_keys=["baseline"], expected_version=1)
+        active = _workflow_runs(self.store.runs(task.task_id))
+        self.assertEqual({r.step_key: r.status for r in active}, {"baseline": "pending", "unrelated": "succeeded"})
+        retired = {r.step_key: r for r in self.store.runs(task.task_id) if r not in active}
+        self.assertEqual(retired["baseline__repair_1"].result["summary"], "baseline__repair_1")
+        self.assertEqual(retired["baseline__repair_1"].status, "skipped")
+        self.assertEqual(retired["acceptance_r1_test"].status, "skipped")
+        with patch.object(self.coordinator, "_execute_workflow", new=AsyncMock(return_value="done")) as execute:
+            await self.coordinator._resume_task(self.store.get(task.task_id), context=self.packet,
+                selected_profile=self.catalog.default, tools=[], execute_tool=AsyncMock(),
+                parent_trace=None, progress=None, hooks=None)
+        self.assertNotIn("baseline", execute.call_args.kwargs["initial_completed"])
+
     async def test_repair_keeps_baseline_evidence_without_reviving_stale_artifacts(self):
         task = self.submit()
         step = TaskStep("baseline", "operator", "检查磁盘和服务", "实际数据")
@@ -154,6 +176,33 @@ class RuntimeV2Tests(unittest.IsolatedAsyncioTestCase):
         _apply_completed_repairs(completed)
         self.assertEqual(len(completed["baseline"].result["previous_evidence"]), 1)
         self.assertTrue(completed["baseline"].succeeded)
+
+    async def test_revision_has_fresh_repair_budget_and_unique_repair_numbers(self):
+        task = self.submit()
+        step = TaskStep("baseline", "operator", "巡检", "数据")
+        run = self.store.create_run(task.task_id, step, allowed_tools=[], model_profile="qwen-local")
+        for number in (1, 2):
+            old = self.store.create_run(task.task_id, TaskStep(f"baseline__repair_{number}", "operator", "old", "facts"),
+                allowed_tools=[], model_profile="qwen-local")
+            self.store.finish_run(old.run_id, "failed", result={"status": "failed"})
+            self.store.append_checkpoint(task.task_id, "adaptive_repair_planned", {"repair_run_id": old.run_id})
+        self.store.set_task_state(task.task_id, "partial")
+        self.coordinator.revise(task.task_id, scope_key=task.scope_key, requester_user_id=2,
+            instruction="重查", step_keys=["baseline"], expected_version=1)
+        self.store.finish_run(run.run_id, "succeeded", result={"status": "success"})
+        baseline = StepOutcome(step, run, {"status": "success"}, DeepSeekTrace(), "success")
+        repaired = StepOutcome(TaskStep("baseline__repair_3", "operator", "补查", "数据"), run,
+            {"status": "success"}, DeepSeekTrace(), "success")
+        with patch.object(self.coordinator, "_validate_workflow", new=AsyncMock(side_effect=[
+                {"status": "failed", "checks": [{"step": "baseline", "ok": False}]}, {"status": "passed"}])), patch.object(
+                self.coordinator, "_attempt_adaptive_repair", new=AsyncMock(return_value=(True, repaired))) as repair, patch.object(
+                self.coordinator, "_deliver_requested_artifacts", new=AsyncMock(return_value=[])), patch.object(
+                self.coordinator, "_supervisor_text", new=AsyncMock(return_value="done")):
+            await self.coordinator._execute_workflow(self.store.get(task.task_id), steps=[], runs={},
+                context=self.packet, selected_profile=self.catalog.default, tools_by_name={}, execute_tool=AsyncMock(),
+                parent_trace=None, progress=None, initial_completed={"baseline": baseline})
+        repair.assert_awaited_once()
+        self.assertEqual(repair.call_args.kwargs["repair_number"], 3)
 
     async def test_resumed_step_sees_latest_upstream_and_own_previous_snapshot(self):
         task = self.submit()

@@ -1251,7 +1251,8 @@ class SubAgentCoordinator:
         if not selected or selected - {r.step_key for r in runs}:
             raise ValueError("Select existing steps to revise")
         while True:
-            expanded = selected | {r.step_key for r in runs if set(r.dependencies) & selected}
+            expanded = selected | {r.step_key for r in runs
+                if set(r.dependencies) & selected or _repair_target(r.step_key) in selected}
             if expanded == selected:
                 break
             selected = expanded
@@ -1259,6 +1260,8 @@ class SubAgentCoordinator:
             raise ValueError("Task version changed; refresh before revising")
         updated = {**control, "version": expected_version + 1, "revision": control["revision"] + 1}
         updated["dispatch"] = {**control["dispatch"], "deadline": int(time.time()) + self.timeout_seconds + 900}
+        retired = {r.step_key for r in runs if r.step_key.startswith("acceptance_r")
+            or _repair_target(r.step_key) in selected}
         checkpoint = {"revision": updated["revision"], "instruction": instruction, "steps": sorted(selected),
             "previous_result": task.result, "previous_runs": [{"run_id": r.run_id, "result": r.result, "status": r.status} for r in runs]}
         with self.store._transaction() as cursor:
@@ -1273,7 +1276,12 @@ class SubAgentCoordinator:
             cursor.execute("""INSERT INTO subagent_checkpoints (task_id, run_id, sequence, phase, state_json, created_at)
                 VALUES (?, NULL, ?, 'revision_requested', ?, ?)""", (task_id, sequence, _json_dump(checkpoint), int(time.time())))
             for run in runs:
-                if run.step_key in selected:
+                if run.step_key in retired:
+                    cursor.execute("""UPDATE subagent_runs SET status='skipped', result_json=?,
+                        last_error='', finished_at=? WHERE run_id=?""",
+                        (_json_dump({**run.result, "metadata": {**run.result.get("metadata", {}),
+                            "superseded_by_revision": updated["revision"]}}), int(time.time()), run.run_id))
+                elif run.step_key in selected:
                     cursor.execute("""UPDATE subagent_runs SET status='pending', result_json='{}', last_error='',
                         started_at=NULL, finished_at=NULL, objective=? WHERE run_id=?""",
                         (run.objective + "\n[用户追加修订]\n" + instruction, run.run_id))
@@ -1839,7 +1847,7 @@ class SubAgentCoordinator:
         progress: ProgressCallback | None,
         hooks: AgentExecutionHooks | None,
     ) -> str:
-        stored_runs = [r for r in self.store.runs(task.task_id) if not r.step_key.startswith("acceptance_r")]
+        stored_runs = _workflow_runs(self.store.runs(task.task_id))
         if not stored_runs:
             self.store.append_event(
                 task.task_id,
@@ -1882,7 +1890,7 @@ class SubAgentCoordinator:
                 {"run_id": run.run_id, "reason": "non_idempotent_side_effect"},
                 run_id=run.run_id,
             )
-        stored_runs = [r for r in self.store.runs(task.task_id) if not r.step_key.startswith("acceptance_r")]
+        stored_runs = _workflow_runs(self.store.runs(task.task_id))
         optional_keys = {s['id'] for s in task.plan.get('steps', []) if s.get('optional')}
         steps = [replace(_step_from_run(run), optional=run.step_key in optional_keys) for run in stored_runs]
         runs = {run.step_key: run for run in stored_runs}
@@ -1983,11 +1991,13 @@ class SubAgentCoordinator:
         delivered_artifacts = _delivered_artifact_keys(
             self.store.checkpoints(task.task_id)
         )
-        adaptive_repairs_used = sum(
-            1
-            for item in self.store.checkpoints(task.task_id)
-            if str(item.get("phase") or "") == "adaptive_repair_planned"
-        )
+        checkpoints = self.store.checkpoints(task.task_id)
+        revision_start = max((index + 1 for index, item in enumerate(checkpoints)
+            if item.get("phase") == "revision_requested"), default=0)
+        adaptive_repairs_used = sum(item.get("phase") == "adaptive_repair_planned"
+            for item in checkpoints[revision_start:])
+        repair_sequence = max((int(match.group(1)) for run in self.store.runs(task.task_id)
+            if (match := re.search(r"__repair_([1-9][0-9]*)$", run.step_key))), default=0)
 
         async def tracked_execute_tool(
             name: str,
@@ -2001,7 +2011,7 @@ class SubAgentCoordinator:
             return raw_result
 
         async def run_ready_step(step: TaskStep) -> tuple[StepOutcome, StepOutcome | None]:
-            nonlocal adaptive_repairs_used
+            nonlocal adaptive_repairs_used, repair_sequence
             outcome = await self._run_step_reliably(
                 task, step, runs[step.key], context=context,
                 upstream={key: completed[key].result for key in step.dependencies},
@@ -2012,12 +2022,14 @@ class SubAgentCoordinator:
             if outcome.state == "failed" and adaptive_repairs_used < self.max_adaptive_repairs:
                 # Reserve before awaiting: concurrent failures share one repair budget.
                 adaptive_repairs_used += 1
+                repair_sequence += 1
+                repair_number = repair_sequence
                 attempted, repair = await self._attempt_adaptive_repair(
                     task, outcome, context=context,
                     completed={**completed, step.key: outcome},
                     selected_profile=selected_profile, tools_by_name=tools_by_name,
                     execute_tool=tracked_execute_tool, parent_trace=parent_trace,
-                    progress=progress, hooks=hooks, repair_number=adaptive_repairs_used,
+                    progress=progress, hooks=hooks, repair_number=repair_number,
                 )
                 if not attempted:
                     adaptive_repairs_used -= 1
@@ -2043,12 +2055,13 @@ class SubAgentCoordinator:
             target_key = next((c.get("step") for c in validation.get("checks", []) if not c.get("ok")), None)
             target = completed.get(target_key) if target_key else next((item for item in reversed(list(completed.values())) if item.usable), None)
             if target is not None:
+                repair_sequence += 1
                 failure = replace(target, state="failed", error="独立验收未通过",
                     result={**target.result, "status": "failed", "warnings": [json.dumps(validation, ensure_ascii=False)]})
                 attempted, repaired = await self._attempt_adaptive_repair(task, failure, context=context,
                     completed=completed, selected_profile=selected_profile, tools_by_name=tools_by_name,
                     execute_tool=tracked_execute_tool, parent_trace=parent_trace, progress=progress,
-                    hooks=hooks, repair_number=adaptive_repairs_used + 1)
+                    hooks=hooks, repair_number=repair_sequence)
                 if repaired is not None and repaired.state == "waiting":
                     raise ExternalPending()
                 if attempted and repaired is not None and repaired.usable:
@@ -3113,6 +3126,11 @@ def _repair_planner_input(goal: str, failed: StepOutcome) -> str:
 def _repair_target(step_key: str) -> str | None:
     match = re.fullmatch(r"(.+)__repair_[1-9][0-9]*", step_key)
     return match.group(1) if match else None
+
+
+def _workflow_runs(runs: Sequence[RunRecord]) -> list[RunRecord]:
+    return [run for run in runs if not run.step_key.startswith("acceptance_r")
+        and not run.result.get("metadata", {}).get("superseded_by_revision")]
 
 
 def _apply_completed_repairs(completed: dict[str, StepOutcome]) -> None:
