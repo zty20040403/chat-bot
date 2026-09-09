@@ -183,6 +183,25 @@ class OpsManagementService:
             raise OpsError("validation_timeout", "Read-only submission checks timed out") from None
         raise AssertionError("Submission validation did not return")
 
+    async def _observe_job(self, record: dict[str, Any], backend_id: str) -> dict[str, Any]:
+        # The hub can briefly reject a status read while reconciling an accepted job.
+        # Only repeat observations of that handle, never the original submission.
+        for attempt in range(3):
+            await self.validate_binding(record)
+            if record["deadline_at"] <= int(time.time()):
+                raise OpsError("observation_deadline", "Job observation deadline expired")
+            try:
+                response = await self.client._request("POST", "/v1/execute",
+                    body=canonical_json({"op": "jobs.status", "params": {"job_id": backend_id}}).encode())
+                if not isinstance(response.data, dict):
+                    raise ValueError("Upstream job observation is not an object")
+                return response.data
+            except OpsError as exc:
+                if exc.code != "invalid_request" or attempt == 2:
+                    raise
+                await asyncio.sleep(2 ** attempt)
+        raise AssertionError("Job observation did not return")
+
     async def run_once(self) -> bool:
         record = await asyncio.to_thread(self.store.claim_managed_operation, self.owner)
         if record is None:
@@ -191,11 +210,10 @@ class OpsManagementService:
         submission_started = bool(backend_id)
         try:
             if backend_id:
-                await self.validate_binding(record)
-                response = await self.client._request("POST", "/v1/execute",
-                    body=canonical_json({"op": "jobs.status", "params": {"job_id": backend_id}}).encode())
-                result = response.data
+                result = await self._observe_job(record, backend_id)
                 handle = result.get("handle", {})
+                if not isinstance(handle, dict) or handle.get("job_id") != backend_id:
+                    raise ValueError("Upstream returned an unrelated job handle")
                 state = handle.get("state")
                 if state not in {"queued", "dispatching", "running", "reconciling", "succeeded", "failed", "cancelled", "timed_out", "outcome_unknown"}:
                     raise ValueError("Upstream returned an unknown job state")

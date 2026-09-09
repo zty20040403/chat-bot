@@ -61,6 +61,8 @@ class ManagementTests(unittest.IsolatedAsyncioTestCase):
         self.state = 'running'
         self.fail_submission = False
         self.fail_poll = False
+        self.poll_errors = []
+        self.response_job_id = 'job_test'
         self.definitions = [{
             'name': name, 'read_only': readonly, 'kind': kind,
             'idempotency': 'none' if readonly else 'required',
@@ -75,9 +77,11 @@ class ManagementTests(unittest.IsolatedAsyncioTestCase):
                 return httpx.Response(200, json={'version': 2, 'operations': self.definitions})
             op = json.loads(request.content)['op']
             if op == 'jobs.status':
+                if self.poll_errors:
+                    return httpx.Response(self.poll_errors.pop(0), json={'error': 'test observation error'})
                 if self.fail_poll:
                     raise httpx.ReadTimeout('unavailable', request=request)
-                return httpx.Response(200, json={'handle': {'job_id': 'job_test', 'revision': 2, 'state': self.state}})
+                return httpx.Response(200, json={'handle': {'job_id': self.response_job_id, 'revision': 2, 'state': self.state}})
             if op == 'jobs.cancel':
                 return httpx.Response(200, json={'handle': {'job_id': 'job_test', 'revision': 3, 'state': 'running'}})
             if op == 'exec.run':
@@ -245,6 +249,91 @@ class ManagementTests(unittest.IsolatedAsyncioTestCase):
         self.state = 'cancelled'
         await self.manager.run_once()
         self.assertEqual(self.store.get_operation(proposal['operation']['operation_id'])['status'], 'cancelled')
+
+    async def test_transient_rejected_receipt_rechecks_same_job_without_resubmission(self):
+        proposal = await self.propose()
+        await self.approve(proposal)
+        await self.manager.run_once()
+        self.poll_errors = [400]
+        self.state = 'succeeded'
+        with patch('src.cluster_control.ops_management.asyncio.sleep', new_callable=AsyncMock):
+            await self.manager.run_once()
+        self.assertEqual(self.store.get_operation(proposal['operation']['operation_id'])['status'], 'succeeded')
+        self.assertEqual(len(self.posts('exec.run')), 1)
+        self.assertEqual(len(self.posts('jobs.status')), 2)
+        self.assertTrue(all(json.loads(r.content)['params'] == {'job_id': 'job_test'}
+                            for r in self.posts('jobs.status')))
+
+    async def test_rejected_receipt_retries_are_bounded_and_do_not_claim_failure(self):
+        proposal = await self.propose()
+        await self.approve(proposal)
+        await self.manager.run_once()
+        self.poll_errors = [400] * 4
+        with patch('src.cluster_control.ops_management.asyncio.sleep', new_callable=AsyncMock):
+            await self.manager.run_once()
+        record = self.store.get_operation(proposal['operation']['operation_id'])
+        self.assertEqual(record['status'], 'needs_attention')
+        self.assertEqual(record['backend_operation_id'], 'job_test')
+        self.assertEqual(len(self.posts('jobs.status')), 3)
+        self.assertEqual(len(self.posts('exec.run')), 1)
+
+    async def test_http_409_observation_recovers_on_each_host_without_reexecution(self):
+        for host in ('h310', 'h610', 'tank'):
+            with self.subTest(host=host):
+                self.calls.clear()
+                proposal = await self.propose(key='receipt-conflict-' + host, host=host)
+                await self.approve(proposal)
+                await self.manager.run_once()
+                self.poll_errors = [409]
+                self.state = 'succeeded'
+                with patch('src.cluster_control.ops_management.asyncio.sleep', new_callable=AsyncMock):
+                    await self.manager.run_once()
+                record = self.store.get_operation(proposal['operation']['operation_id'])
+                self.assertEqual(record['status'], 'succeeded')
+                self.assertEqual(len(self.posts('exec.run')), 1)
+                self.assertEqual(len(self.posts('jobs.status')), 2)
+                self.assertTrue(all(json.loads(request.content)['params'] == {'job_id': 'job_test'}
+                                    for request in self.posts('jobs.status')))
+
+    async def test_receipt_forbidden_is_not_retried(self):
+        proposal = await self.propose()
+        await self.approve(proposal)
+        await self.manager.run_once()
+        self.poll_errors = [403]
+        await self.manager.run_once()
+        self.assertEqual(len(self.posts('jobs.status')), 1)
+        self.assertEqual(self.store.get_operation(proposal['operation']['operation_id'])['status'], 'needs_attention')
+
+    async def test_receipt_cannot_confirm_another_job(self):
+        proposal = await self.propose()
+        await self.approve(proposal)
+        await self.manager.run_once()
+        self.response_job_id = 'unrelated_job'
+        self.state = 'succeeded'
+        await self.manager.run_once()
+        self.assertEqual(self.store.get_operation(proposal['operation']['operation_id'])['status'], 'needs_attention')
+
+    async def test_rechecked_receipt_preserves_actual_job_failure(self):
+        proposal = await self.propose()
+        await self.approve(proposal)
+        await self.manager.run_once()
+        self.poll_errors = [400]
+        self.state = 'failed'
+        with patch('src.cluster_control.ops_management.asyncio.sleep', new_callable=AsyncMock):
+            await self.manager.run_once()
+        self.assertEqual(self.store.get_operation(proposal['operation']['operation_id'])['status'], 'failed')
+        self.assertEqual(len(self.posts('exec.run')), 1)
+
+    async def test_expired_receipt_observation_does_not_poll_or_replay(self):
+        proposal = await self.propose()
+        await self.approve(proposal)
+        await self.manager.run_once()
+        key = proposal['operation']['operation_id']
+        self.store.records[key]['deadline_at'] = int(time.time()) - 1
+        await self.manager.run_once()
+        self.assertFalse(self.posts('jobs.status'))
+        self.assertEqual(len(self.posts('exec.run')), 1)
+        self.assertEqual(self.store.get_operation(key)['status'], 'needs_attention')
 
     async def test_admin_api_fails_closed_without_token(self):
         import nonebot

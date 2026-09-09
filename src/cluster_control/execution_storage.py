@@ -6,6 +6,7 @@ import json
 import os
 import tempfile
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, Callable
 
@@ -457,6 +458,32 @@ class ClusterExecutionStore:
             cursor.close()
             connection.close()
 
+    @staticmethod
+    def _queued_candidates(
+        cursor: Any, *, now: int, worker_id: str, capabilities: set[str]
+    ) -> Iterator[Any]:
+        after: tuple[Any, ...] | None = None
+        while True:
+            boundary = ""
+            parameters: list[Any] = [now, sorted(capabilities), worker_id, worker_id]
+            if after is not None:
+                boundary = "AND (-priority, deadline_at, created_at, job_id) > (?, ?, ?, ?)"
+                parameters.extend(after)
+            rows = cursor.execute(
+                f"""SELECT * FROM fleet_worker_jobs
+                    WHERE status = 'queued' AND deadline_at > ? AND kind = ANY(?)
+                      AND COALESCE(NULLIF(constraints_json::jsonb ->> 'worker_id', ''), ?) = ?
+                      {boundary}
+                    ORDER BY priority DESC, deadline_at, created_at, job_id
+                    FOR UPDATE SKIP LOCKED LIMIT 50""",
+                parameters,
+            ).fetchall()
+            if not rows:
+                return
+            yield from rows
+            last = rows[-1]
+            after = (-int(last["priority"]), last["deadline_at"], last["created_at"], last["job_id"])
+
     def claim_job(
         self, worker_id: str, *, host: dict[str, Any] | None = None,
         lease_seconds: int = 60,
@@ -592,20 +619,15 @@ class ClusterExecutionStore:
                     for field in usage:
                         usage[field] += int(reservation[field] or 0)
             capabilities = set(_decode(worker["capabilities_json"], []))
-            rows = cursor.execute(
-                """SELECT * FROM fleet_worker_jobs
-                   WHERE status = 'queued' AND deadline_at > ?
-                   ORDER BY priority DESC, deadline_at, created_at, job_id
-                   FOR UPDATE SKIP LOCKED LIMIT 50""",
-                (now,),
-            ).fetchall()
+            capacity = _decode(worker["capacity_json"], {})
+            rows = self._queued_candidates(
+                cursor, now=now, worker_id=worker_id, capabilities=capabilities
+            )
             chosen = None
             chosen_request: ResourceRequest | None = None
             chosen_grant = None
             host_policy = host or {"site": "", "gpu_compute": False}
             for row in rows:
-                if row["kind"] not in capabilities:
-                    continue
                 request = ResourceRequest.parse(_decode(row["constraints_json"], {}))
                 external_borrow = (
                     str(row["actor_id"]) != str(policy["owner_actor_id"])
@@ -641,6 +663,20 @@ class ClusterExecutionStore:
                         else None
                     ),
                 )
+                if not reason:
+                    # A job that does not fit must not block smaller jobs behind it.
+                    for field, limit_field in (
+                        ("cpu_millis", "cpu_limit_millis"),
+                        ("memory_bytes", "memory_limit_bytes"),
+                        ("gpu_slots", "gpu_limit_slots"),
+                    ):
+                        required = active_totals[field] + getattr(request, field)
+                        if required > int(capacity.get(field, 0)):
+                            reason = f"worker_{field}_capacity"
+                            break
+                        if required > int(policy[limit_field]):
+                            reason = f"owner_{field}_capacity"
+                            break
                 if reason:
                     cursor.execute(
                         "UPDATE fleet_worker_jobs SET scheduler_reason = ?, updated_at = ? WHERE job_id = ?",
@@ -658,21 +694,6 @@ class ClusterExecutionStore:
             cpu = chosen_request.cpu_millis
             memory = chosen_request.memory_bytes
             gpu = chosen_request.gpu_slots
-            capacity = _decode(worker["capacity_json"], {})
-            if (
-                active_totals["cpu_millis"] + cpu > int(capacity.get("cpu_millis", 0))
-                or active_totals["memory_bytes"] + memory > int(capacity.get("memory_bytes", 0))
-                or active_totals["gpu_slots"] + gpu > int(capacity.get("gpu_slots", 0))
-            ):
-                connection.commit()
-                return None
-            if policy is not None and (
-                active_totals["cpu_millis"] + cpu > int(policy["cpu_limit_millis"])
-                or active_totals["memory_bytes"] + memory > int(policy["memory_limit_bytes"])
-                or active_totals["gpu_slots"] + gpu > int(policy["gpu_limit_slots"])
-            ):
-                connection.commit()
-                return None
             fence = int(chosen["fence"]) + 1
             lease_at = min(now + min(max(lease_seconds, 15), 300), int(chosen["deadline_at"]))
             grant_id = str(chosen_grant["grant_id"]) if chosen_grant else None
