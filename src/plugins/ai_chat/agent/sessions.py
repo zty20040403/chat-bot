@@ -56,12 +56,12 @@ class AgentSessionStoreMixin:
 READ_AGENT_RESULT = {
     "type": "function", "function": {
         "name": "read_agent_result",
-        "description": "分页读取此步骤直接依赖的上游完整结果。只允许当前任务已交接的 step_id，不可读其他会话。",
+        "description": "分页读取此步骤直接依赖的上游完整结果。previous_evidence 是补查前的历史观测，冲突以新结果为准；不代表旧产物仍可交付。只允许当前任务已交接的 step_id，不可读其他会话。",
         "parameters": {
             "type": "object", "additionalProperties": False,
             "properties": {
                 "step_id": {"type": "string"},
-                "section": {"type": "string", "enum": ["summary", "facts", "artifacts", "citations", "warnings", "unresolved", "handoff"]},
+                "section": {"type": "string", "enum": ["summary", "facts", "artifacts", "citations", "warnings", "unresolved", "handoff", "previous_evidence"]},
                 "offset": {"type": "integer", "minimum": 0},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 20},
             },
@@ -73,7 +73,7 @@ READ_AGENT_RESULT = {
 
 def read_upstream_result(upstream, arguments) -> str:
     key, section = str(arguments.get("step_id", "")), str(arguments.get("section", ""))
-    if key not in upstream or section not in {"summary", "facts", "artifacts", "citations", "warnings", "unresolved", "handoff"}:
+    if key not in upstream or section not in {"summary", "facts", "artifacts", "citations", "warnings", "unresolved", "handoff", "previous_evidence"}:
         return json.dumps({"ok": False, "error": "No authorized upstream result or section"})
     value = upstream[key].get(section, "" if section == "summary" else [])
     offset = max(int(arguments.get("offset", 0)), 0)
@@ -90,6 +90,6 @@ def read_upstream_result(upstream, arguments) -> str:
 def upstream_index(upstream) -> str:
     return json.dumps({key: {
         "status": result.get("status", "partial"), "summary": str(result.get("summary", ""))[:160],
-        "sections": {field: len(result.get(field) or []) for field in ("facts", "artifacts", "citations", "unresolved", "handoff")},
+        "sections": {field: len(result.get(field) or []) for field in ("facts", "artifacts", "citations", "unresolved", "handoff", "previous_evidence")},
         "read_with": "read_agent_result", "step_id": key,
     } for key, result in upstream.items()}, ensure_ascii=False, separators=(",", ":"))

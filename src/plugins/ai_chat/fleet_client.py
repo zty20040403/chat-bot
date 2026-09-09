@@ -13,6 +13,7 @@ import httpx
 from src.bot_security.service import MobileAuthorization
 from src.bot_security.store import SecurityError
 from .fleet_authorization import FleetAuthorization
+from .fleet_output import project_jobs_logs, request_error_message
 from .agent.external import active_external
 
 
@@ -174,7 +175,10 @@ class FleetControlClient:
                 if response.status_code >= 400:
                     raise FleetControlError(
                         "invalid_request",
-                        f"Fleet control returned HTTP {response.status_code}",
+                        request_error_message(
+                            response.status_code, b"".join(chunks), payload=payload,
+                            secrets=(token, headers.get("X-KC-Signature", "")),
+                        ),
                     )
                 raw = b"".join(chunks)
         except FleetControlError:
@@ -190,16 +194,24 @@ class FleetControlClient:
                 retryable=True,
             ) from exc
         try:
-            payload = json.loads(raw)
+            result = json.loads(raw)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise FleetControlError(
                 "invalid_response", "Fleet control returned invalid JSON"
             ) from exc
-        if not isinstance(payload, dict):
+        if not isinstance(result, dict):
             raise FleetControlError(
                 "invalid_response", "Fleet control returned an invalid object"
             )
-        return payload
+        if method == "POST" and path == "/v1/ops/call":
+            try:
+                return project_jobs_logs(
+                    result, payload=payload,
+                    secrets=(token, headers.get("X-KC-Signature", "")),
+                )
+            except ValueError as exc:
+                raise FleetControlError("invalid_response", str(exc)) from None
+        return result
 
     async def _get(self, path: str) -> dict[str, Any]:
         return await self._request("GET", path)

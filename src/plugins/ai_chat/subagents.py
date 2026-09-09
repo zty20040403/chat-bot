@@ -1279,7 +1279,11 @@ class SubAgentCoordinator:
                         (run.objective + "\n[用户追加修订]\n" + instruction, run.run_id))
             cursor.execute("UPDATE subagent_tasks SET status='queued', cancel_requested=?, objective=?, result_json='{}', last_error='', finished_at=NULL WHERE task_id=?",
                 (False, task.objective + "\n[修订要求]\n" + instruction, task_id))
-        self.store.append_event(task_id, "task.revised", {"revision": updated["revision"], "steps": sorted(selected)})
+            event_sequence = cursor.execute("SELECT COALESCE(MAX(sequence),0)+1 AS next_sequence FROM subagent_events WHERE task_id=?", (task_id,)).fetchone()["next_sequence"]
+            cursor.execute("""INSERT INTO subagent_events (task_id, run_id, sequence, event_type, payload_json, created_at)
+                VALUES (?, NULL, ?, 'task.revised', ?, ?)""",
+                (task_id, event_sequence, _json_dump({"revision": updated["revision"], "steps": sorted(selected)}), int(time.time())))
+        self.store._notify_changed(task_id)
         if self.dispatcher:
             self.dispatcher.enqueue(task_id)
         return updated
@@ -1857,7 +1861,8 @@ class SubAgentCoordinator:
             )
         interrupted_ids = _interrupted_run_ids(self.store.checkpoints(task.task_id))
         for run in self.store.runs(task.task_id):
-            if run.run_id not in interrupted_ids or self.store.run_resume_safe(run.run_id):
+            if (run.status not in {"pending", "running", "interrupted", "waiting_external"}
+                    or run.run_id not in interrupted_ids or self.store.run_resume_safe(run.run_id)):
                 continue
             error = "进程中断前已发生不可安全重复的副作用，结果未知，已阻止自动续跑。"
             result = {
@@ -2047,6 +2052,7 @@ class SubAgentCoordinator:
                 if repaired is not None and repaired.state == "waiting":
                     raise ExternalPending()
                 if attempted and repaired is not None and repaired.usable:
+                    repaired = _repair_with_evidence(target, repaired)
                     completed[target.step.key] = repaired
                     completed[repaired.step.key] = repaired
                     validation = await self._validate_workflow(task, completed, context=context,
@@ -2244,9 +2250,12 @@ class SubAgentCoordinator:
                 completed[outcome.step.key] = outcome
                 repaired_step = _repair_target(outcome.step.key)
                 if repaired_step and outcome.usable:
+                    outcome = _repair_with_evidence(completed.get(repaired_step), outcome)
+                    completed[outcome.step.key] = outcome
                     completed[repaired_step] = outcome
                 _merge_trace(parent_trace, outcome.trace)
                 if repair is not None:
+                    repair = _repair_with_evidence(outcome, repair)
                     completed[repair.step.key] = repair
                     if repair.usable:
                         completed[outcome.step.key] = repair
@@ -3045,6 +3054,7 @@ status 只评价你被分配的步骤和本步骤交付标准，不评价整个�
 本步骤完整交付时必须返回 success，即使后续 Agent 尚未工作或文件尚未发送。
 unresolved 只填写本步骤交付标准中仍未完成的缺口；需要后续步骤继续做的事项写入 handoff。
 需要完整上游数据时根据结果索引调用 read_agent_result 分页读取，不猜测被省略的内容。
+索引含 previous_evidence 时，读取补查前的观测以保留其他维度的数据；冲突以新观测为准，旧状态不能当成当前状态，旧产物不能当成当前交付物。
 文件分别放在此步骤指定的工作目录。每个步骤有独立容器；通过 import_agent_artifact 导入上游快照，复制到自己的工作目录再修改。
 不要自行发送文件。交付物在 artifacts 返回 s123abc:/workspace/path.ext 格式的真实沙盒句柄，宿主独立验收后发送。
 工具执行结果是事实来源；工具失败时如实记录。完成后只输出一个 JSON 对象：
@@ -3109,7 +3119,29 @@ def _apply_completed_repairs(completed: dict[str, StepOutcome]) -> None:
     for key, outcome in tuple(completed.items()):
         target = _repair_target(key)
         if target and outcome.usable:
+            outcome = _repair_with_evidence(completed.get(target), outcome)
+            completed[key] = outcome
             completed[target] = outcome
+
+
+def _repair_with_evidence(previous: StepOutcome | None, repair: StepOutcome) -> StepOutcome:
+    """Keep earlier observations available without promoting obsolete facts or artifacts."""
+    if previous is None or previous.run.run_id == repair.run.run_id:
+        return repair
+    evidence = list(previous.result.get("previous_evidence") or [])
+    evidence.extend(repair.result.get("previous_evidence") or [])
+    evidence.append({
+        "run_id": previous.run.run_id,
+        "step_id": previous.step.key,
+        "sample_finished_at": previous.run.finished_at,
+        "superseded_by": repair.step.key,
+        "summary": previous.result.get("summary", ""),
+        "facts": previous.result.get("facts", []),
+        "warnings": previous.result.get("warnings", []),
+        "unresolved": previous.result.get("unresolved", []),
+    })
+    evidence = list({item["run_id"]: item for item in evidence}.values())
+    return replace(repair, result={**repair.result, "previous_evidence": evidence})
 
 
 def _checkpoint_context_packet(

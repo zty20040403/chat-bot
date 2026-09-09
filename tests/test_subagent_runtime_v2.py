@@ -20,6 +20,7 @@ from src.plugins.ai_chat.agent.workspaces import (
     StepWorkspaces,
     prune_acknowledged_artifacts,
 )
+from src.plugins.ai_chat.agent.sessions import read_upstream_result, upstream_index
 from src.plugins.ai_chat.agent_tools import AgentToolExecutor
 from src.plugins.ai_chat.llm_gateway import LLMGateway
 from src.plugins.ai_chat.model_catalog import ModelCatalog
@@ -33,6 +34,10 @@ from src.plugins.ai_chat.subagents import (
     _delivery_outcomes,
     _only_deferred_delivery_unresolved,
     _settled_task_status,
+    _apply_completed_repairs,
+    _interrupted_run_ids,
+    _repair_with_evidence,
+    _synthesis_input,
 )
 from src.plugins.ai_chat.deepseek import DeepSeekTrace
 
@@ -92,6 +97,63 @@ class RuntimeV2Tests(unittest.IsolatedAsyncioTestCase):
         finally:
             active_job_fence.reset(token)
         self.assertEqual(self.store.get(task.task_id).status, "queued")
+
+    async def test_revision_resume_guard_only_checks_new_selected_execution(self):
+        task = self.submit()
+        runs = [self.store.create_run(task.task_id, TaskStep(key, "operator", key, "facts"),
+            allowed_tools=[], model_profile="qwen-local") for key in ("disk", "other")]
+        for run in runs:
+            self.store.append_event(task.task_id, "agent.tool_started",
+                {"idempotency": "keyed", "call_id": "old", "tool_name": "ops_call"}, run_id=run.run_id)
+            self.store.finish_run(run.run_id, "failed", result={"status": "failed"})
+        self.store.append_checkpoint(task.task_id, "process_interrupted", {"interrupted_runs": [runs[0].run_id]})
+        self.store.set_task_state(task.task_id, "partial")
+        self.coordinator.revise(task.task_id, scope_key=task.scope_key, requester_user_id=2,
+            instruction="重新只读采样", step_keys=["disk"], expected_version=1)
+        self.assertEqual(_interrupted_run_ids(self.store.checkpoints(task.task_id)), {runs[0].run_id})
+        self.assertTrue(self.store.run_resume_safe(runs[0].run_id))
+        self.assertFalse(self.store.run_resume_safe(runs[1].run_id))
+        self.store.append_event(task.task_id, "agent.tool_started",
+            {"idempotency": "keyed", "call_id": "new", "tool_name": "ops_call"}, run_id=runs[0].run_id)
+        self.assertFalse(self.store.run_resume_safe(runs[0].run_id), "New unconfirmed side effects must still block")
+        self.store.interrupt_task(task.task_id)
+
+    async def test_another_wait_does_not_demote_a_completed_step(self):
+        task = self.submit()
+        run = self.store.create_run(task.task_id, TaskStep("disk", "operator", "disk", "facts"),
+            allowed_tools=[], model_profile="qwen-local")
+        self.store.append_checkpoint(task.task_id, "process_interrupted", {"interrupted_runs": [run.run_id]})
+        self.store.finish_run(run.run_id, "succeeded", result={"status": "success", "facts": ["64%"]})
+        with patch.object(self.store, "run_resume_safe", return_value=False), patch.object(
+                self.coordinator, "_execute_workflow", new=AsyncMock(return_value="done")):
+            await self.coordinator._resume_task(task, context=self.packet, selected_profile=self.catalog.default,
+                tools=[], execute_tool=AsyncMock(), parent_trace=None, progress=None, hooks=None)
+        self.assertEqual(self.store.runs(task.task_id)[0].status, "succeeded")
+
+    async def test_repair_keeps_baseline_evidence_without_reviving_stale_artifacts(self):
+        task = self.submit()
+        step = TaskStep("baseline", "operator", "检查磁盘和服务", "实际数据")
+        repair_step = TaskStep("baseline__repair_1", "operator", "补查失败服务", "服务状态")
+        run = self.store.create_run(task.task_id, step, allowed_tools=[], model_profile="qwen-local")
+        repaired_run = self.store.create_run(task.task_id, repair_step, allowed_tools=[], model_profile="qwen-local")
+        baseline = StepOutcome(step, run, {"status": "success", "summary": "磁盘已用282GiB；0失败服务",
+            "facts": ["/nix/store 66GiB", "较早采样0个失败服务"], "artifacts": [{"handle": "old-artifact"}]}, DeepSeekTrace(), "success")
+        repair = StepOutcome(repair_step, repaired_run, {"status": "success", "summary": "最新2个失败服务",
+            "facts": ["当前2个失败服务"], "artifacts": []}, DeepSeekTrace(), "success")
+        combined = _repair_with_evidence(baseline, repair)
+        self.assertEqual(combined.result["facts"], ["当前2个失败服务"])
+        self.assertEqual(combined.result["artifacts"], [])
+        self.assertIn("/nix/store 66GiB", combined.result["previous_evidence"][0]["facts"])
+        upstream = {"baseline": combined.result}
+        self.assertIn("previous_evidence", upstream_index(upstream))
+        response = json.loads(read_upstream_result(upstream, {"step_id": "baseline", "section": "previous_evidence"}))
+        self.assertEqual(response["total"], 1)
+        self.assertIn("/nix/store 66GiB", _synthesis_input("巡检", {"baseline": combined}))
+        completed = {"baseline": baseline, "baseline__repair_1": repair}
+        _apply_completed_repairs(completed)
+        _apply_completed_repairs(completed)
+        self.assertEqual(len(completed["baseline"].result["previous_evidence"]), 1)
+        self.assertTrue(completed["baseline"].succeeded)
 
     async def test_resumed_step_sees_latest_upstream_and_own_previous_snapshot(self):
         task = self.submit()

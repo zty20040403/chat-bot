@@ -54,7 +54,13 @@ CREATE TABLE IF NOT EXISTS subagent_deliveries (
 class TaskControlStoreMixin:
     def run_resume_safe(self, run_id: int) -> bool:
         with self._lock:
-            events = self._connection.execute("SELECT sequence, event_type, payload_json FROM subagent_events WHERE run_id=? AND event_type IN ('agent.tool_started','agent.tool_finished') ORDER BY sequence", (run_id,)).fetchall()
+            revisions = self._connection.execute("""SELECT e.sequence, e.payload_json, r.step_key
+                FROM subagent_events e JOIN subagent_runs r ON r.task_id=e.task_id
+                WHERE r.run_id=? AND e.event_type='task.revised' ORDER BY e.sequence DESC""", (run_id,)).fetchall()
+            # An explicit revision is a new execution attempt for selected steps only.
+            boundary = next((int(row["sequence"]) for row in revisions
+                if row["step_key"] in json.loads(row["payload_json"]).get("steps", [])), 0)
+            events = self._connection.execute("SELECT sequence, event_type, payload_json FROM subagent_events WHERE run_id=? AND sequence>? AND event_type IN ('agent.tool_started','agent.tool_finished') ORDER BY sequence", (run_id, boundary)).fetchall()
             session = self._connection.execute("SELECT transcript_json, covered_sequence FROM subagent_sessions WHERE run_id=?", (run_id,)).fetchone()
             durable = self._connection.execute("""SELECT e.call_id, e.request_json, e.response_json FROM subagent_external_calls e
                 JOIN subagent_controls c ON c.task_id=e.task_id AND c.revision=e.revision
