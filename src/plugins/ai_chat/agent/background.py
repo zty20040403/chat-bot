@@ -112,6 +112,11 @@ class SubAgentDispatcher:
                         await self.reconcile(task_id)
                     except Exception as exc:
                         self.context.logger.warning("Sub-Agent delivery reconciliation failed for task#%s: %s", task_id, type(exc).__name__)
+                for task_id in await asyncio.to_thread(self.store.unsettled_file_receipts):
+                    try:
+                        await asyncio.to_thread(self.settle_file_receipts, task_id)
+                    except Exception as exc:
+                        self.context.logger.warning(f"task#{task_id} file receipt settlement deferred: {type(exc).__name__}")
                 now = time.time()
                 if now >= next_message_reconcile:
                     try:
@@ -221,6 +226,8 @@ class SubAgentDispatcher:
             updated = {**payload, "ok": bool(found), "reconciled": bool(found)}
             if found:
                 updated["file_id"] = found.get("file_id")
+                updated.update(state="acknowledged", error="",
+                    receipt={"ok": True, "reconciled": True, "file_id": found.get("file_id")})
                 matched += 1
             self.store.finish_delivery(task_id, delivery["key"], "acknowledged" if found else "unknown", updated,
                                        revision=delivery["revision"])
@@ -256,6 +263,35 @@ class SubAgentDispatcher:
                         },
                     )
         return {"matched": matched}
+
+    def settle_file_receipts(self, task_id: int):
+        control = self.store.control(task_id)
+        task = self.store.get(task_id)
+        event = self.restore_event(control["dispatch"])
+        if scope_from_event(event).key != task.scope_key or event.user_id != task.requester_user_id:
+            raise ValueError("File receipt envelope does not match the task owner")
+        summary = self.store.sync_file_receipt_summary(task_id, control["revision"])
+        if summary is None:
+            return None
+        delivery = None
+        if summary["notice_needed"]:
+            outbox = getattr(self.context, "delivery_store", None)
+            if outbox is None:
+                return None
+            names = [str(item.get("filename") or "文件") for item in summary["confirmed"]]
+            text = (f"{task.handle}（第 {control['revision']} 版）文件回执更新："
+                f"QQ 群文件已确认收到 {len(names)} 个文件，无需重复上传。\n"
+                + "\n".join(names[:5]) + "\n其他未完成事项仍以原报告为准。")
+            body = decode_onebot_message(Message(MessageSegment.text(text))).body
+            delivery, _ = outbox.enqueue(
+                idempotency_key=f"subagent-final:{task_id}:{control['revision']}:file-receipts",
+                source_scope_key=task.scope_key, source_canonical_message_id=task.trigger_message_id,
+                target_scope=scope_from_event(event), body=body,
+                reply_to_native_message_id=str(event.message_id))
+        # Persist this marker after enqueue; a crash between them repeats the same outbox key.
+        self.store.append_checkpoint(task_id, f"artifact_receipts_settled:{control['revision']}",
+            {"revision": control["revision"], "delivery_id": delivery.delivery_id if delivery else None})
+        return delivery
 
     async def execute(self, job):
         task_id = int(job.payload["task_id"])

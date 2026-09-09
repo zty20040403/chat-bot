@@ -190,3 +190,61 @@ class TaskControlStoreMixin:
         with self._lock:
             rows = self._connection.execute("SELECT DISTINCT task_id FROM subagent_deliveries WHERE state IN ('unknown','sending') AND updated_at<? LIMIT 10", (int(time.time()) - 60,)).fetchall()
         return [int(row["task_id"]) for row in rows]
+
+    def unsettled_file_receipts(self) -> list[int]:
+        with self._lock:
+            rows = self._connection.execute("""SELECT t.task_id FROM subagent_tasks t
+                JOIN subagent_controls c ON c.task_id=t.task_id
+                WHERE t.status IN ('completed','partial','failed','cancelled') AND c.dispatch_json <> '{}'
+                  AND EXISTS (SELECT 1 FROM subagent_deliveries d WHERE d.task_id=t.task_id
+                    AND d.revision=c.revision AND d.state='acknowledged')
+                  AND NOT EXISTS (SELECT 1 FROM subagent_deliveries d WHERE d.task_id=t.task_id
+                    AND d.revision=c.revision AND d.state <> 'acknowledged')
+                  AND NOT EXISTS (SELECT 1 FROM subagent_checkpoints p WHERE p.task_id=t.task_id
+                    AND p.phase='artifact_receipts_settled:' || CAST(c.revision AS TEXT))
+                ORDER BY t.updated_at LIMIT 100""").fetchall()
+        return [int(row["task_id"]) for row in rows]
+
+    def sync_file_receipt_summary(self, task_id: int, revision: int) -> dict[str, Any] | None:
+        with self._transaction() as cursor:
+            lock = "" if self._legacy_sqlite else " FOR UPDATE"
+            row = cursor.execute("""SELECT t.* FROM subagent_tasks t JOIN subagent_controls c ON c.task_id=t.task_id
+                WHERE t.task_id=? AND c.revision=?
+                AND t.status IN ('completed','partial','failed','cancelled')""" + lock, (task_id, revision)).fetchone()
+            if row is None:
+                return None
+            deliveries = cursor.execute("SELECT * FROM subagent_deliveries WHERE task_id=? AND revision=? ORDER BY delivery_key",
+                (task_id, revision)).fetchall()
+            if not deliveries or any(d["state"] != "acknowledged" for d in deliveries):
+                return None
+            result = json.loads(row["result_json"])
+            receipts = []
+            for delivery in deliveries:
+                payload = json.loads(delivery["payload_json"])
+                receipt = payload.get("receipt") or {}
+                payload.update(ok=True, state="acknowledged", error="", receipt={
+                    **receipt, "ok": True, "error": "",
+                    "file_id": payload.get("file_id") or receipt.get("file_id")})
+                cursor.execute("""UPDATE subagent_deliveries SET payload_json=?
+                    WHERE task_id=? AND revision=? AND delivery_key=?""",
+                    (json.dumps(payload, ensure_ascii=False), task_id, revision, delivery["delivery_key"]))
+                receipts.append(payload)
+            by_file = {(d.get("filename"), d.get("handle")): d for d in receipts}
+            previous = result.get("deliveries", [])
+            updated = [by_file.get((item.get("filename"), item.get("handle")), item) for item in previous]
+            all_confirmed = bool(updated) and all(item.get("ok") is True for item in updated)
+            result["deliveries"] = updated
+            result["delivery_state"] = "acknowledged" if all_confirmed else "failed_or_unknown"
+            notice_needed = result.get("file_receipts", {}).get("notice_needed", False) or any(
+                old.get("ok") is not True and new.get("ok") is True for old, new in zip(previous, updated))
+            result["file_receipts"] = {"revision": revision, "confirmed": receipts,
+                "notice_needed": bool(notice_needed)}
+            status = row["status"]
+            acceptance = result.get("validation", {}).get("acceptance")
+            if (status == "partial" and all_confirmed and result.get("execution_state") == "succeeded"
+                    and isinstance(acceptance, dict) and acceptance.get("status") == "passed"):
+                status = "completed"
+            cursor.execute("UPDATE subagent_tasks SET result_json=?, status=?, updated_at=? WHERE task_id=?",
+                (json.dumps(result, ensure_ascii=False), status, int(time.time()), task_id))
+        self._notify_changed(task_id)
+        return result["file_receipts"]
