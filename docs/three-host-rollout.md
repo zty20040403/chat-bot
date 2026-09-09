@@ -42,8 +42,31 @@ Example: call `fleet_overview`, then submit `probe.http` with
 Use `cluster_job_status` to verify the actual assigned Worker and receipt.
 23 focused tests passed on the exact staged snapshot, covering the model-tool
 callback, control validation, freshness, owner draining and existing execution
-boundaries. Live publication of this follow-up is tracked separately from the
-preceding `e175de0` release below.
+boundaries. The follow-up was committed as `69b9099`, with Nix input update
+`2c951e3`. All 17 host configurations evaluated for that isolated Nix snapshot.
+
+At 12:48 CST on 2026-09-09, a concurrent account-security rollout had already
+activated Bot 0.20.0 on h610. Read-only inspection of the installed package
+confirmed the Worker overview, tool parameter and exact-target validation were
+present. This audit did not switch the older snapshot over that newer rollout.
+The observed running system was
+`/nix/store/n4l9v7jff4xg0lazajv304hz1lhckhra-nixos-system-h610-26.05.20260622.3426825`.
+All three Worker heartbeats were fresh, owner policies were `available` at
+resource version 1, and Bot/control/Worker services were active. QQ alert
+notifications remained disabled.
+
+The proposed live cross-worker receipt-failure injection did **not** execute:
+execution approval rejected the underspecified authorization. No availability
+policy changed and no fault directory was created. A subsequent ordinary probe
+attempt stopped before submission because the concurrent security release had
+removed the legacy admin token. Read-only control API verification found neither
+test prefix (`p5-live-transfer-20260909-v1` or `p5-worker-selector-20260909-`)
+in the recent jobs, and no nonterminal job in that 100-row window. Do not treat
+this as a live handoff or end-to-end QQ tool-call pass.
+
+New management writes must use the account/private-QQ approval flow. Do not
+reuse old admin-token scripts, bypass mobile approval with a machine credential,
+or infer that the historical bounded guardian checks authorize a new action.
 
 Bot release `e175de051e7d47411b86834056099e5cfa3728e9` includes the queue and
 receipt fixes plus the previously committed independent QQ alert switch.
