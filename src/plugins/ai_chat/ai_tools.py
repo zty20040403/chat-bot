@@ -92,7 +92,7 @@ OPS_CALL_TOOL: ToolDefinition = {
     "type": "function",
     "function": {
         "name": OPS_CALL_TOOL_NAME,
-        "description": "仅管理员可用的 MaxOps 接口，参数必须来自 ops_catalog。只读操作直接返回；任何写操作只创建待批准请求，不会立即执行。将 operation_id 和准确目标、参数告诉管理员，到控制台批准。之后用 operation_status 查询。不要声称待批准等于成功，不得用沙盒绕过批准或自行批准。",
+        "description": "仅管理员可用的 MaxOps 接口，参数必须来自 ops_catalog。只读直接返回；重要服务器写操作由宿主申请本任务统一授权，确认后自动提交，所有子任务共享且不再逐条确认。用 operation_status 查询最终结果；排队不等于成功。模型不能自行授权或用沙盒绕过服务器权限。",
         "parameters": {"type": "object", "properties": {
             "operation": {"type": "string"},
             "params": {"type": "object", "description": "严格符合目录 schema 的参数。"},
@@ -323,7 +323,8 @@ OPERATION_PREPARE_TOOL: ToolDefinition = {
     "function": {
         "name": OPERATION_PREPARE_TOOL_NAME,
         "description": (
-            "准备一项受控服务器服务操作，只生成绑定当前真实用户的合同和审批状态。"
+            "准备受控服务器服务操作，宿主按真实任务申请一次统一授权，确认后自动提交。"
+            "本任务已有授权时不再逐项确认，需用 operation_status 核对最终状态。"
             "仅支持已登记 systemd 服务的 start/stop/restart；未接入唯一写后端时会明确"
             "返回 not_configured，不得改用 shell 或 SSH 兜底，也不能声称已经执行。"
         ),

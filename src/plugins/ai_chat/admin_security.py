@@ -110,18 +110,8 @@ def secure_route(mobile: MobileAuthorization | None, *, prefix: str, origin: str
                                 body = json.loads(body_bytes) if body_bytes else None
                             except (ValueError, UnicodeError):
                                 raise SecurityError("操作参数必须是 JSON", 400) from None
-                            payload = {"method": request.method, "path": suffix, "query": request.url.query,
-                                       "if_match": request.headers.get("if-match", ""), "body": body}
-                            sandbox_action = (request.method == "POST" and
-                                re.fullmatch(r"/sandboxes/s[0-9a-f]{6}/action", suffix) is not None)
-                            # Sandbox actions keep admin authentication, CSRF, versioning
-                            # and audit, but do not require another phone challenge.
-                            # Preparations may query remote state, but never grant execution.
-                            # They are processed by the route and its fleet adapter first.
-                            if not sandbox_action and suffix not in {"/fleet/ops/call", "/fleet/operations", "/fleet/deployments", "/fleet/runbook-cases/search", "/fleet/diagnostics"}:
-                                result = await mobile.propose(require_admin(), kind="http", payload=payload,
-                                    summary=await mutation_summary(mobile, payload))
-                                return JSONResponse(result, status_code=202, headers={"Cache-Control": "no-store"})
+                            # The authenticated admin's click is the authorization.
+                            # Resource handlers still enforce versions and write audits.
                     response = await original(request)
                     response.headers["Cache-Control"] = "no-store"
                     return response
@@ -205,10 +195,9 @@ def register_security_routes(router: APIRouter, mobile: MobileAuthorization | No
         username = body.username.strip().lower()
         configured().store.validate_account(username, body.role, body.qq_id)
         encoded = await asyncio.to_thread(hash_password, body.password)
-        result = await configured().propose(account, kind="account",
-            payload={"action": "create", "username": username, "password_hash": encoded, "role": body.role, "qq_id": body.qq_id},
-            summary=f"创建账户：{username}\n角色：{body.role}\n绑定 QQ：{body.qq_id or '无'}\n密码：已设置（不在消息中显示）")
-        return JSONResponse(result, status_code=202)
+        result = await asyncio.to_thread(configured().store.apply_account_change, account,
+            {"action": "create", "username": username, "password_hash": encoded, "role": body.role, "qq_id": body.qq_id})
+        return {"ok": True, "account": result}
 
     @router.put("/api/accounts/{account_id}")
     async def update_account(account_id: str, body: AccountUpdate):
@@ -217,20 +206,17 @@ def register_security_routes(router: APIRouter, mobile: MobileAuthorization | No
         password = changes.pop("password", None)
         if any(changes.get(key, "absent") is None for key in ("role", "enabled")):
             raise SecurityError("角色和启用状态不能为空", 400)
-        safe_changes = dict(changes)
         if password:
             changes["password_hash"] = await asyncio.to_thread(hash_password, password)
-            safe_changes["password"] = "重设密码（不在消息中显示）"
         if not changes:
             raise SecurityError("没有账户变更", 400)
         target = next((item for item in await asyncio.to_thread(configured().store.accounts) if item["account_id"] == account_id), None)
         if not target:
             raise SecurityError("账户不存在", 404)
         configured().store.validate_account(target["username"], changes.get("role", target["role"]), changes.get("qq_id", target["qq_id"]))
-        result = await configured().propose(account, kind="account",
-            payload={"action": "update", "account_id": account_id, "expected_version": body.expected_version, "changes": changes},
-            summary=f"修改账户：{target['username']}\n原角色：{target['role']}\n原 QQ：{target['qq_id'] or '无'}\n变更：{canonical(safe_changes)}\n将撤销该账户所有登录和未执行批准。")
-        return JSONResponse(result, status_code=202)
+        result = await asyncio.to_thread(configured().store.apply_account_change, account,
+            {"action": "update", "account_id": account_id, "expected_version": body.expected_version, "changes": changes})
+        return {"ok": True, "account": result}
 
     @router.get("/api/approvals")
     async def approvals():

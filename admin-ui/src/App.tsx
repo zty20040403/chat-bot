@@ -52,7 +52,7 @@ const runtime = window.__GAOJI_ADMIN__ ?? {
 type ViewId = 'accounts' | 'overview' | 'observability' | 'usage' | 'groups' | 'tasks' | 'tools' | 'traces' | 'context-debug' | 'databases' | 'fleet' | 'sandboxes' | 'media' | 'audit' | 'help'
 
 const NAVIGATION: Array<{ id: ViewId; label: string; description: string; group: string; icon: ComponentType<{ size?: number }> }> = [
-  { id: 'accounts', label: '账户与手机确认', description: '账户权限、QQ 一次性口令与操作记录', group: '配置', icon: Users },
+  { id: 'accounts', label: '账户与任务授权', description: '账户权限、服务器任务授权与操作记录', group: '配置', icon: Users },
   { id: 'overview', label: '概览', description: '服务状态、Token 趋势与最近投递', group: '运行', icon: Gauge },
   { id: 'observability', label: '可观测性', description: 'Prometheus、告警、延迟与模型降级', group: '运行', icon: Activity },
   { id: 'tasks', label: '任务与投递', description: 'Agent、持久任务和 QQ 消息回执', group: '运行', icon: ListChecks },

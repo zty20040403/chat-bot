@@ -145,7 +145,6 @@ from .turn_journal import (
     tool_catalog_fingerprint,
 )
 from .tool_policy import approval_from_user_text, tool_enabled, ToolApproval
-from .qq_action_authorization import requires_mobile_tool, propose_tool
 from src.bot_security.service import assert_approved
 from .web_search import (
     SearchError,
@@ -2212,9 +2211,12 @@ class ToolExecutor(HandlerService):
 
         async def execute_tool(name: str, arguments: dict[str, object]) -> str:
             assert_job_owned()
-            if requires_mobile_tool(name):
-                return await propose_tool(self.context, name, arguments, event, user_text)
             async with telemetry.tool(name):
+                fleet_auth = getattr(self.context.fleet_client, "authorization", None)
+                task_auth = getattr(fleet_auth, "tasks", None)
+                if task_auth is not None:
+                    with task_auth.bind(event, journal_turn_id):
+                        return await _execute_tool_impl(name, arguments)
                 return await _execute_tool_impl(name, arguments)
 
         subagent_hooks = AgentExecutionHooks(
@@ -2228,7 +2230,7 @@ class ToolExecutor(HandlerService):
                 else None
             ),
             approval_checker=(
-                lambda _policy, name, arguments: ToolApproval(True, "mobile-challenge", "进入 QQ 手机确认流程") if requires_mobile_tool(name) else approval_from_user_text(
+                lambda _policy, name, arguments: approval_from_user_text(
                     user_text,
                     name,
                     arguments,
@@ -2980,7 +2982,7 @@ class ToolExecutor(HandlerService):
                     final_text_sink=final_stream_sink,
                     final_stream_state=final_stream_state,
                     approval_checker=(
-                        lambda _policy, name, arguments: ToolApproval(True, "mobile-challenge", "进入 QQ 手机确认流程") if requires_mobile_tool(name) else approval_from_user_text(
+                        lambda _policy, name, arguments: approval_from_user_text(
                             user_text,
                             name,
                             arguments,

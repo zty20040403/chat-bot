@@ -117,12 +117,11 @@ class AdminAccountApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.sent)
         self.assertEqual(self.preferences.writes, 0)
 
-    async def test_write_waits_for_qq_and_then_executes_once(self):
+    async def test_admin_write_is_direct_and_audited(self):
         await self.login()
         response = await self.client.put("/bot-admin/api/v1/alert-notifications/control", json={"enabled": True}, headers={"X-Admin-Actor": "spoofed-person"})
-        self.assertEqual(self.preferences.writes, 0)
-        result = await self.approve(response)
-        self.assertEqual(result.json()["status"], "succeeded", result.text)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertFalse(self.sent)
         self.assertTrue(self.preferences.value)
         self.assertEqual(self.preferences.writes, 1)
         self.assertFalse(await self.mobile.run_once())
@@ -158,21 +157,20 @@ class AdminAccountApiTests(unittest.IsolatedAsyncioTestCase):
         self.sandbox.destroy.assert_not_awaited()
         self.assertFalse(self.sent)
 
-    async def test_account_creation_and_binding_change_also_require_qq(self):
+    async def test_account_creation_is_direct_without_disclosing_password(self):
         await self.login()
         response = await self.client.post("/bot-admin/api/v1/accounts", json={"username": "newadmin", "password": PASSWORD, "role": "admin", "qq_id": "333333333"})
         self.assertNotIn(PASSWORD, response.text)
-        self.assertNotIn(PASSWORD, self.sent[-1][2])
-        self.assertNotIn("argon2", self.sent[-1][2])
-        self.assertIsNone(self.store.account_for_qq("333333333"))
-        result = await self.approve(response)
-        self.assertEqual(result.json()["status"], "succeeded", result.text)
+        self.assertNotIn("argon2", response.text)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertFalse(self.sent)
         self.assertIsNotNone(self.store.account_for_qq("333333333"))
 
     async def test_logout_invalidates_pending_approval(self):
         await self.login()
-        response = await self.client.put("/bot-admin/api/v1/alert-notifications/control", json={"enabled": True})
-        identifier = response.json()["approval_id"]
+        account = self.store.session(self.client.cookies.get("gaoji_session"))
+        request = await self.mobile.propose(account, kind="server_task", payload={"id": 1}, summary="test task")
+        identifier = request["approval_id"]
         await self.client.post("/bot-admin/api/v1/auth/logout")
         self.assertEqual(self.store.get(identifier, self.account["account_id"])["status"], "cancelled")
         self.assertEqual((await self.client.get("/bot-admin/api/v1/me")).status_code, 401)

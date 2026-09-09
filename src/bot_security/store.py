@@ -374,6 +374,20 @@ class SecurityStore:
         with self.transaction() as db:
             return [dict(row) for row in db.execute("SELECT * FROM admin_security_audit ORDER BY created_at DESC LIMIT 200").fetchall()]
 
+    def record_action(self, account_id: str, action: str, target: str, detail: str = "") -> None:
+        with self.transaction() as db:
+            self._audit(db, account_id, action, target, detail)
+
+    def task_authorization(self, account: dict[str, Any], bot_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+        with self.transaction() as db:
+            row = db.execute("""SELECT * FROM admin_approvals WHERE account_id=?
+                AND account_version=? AND bot_id=? AND kind='server_task' AND payload_hash=?
+                ORDER BY created_at DESC LIMIT 1""",
+                (account["account_id"], account["version"], bot_id, digest(canonical(payload)))).fetchone()
+            if row and self._current(db, dict(row)):
+                return self._public_request(dict(row))
+        return None
+
     def unsent_receipts(self) -> list[dict[str, Any]]:
         with self.transaction() as db:
             rows = db.execute("SELECT * FROM admin_approvals WHERE notice_sent=0 AND status IN ('succeeded','failed','needs_attention') ORDER BY updated_at LIMIT 20").fetchall()

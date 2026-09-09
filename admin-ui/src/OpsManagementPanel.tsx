@@ -85,12 +85,12 @@ export function OpsManagementPanel({ plane }: { plane: Plane }) {
         <div className="ops-toolbar"><strong>{selected.host_id}</strong><span>{selected.actor_id}</span><StatusBadge value={selected.status} /></div>
         <p>请求参数 · 版本 {selected.resource_version}</p><pre>{JSON.stringify(selected.arguments?.params ?? selected.arguments, null, 2)}</pre>
         <small className="ops-hash">批准绑定：{selected.contract_hash}</small>
-        {selected.status === 'awaiting_approval' && <p>请在绑定 QQ 私聊中核对目标和参数，再回复 6 位口令。无需在电脑上批准。</p>}
+        {selected.status === 'awaiting_approval' && <p>预检完成，等待执行。</p>}
         {stale && <p role="status">状态已更新，请重新读取后操作。</p>}
         {error && <p role="alert" className="ops-error">{error}</p>}
         <div className="ops-toolbar">
           <button type="button" className="icon-button" title="重新读取请求与结果" aria-label="重新读取请求与结果" disabled={busy} onClick={() => void load(selected.operation_id)}><RefreshCw size={16} /></button>
-          {selected.status === 'awaiting_approval' && <button type="button" className="command-button" disabled={busy || Boolean(stale)} onClick={() => void action('approve')}><ShieldCheck size={16} />发送手机确认</button>}
+          {selected.status === 'awaiting_approval' && <button type="button" className="command-button" disabled={busy || Boolean(stale)} onClick={() => void action('approve')}><ShieldCheck size={16} />执行</button>}
           {['awaiting_approval', 'queued', 'running', 'reconciling'].includes(selected.status) && <button type="button" className="command-button" disabled={busy || Boolean(stale)} onClick={() => void action('cancel')}><Square size={15} />{['running', 'reconciling'].includes(selected.status) ? '请求取消' : '取消请求'}</button>}
         </div>
         {selected.backend_operation_id && <p>远端任务：<code>{selected.backend_operation_id}</code></p>}

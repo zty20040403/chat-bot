@@ -13,7 +13,7 @@ from nonebot.matcher import Matcher, current_bot, current_event, current_matcher
 
 from src.bot_security.service import approved_request, assert_approved
 from src.bot_security.store import SecurityError, canonical
-from .tool_policy import policy_for_tool, tool_enabled
+from .tool_policy import tool_enabled
 
 COMMANDS = {
     "handle_model_command": "修改会话模型", "handle_effort_command": "修改推理强度",
@@ -32,17 +32,9 @@ AUTOMATIC_SANDBOX_TOOLS = frozenset({
 
 
 def requires_mobile_tool(name: str) -> bool:
-    # Sandbox quotas and ownership remain in the executor. Remote host operations
-    # still require their separate, parameter-bound authorization.
-    if name in AUTOMATIC_SANDBOX_TOOLS:
-        return False
-    if name in {"ops_call", "operation_prepare", "delegate_agent", "run_subagents", "resume_subagent",
-                "browser_navigate", "browser_snapshot", "browser_scroll", "browser_wait_for", "browser_close",
-                "say", "reply_send", "reply_with_voice", "send_sticker", "send_qq_face"}:
-        return False
-    effects = policy_for_tool(name).side_effects
-    safe = {"read", "read:fleet", "read:sandbox", "download:remote-media", "probe:fixed-target", "write:diagnostic-ledger"}
-    return any(effect not in safe for effect in effects)
+    # Important server mutations are checked at FleetAuthorization, where the
+    # actual remote contract is known. Other tools keep their native access checks.
+    return False
 
 
 def command_changes_state(name: str, event: Any, args: Any) -> bool:
@@ -105,11 +97,13 @@ def mobile_command(function):
         mobile = getattr(service.context, "mobile_authorization", None)
         try:
             if mobile is None:
-                raise SecurityError("手机口令授权未初始化，管理操作已锁定")
-            payload["targets"] = await freeze_targets(service, function.__name__, event, command_args)
-            result = await mobile.propose_qq(str(event.user_id), kind="command", payload=payload,
-                summary=f"{COMMANDS[function.__name__]}\n发起 QQ：{event.user_id}\n会话：{getattr(event, 'group_id', '私聊')}\n指令：{event.get_plaintext()}\n参数：{payload['args']}\n具体目标：{canonical(payload['targets'])}")
-            response = f"{result['approval_id']}：请到机器人 QQ 私聊核对操作并回复 6 位口令。"
+                raise SecurityError("账户认证未初始化，管理操作已锁定")
+            account = await asyncio.to_thread(mobile.store.account_for_qq, str(event.user_id))
+            if account is None:
+                raise SecurityError("仅绑定 QQ 的管理员可以执行管理变更")
+            await asyncio.to_thread(mobile.store.record_action, account["account_id"],
+                "command.requested", function.__name__, str(getattr(event, "group_id", "private")))
+            return await function(*args, **kwargs)
         except SecurityError as exc:
             response = str(exc)
         bot = bound.arguments.get("bot") or get_bots().get(str(event.self_id))

@@ -51,6 +51,10 @@ class HandlerServices:
         from .tool_executor import ToolExecutor
         from .trigger_service import TriggerService
 
+        if getattr(self.context, "mobile_authorization", None) is not None and getattr(self.context, "fleet_client", None) is not None:
+            from .server_task_authorization import ServerTaskAuthorization
+            self.context.fleet_client.authorization.tasks = ServerTaskAuthorization(self.context)
+
         self.reference_resolver = ReferenceResolver(graph_store=self.context.topic_graph_store)
         self.commands = CommandHandlers(self)
         self.ingest = MessageIngest(self)

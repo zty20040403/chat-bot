@@ -82,14 +82,14 @@ export function AccountsView({ plane }: { plane: Plane }) {
         <h3>{selected ? `编辑 ${selected.username}` : '创建账户'}</h3>
         <label>账户名<input disabled={Boolean(selected) || busy} required pattern="[a-zA-Z0-9][a-zA-Z0-9_.-]{2,31}" autoComplete="off" value={username} onChange={(e) => setUsername(e.target.value)} /></label>
         <label>{selected ? '新密码（留空保持现有密码）' : '密码（12～128 个字符）'}<input type="password" autoComplete="new-password" minLength={12} maxLength={128} required={!selected} disabled={busy} value={password} onChange={(e) => setPassword(e.target.value)} /></label>
-        <label>角色<select value={role} disabled={busy} onChange={(e) => setRole(e.target.value)}><option value="member">普通成员 · 只看状态</option><option value="admin">管理员 · 手机确认后操作</option></select></label>
+        <label>角色<select value={role} disabled={busy} onChange={(e) => setRole(e.target.value)}><option value="member">普通成员 · 只看状态</option><option value="admin">管理员</option></select></label>
         <label>绑定 QQ{role === 'admin' ? '（必填）' : '（选填）'}<input inputMode="numeric" pattern="[1-9][0-9]{4,14}" required={role === 'admin'} disabled={busy} value={qq} onChange={(e) => setQq(e.target.value)} /></label>
         {selected && <label className="account-checkbox"><input type="checkbox" checked={enabled} disabled={busy} onChange={(e) => setEnabled(e.target.checked)} />启用账户</label>}
         {error && <p role="alert" className="account-error">{error}</p>}
-        <div className="account-actions"><button className="primary-button" type="submit" disabled={busy}>{busy ? '等待手机确认…' : '发送 QQ 确认口令'}</button><button type="button" className="text-button" onClick={() => { setSelected(null); setCreating(false); setPassword('') }}>关闭表单</button></div>
+        <div className="account-actions"><button className="primary-button" type="submit" disabled={busy}>{busy ? '保存中…' : '保存'}</button><button type="button" className="text-button" onClick={() => { setSelected(null); setCreating(false); setPassword('') }}>关闭表单</button></div>
       </form>}
     </Section>
-    <Section title="手机确认与操作记录" description="6 位随机口令，3 分钟有效。核对后请在机器人 QQ 私聊中回复；无需保持本页面打开。" action={<button className="command-button" onClick={() => void plane.refresh('approvals')}>刷新</button>}>
+    <Section title="服务器任务授权" description="Bot 的重要服务器命令按任务授权一次，子任务共享，任务结束后失效。" action={<button className="command-button" onClick={() => void plane.refresh('approvals')}>刷新</button>}>
       {!approvals.length && <EmptyState>还没有需要确认的操作。</EmptyState>}
       <div className="approval-list">{approvals.map((item) => <article key={item.approval_id}>
         <header><code>{item.approval_id}</code><StatusBadge value={item.status} label={LABELS[item.status] ?? item.status} /><small>{fmtTime(item.created_at)}</small></header>

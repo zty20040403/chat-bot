@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import re
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 
 ToolRisk = Literal["low", "medium", "high", "critical"]
 ToolIdempotency = Literal["pure", "idempotent", "keyed", "non-idempotent"]
-ToolApprovalMode = Literal["never", "explicit"]
+ToolApprovalMode = Literal["never", "explicit", "task"]
 ToolExecutionMode = Literal["inline", "durable-eligible", "durable-required"]
 ToolCompensation = Literal[
     "none",
@@ -234,7 +234,7 @@ def _policy_registry() -> dict[str, ToolPolicy]:
         idempotency="idempotent",
         side_effects=("write:operation-ledger", "cancel:operation"),
         timeout_seconds=30.0,
-        approval="explicit",
+        approval="never",
         max_identical_calls=1,
     )
     policies["cluster_artifact_upload"] = ToolPolicy(
@@ -295,7 +295,7 @@ def _policy_registry() -> dict[str, ToolPolicy]:
         idempotency="idempotent",
         side_effects=("write:browser", "destructive"),
         timeout_seconds=60.0,
-        approval="explicit",
+        approval="never",
         max_identical_calls=1,
     )
     policies["job_cancel"] = ToolPolicy(
@@ -303,7 +303,7 @@ def _policy_registry() -> dict[str, ToolPolicy]:
         idempotency="idempotent",
         side_effects=("write:job", "destructive"),
         timeout_seconds=20.0,
-        approval="explicit",
+        approval="never",
         max_identical_calls=1,
     )
     for name in {"memory_remove", "unpin_message", "reminder_cancel"}:
@@ -313,9 +313,14 @@ def _policy_registry() -> dict[str, ToolPolicy]:
             idempotency="idempotent",
             side_effects=previous.side_effects + ("destructive",),
             timeout_seconds=previous.timeout_seconds,
-            approval="explicit",
+            approval="never",
             max_identical_calls=1,
         )
+    # Leave time for one task-level QQ authorization before a server mutation.
+    for name in {"ops_call", "operation_prepare", "operation_cancel", "cluster_job_submit", "cluster_guardian_create"}:
+        policies[name] = replace(policies.get(name, ToolPolicy()), timeout_seconds=250.0)
+    for name in {"ops_call", "operation_prepare", "operation_cancel"}:
+        policies[name] = replace(policies[name], approval="task")
     return policies
 
 
@@ -407,6 +412,8 @@ def approval_from_user_text(
     arguments: dict[str, Any],
 ) -> ToolApproval:
     policy = policy_for_tool(tool_name)
+    if policy.approval == "task":
+        return ToolApproval(True, source="fleet-task", reason="实际服务器写操作由 Fleet 验证本任务统一授权。")
     if policy.approval == "never":
         return ToolApproval(True, source="policy", reason="无需额外批准。")
     normalized = " ".join(str(user_text).casefold().split())

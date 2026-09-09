@@ -55,7 +55,7 @@ class MobileIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("已确认", reply)
         return identifier
 
-    async def test_qq_command_roundtrip_and_fixed_task_target(self):
+    async def test_admin_qq_command_executes_without_phone(self):
         bot = SimpleNamespace(send=AsyncMock())
         executed = []
         registry = SimpleNamespace(list_for= lambda _: [SimpleNamespace(task_id="task-original")])
@@ -66,18 +66,17 @@ class MobileIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 self.services = SimpleNamespace(chat=SimpleNamespace(_conversation_id=lambda _: "private"))
             @mobile_command
             async def handle_task_stop(self, event, args):
-                executed.append(command_targets()["task_id"])
+                executed.append(registry.list_for(None)[0].task_id)
         commands = Commands()
         services = SimpleNamespace(context=context, commands=commands)
         register_qq_executors(services)
         with patch("src.plugins.ai_chat.qq_action_authorization.get_bots", return_value={BOT: bot}):
             await commands.handle_task_stop(event("/停止"), Message(""))
-            self.assertEqual(executed, [])
-            self.assertIn("task-original", self.sent[-1][2])
-            registry.list_for = lambda _: [SimpleNamespace(task_id="task-new")]
-            await self.confirm_latest()
-            self.assertTrue(await self.mobile.run_once())
             self.assertEqual(executed, ["task-original"])
+            self.assertFalse(self.sent)
+            registry.list_for = lambda _: [SimpleNamespace(task_id="task-new")]
+            await commands.handle_task_stop(event("/停止"), Message(""))
+            self.assertEqual(executed, ["task-original", "task-new"])
             self.assertFalse(await self.mobile.run_once())
 
     async def test_private_code_interception_and_log_redaction(self):
@@ -92,9 +91,9 @@ class MobileIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("012345", str(bot.send_group_msg.call_args))
         self.assertFalse(await handle_approval_event(self.mobile, bot, event("机器人状态")))
 
-    async def test_only_isolated_sandbox_operations_skip_phone_approval(self):
+    async def test_tools_delegate_server_authorization_to_fleet_boundary(self):
         for name in ("memory_add", "job_cancel", "browser_click", "browser_fill", "unknown_tool", "sandbox_host_exec", "cluster_job_submit"):
-            self.assertTrue(requires_mobile_tool(name), name)
+            self.assertFalse(requires_mobile_tool(name), name)
         for name in ("web_search", "service_inspect", "say", "sandbox_create", "sandbox_exec",
                      "sandbox_write_file", "sandbox_read_file", "sandbox_destroy", "import_file_to_sandbox",
                      "import_agent_artifact", "send_file_from_sandbox", "send_image_from_sandbox"):
@@ -196,7 +195,7 @@ class MobileIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await self.mobile.run_once()
         self.assertEqual(self.store.get(identifier, self.account["account_id"])["status"], "failed")
 
-    async def test_worker_jobs_track_all_hosts_after_phone_approval(self):
+    async def test_isolated_worker_jobs_are_direct_and_still_track_all_hosts(self):
         records, writes = {}, []
 
         async def raw(method, path, body=None, **kwargs):
@@ -218,10 +217,8 @@ class MobileIntegrationTests(unittest.IsolatedAsyncioTestCase):
             worker = host + "-worker"
             result = await fleet.request("POST", "/v1/jobs", {"kind": "probe.http", "constraints": {"worker_id": worker}},
                 actor="qq:" + QQ, origin="test")
-            self.assertFalse(result["executed"])
-            self.assertEqual(len(writes), index)
-            await self.confirm_latest()
-            self.assertTrue(await self.mobile.run_once())
+            self.assertEqual(result["status"], "queued")
+            self.assertFalse(any("一次性口令：" in text for _, _, text in self.sent))
             self.assertEqual(len(writes), index + 1)
             path = "/v1/jobs/job_" + worker
             with self.store.transaction() as db:
@@ -229,7 +226,6 @@ class MobileIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(watch, worker)
             self.assertEqual(watch["actor"], "admin:kenneth")
             self.assertEqual(watch["origin"], "test")
-            self.assertIn("等待服务器", self.sent[-1][2])
             before = len(self.sent)
             await fleet.poll()
             self.assertEqual(len(self.sent), before)

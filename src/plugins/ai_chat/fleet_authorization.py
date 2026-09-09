@@ -8,6 +8,7 @@ from typing import Any
 
 from src.bot_security.service import MobileAuthorization, approved_request, assert_approved, current_principal
 from src.bot_security.store import SecurityError
+from .server_task_authorization import server_task
 
 
 class FleetAuthorization:
@@ -18,6 +19,8 @@ class FleetAuthorization:
         mobile.http_summary = self.http_summary
         mobile.pollers.append(self.poll)
         self.next_discovery = 0.0
+        self.tasks = None
+        self.submit_lock = asyncio.Lock()
 
     async def account(self, actor: str) -> dict[str, Any]:
         account = current_principal.get()
@@ -38,6 +41,7 @@ class FleetAuthorization:
         if path in {"/v1/diagnostics", "/v1/runbook-cases/search"}:
             return await self.client._raw_request(method, path, body, actor=actor, origin=origin)
         account = await self.account(actor)
+        console = bool(account.get("session_hash")) and origin == "admin-console"
         actor = "admin:" + account["username"]
         if path in {"/v1/ops/call", "/v1/operations/prepare", "/v1/deployments/prepare"}:
             result = await self.client._raw_request(method, path, body, actor=actor, origin=origin)
@@ -46,7 +50,7 @@ class FleetAuthorization:
                 await self.watch(record, account, actor, origin)
             if isinstance(record, dict) and record.get("status") == "awaiting_approval":
                 approval = await self.propose_record(record, account, actor, origin)
-                return {**result, **approval, "operation": record, "next_action": "手机 QQ 私聊口令确认后才能执行。不要把待确认说成已执行。"}
+                return {**result, **approval}
             return result
         if approved_request.get() is not None:
             # This call is made by a fixed, already approved HTTP/tool/command handler.
@@ -56,14 +60,30 @@ class FleetAuthorization:
             if result.get("job_id") and result.get("status") in {"queued", "running", "verifying", "cancelling"}:
                 return {**result, "submitted": True}
             return result
-        payload = {"method": method, "path": path, "body": body, "actor": actor, "origin": origin}
-        summary = f"服务器管理：{method} {path}\n参数：{json.dumps(body, ensure_ascii=False, indent=2)}"
         if re.fullmatch(r"/v1/(operations|deployments)/[^/]+/approve", path):
             record = await self.client._raw_request("GET", path.removesuffix("/approve"), actor=actor, origin=origin)
             self.check_contract(record, body or {})
-            payload["contract"] = self.contract_view(record)
-            summary = self.describe(record)
-        return await self.mobile.propose(account, kind="fleet", payload=payload, summary=summary)
+            if not console:
+                return await self.propose_record(record, account, actor, origin)
+        elif not console and self.important_mutation(path):
+            scope = server_task.get()
+            if self.tasks is None or scope is None or scope["scope"] != origin:
+                raise SecurityError("重要服务器命令需要绑定当前任务后申请统一授权")
+            await self.tasks.ensure(scope, account)
+        result = await self.client._raw_request(method, path, body, actor=actor, origin=origin)
+        if result.get("operation_id") or result.get("deployment_id") or result.get("job_id"):
+            await self.watch(result, account, actor, origin)
+        await asyncio.to_thread(self.mobile.store.record_action, account["account_id"],
+            "fleet.submitted", path, "console" if console else "task")
+        return result
+
+    @staticmethod
+    def important_mutation(path):
+        # Worker tasks remain quota-bound isolated jobs, not host shell commands.
+        ordinary = {"/v1/jobs", "/v1/artifacts", "/v1/guardians", "/v1/runbook-cases",
+                    "/v1/borrow-grants"}
+        return not (path in ordinary or re.fullmatch(
+            r"/v1/(jobs/[^/]+/cancel|guardians/[^/]+/status|borrow-grants/[^/]+/status|resource-policies/[^/]+/(capacity|availability))", path))
 
     @staticmethod
     def contract_view(record: dict[str, Any]) -> dict[str, Any]:
@@ -119,13 +139,47 @@ class FleetAuthorization:
         raise SecurityError("无效服务器操作编号", 502)
 
     async def watch(self, record, account, actor, origin):
-        await asyncio.to_thread(self.mobile.store.watch_fleet, self.record_path(record), account,
+        metadata = dict(account)
+        scope = server_task.get()
+        if scope is not None and scope["scope"] == origin and scope["qq_id"] == account["qq_id"]:
+            metadata["server_task"] = scope
+        await asyncio.to_thread(self.mobile.store.watch_fleet, self.record_path(record), metadata,
                                self.mobile.bot_selector(), actor, origin)
 
-    async def propose_record(self, record, account, actor, origin):
+    async def propose_record(self, record, account, actor, origin, *, wait=True):
         path = self.record_path(record)
         if not record.get("contract_hash") or not record.get("resource_version"):
             raise SecurityError("操作未提供完整批准信息", 502)
+        if account.get("session_hash") and origin == "admin-console":
+            return {"approval_required": True, "operation": record,
+                    "next_action": "预检已完成，在控制台执行即可，不需要手机口令。"}
+        scope = server_task.get() or account.get("server_task")
+        if scope is not None:
+            if self.tasks is None or scope["scope"] != origin:
+                raise SecurityError("服务器操作与任务范围不匹配")
+            ready = await self.tasks.ensure(scope, account, wait=wait)
+            if not ready:
+                return {"approval_required": True, "operation": record,
+                        "next_action": "等待本任务统一授权，不要重复申请。"}
+            # Polling and parallel steps may see the same proposal. Re-read under
+            # one submission lock; the server also checks contract/version CAS.
+            async with self.submit_lock:
+                latest = await self.client._raw_request("GET", path, actor=actor, origin=origin)
+                self.tasks.validate(scope)
+                if latest.get("status") == "awaiting_approval":
+                    if self.contract_view(latest) != self.contract_view(record):
+                        raise SecurityError("服务器操作预检已变化，请重新读取", 409)
+                    result = await self.client._raw_request("POST", path + "/approve",
+                        {"contract_hash": latest["contract_hash"], "resource_version": latest["resource_version"]},
+                        actor=actor, origin=origin)
+                    await asyncio.to_thread(self.mobile.store.record_action, account["account_id"],
+                        "fleet.task_authorized", path, f"{scope['kind']}#{scope['id']}")
+                else:
+                    result = latest
+            return {"ok": True, "approval_required": False, "operation": result,
+                    "submitted": result.get("status") in {"queued", "running", "verifying"},
+                    "executed": result.get("status") == "succeeded",
+                    "next_action": "本任务已统一授权。操作已提交或已有执行记录，读取最终结果；不要再次请求口令或重复提交。"}
         payload = {"method": "POST", "path": path + "/approve",
                    "body": {"contract_hash": record["contract_hash"], "resource_version": record["resource_version"]},
                    "actor": actor, "origin": origin, "contract": self.contract_view(record)}
@@ -150,7 +204,7 @@ class FleetAuthorization:
                 record = await self.client._raw_request("GET", item["path"], actor=item["actor"], origin=item["origin"])
                 if record.get("status") == "awaiting_approval":
                     if self.mobile.bot_selector() == item["bot_id"]:
-                        await self.propose_record(record, item["account"], item["actor"], item["origin"])
+                        await self.propose_record(record, item["account"], item["actor"], item["origin"], wait=False)
                 elif record.get("status") in {"succeeded", "failed", "cancelled", "expired", "needs_attention", "preflight_failed", "rolled_back"}:
                     await self.mobile.sender(item["bot_id"], item["account"]["qq_id"],
                         f"服务器执行结果：{item['path'].rsplit('/', 1)[-1]}\n状态：{record['status']}\n"
