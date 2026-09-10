@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, Mock, patch
 from tests.test_subagent_v2 import decision, profile
 from src.plugins.ai_chat.agent import ContextPacket
 from src.plugins.ai_chat.agent.control import JobFence, LeaseLost, active_job_fence, active_model_policy
-from src.plugins.ai_chat.agent.execution import EntryDecision, active_agent_step
+from src.plugins.ai_chat.agent.execution import DECISION_TOOL, EntryDecision, ExecutionEntryError, active_agent_step
 from src.plugins.ai_chat.agent.model_routing import choose_agent_profile, model_scope_for_role, validate_model_policy
 from src.plugins.ai_chat.agent.scheduling import SpecialistScheduler
 from src.plugins.ai_chat.agent.workspaces import (
@@ -64,9 +64,37 @@ class RuntimeV2Tests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(entry.contract.as_payload()["version"], 2)
         self.assertTrue(entry.contract.acceptance)
         planner.assert_awaited_once()
+        self.assertIn(json.dumps(DECISION_TOOL["function"]["parameters"], ensure_ascii=False), planner.call_args.args[0])
         with patch.object(self.coordinator, "_supervisor_json", new=AsyncMock(return_value=decision("direct"))):
-            with self.assertRaises(ValueError):
+            with self.assertRaises(ExecutionEntryError):
                 await self.coordinator.prepare_entry(self.packet, self.catalog.default)
+
+    async def test_explicit_entry_repairs_missing_fields_once_without_starting_invalid_task(self):
+        incomplete = decision("workflow")
+        del incomplete["answer"]
+        with patch.object(self.coordinator, "_supervisor_json", new=AsyncMock(
+                side_effect=[incomplete, decision("workflow")])) as planner:
+            entry = await self.coordinator.prepare_entry(self.packet, self.catalog.default)
+        self.assertEqual(entry.mode, "workflow")
+        self.assertEqual(planner.await_count, 2)
+        self.assertIn("answer must be a string", planner.call_args.args[0])
+        self.assertEqual(self.store.recent(), [])
+        with patch.object(self.coordinator, "_supervisor_json", new=AsyncMock(return_value=incomplete)) as planner:
+            with self.assertRaises(ExecutionEntryError):
+                await self.coordinator.prepare_entry(self.packet, self.catalog.default)
+        self.assertEqual(planner.await_count, 2)
+        self.assertEqual(self.store.recent(), [])
+
+    async def test_explicit_delegate_keeps_selected_role_and_no_retry_on_transport_error(self):
+        payload = decision("delegate")
+        role = payload["steps"][0]["agent"]
+        with patch.object(self.coordinator, "_supervisor_json", new=AsyncMock(return_value=payload)):
+            entry = await self.coordinator.prepare_entry(self.packet, self.catalog.default, role=role)
+        self.assertEqual(entry.steps[0]["agent"], role)
+        with patch.object(self.coordinator, "_supervisor_json", new=AsyncMock(side_effect=TimeoutError)) as planner:
+            with self.assertRaises(TimeoutError):
+                await self.coordinator.prepare_entry(self.packet, self.catalog.default)
+        planner.assert_awaited_once()
 
 
     async def test_queued_plan_reuses_entry_and_can_survive_reopen(self):

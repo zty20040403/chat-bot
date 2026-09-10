@@ -45,10 +45,10 @@ The dry activation and switch restarted gaoji and its control service. Max PID
 The existing oneshot ollama-model-loader also ran during activation and exited.
 This deployment is not acceptance of the remaining checklist.
 
-## Local Verification, Not Yet Deployed
+## Local Verification
 
-2026-09-10: the outcome implementation is still in the working tree. The full
-regression suite passed 889 tests, including an isolated PostgreSQL migration,
+2026-09-10: before deployment, the full regression suite passed 889 tests,
+including an isolated PostgreSQL migration,
 scoped evidence persistence, concurrent file-outbox claims, crash recovery,
 unknown receipt handling and task revision fencing. TypeScript and the production
 UI build passed. Isolated Playwright runs at 1440px and 390px verified that SSE
@@ -65,3 +65,21 @@ preparation, host CPU/memory metrics, later-failure rejection, evidence-backed
 cleanup estimates and durable permanent file-rejection notifications. The service
 API continues to enforce the existing host observation policy. CPU figures are
 five-minute rates, not instantaneous usage; unavailable samples stay unknown.
+
+## Outcome Deployment and Live Gate
+
+2026-09-10 22:25 HKT: Bot `d041a0e`, nix-config `627e443`, h610 generation
+`/nix/store/hglhbi4xk74z0fldqiilv562x21ach05-nixos-system-h610-26.05.20260622.3426825`.
+Both gaoji services started and the QQ WebSocket reconnected. Max and the
+PostgreSQL node retained their prior PIDs and activation times. This deployed
+the evidence, structured reports, outcome checks, file outbox and console panel;
+the sandbox image was not rebuilt.
+
+The first live inspection submission failed before creating a task: the explicit
+entry prompt omitted the decision JSON schema, while its parser required all
+fields. The model omitted or mistyped `answer`. Fixture-only planner tests had
+missed that prompt mismatch. The follow-up supplies the same schema as automatic
+routing and allows one validation-guided correction, never starting an invalid
+task or silently inventing acceptance criteria. Evidence writes also invalidate
+the live task detail resource. Real inspection, QQ receipts and authorized
+cleanup remain acceptance gates, not completed claims.

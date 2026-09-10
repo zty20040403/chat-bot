@@ -27,7 +27,7 @@ from .agent import (
     SubAgentRole,
 )
 from .ai_tools import ToolDefinition
-from .agent.execution import ENTRY_PROMPT, EntryDecision, active_agent_step
+from .agent.execution import DECISION_TOOL, ENTRY_PROMPT, EntryDecision, ExecutionEntryError, active_agent_step
 from .agent.evidence import (EVIDENCE_SQL, EvidenceStoreMixin, READ_TASK_EVIDENCE,
                              decode_result, evidence_index, read_evidence)
 from .agent.outcomes import (acceptance_blocks_completion, evaluate_acceptance,
@@ -1409,18 +1409,35 @@ class SubAgentCoordinator:
     async def prepare_entry(self, packet: ContextPacket, selected_profile: ModelProfile, *,
                             role: str | None = None, parent_trace: DeepSeekTrace | None = None) -> EntryDecision:
         """Give explicit task tools the same contract as automatic routing."""
+        if role is not None and role not in WORKER_ROLES:
+            raise ValueError("Unknown explicit task role")
         mode = "delegate" if role else "workflow"
-        trace = DeepSeekTrace()
-        payload = await self._supervisor_json(
+        prompt = (
             ENTRY_PROMPT + f"\n这是用户已明确提交的执行任务，mode 必须为 {mode}。"
             + (f"恰好一个步骤，agent 必须为 {role}。" if role else "")
-            + "直接返回 decide_execution 的参数 JSON，不再调用工具。",
-            packet.render_for_planner(), profile=self._profile_for("supervisor", selected_profile), trace=trace)
-        _merge_trace(parent_trace, trace)
-        decision = EntryDecision.parse(payload, max_steps=self.max_steps)
-        if decision.mode != mode or role and decision.steps[0]["agent"] != role:
-            raise ValueError("Explicit task planner returned a different execution mode")
-        return decision
+            + f"步骤最多 {self.max_steps} 个。answer 必须是空字符串，不能遗漏或写 null。"
+            + "直接返回 decide_execution 的参数 JSON，不再调用工具。完整结构如下：\n"
+            + json.dumps(DECISION_TOOL["function"]["parameters"], ensure_ascii=False)
+        )
+        for attempt in range(2):
+            trace = DeepSeekTrace()
+            try:
+                payload = await self._supervisor_json(
+                    prompt, packet.render_for_planner(),
+                    profile=self._profile_for("supervisor", selected_profile), trace=trace)
+            finally:
+                _merge_trace(parent_trace, trace)
+            try:
+                decision = EntryDecision.parse(payload, max_steps=self.max_steps)
+                if decision.mode != mode or role and decision.steps[0]["agent"] != role:
+                    raise ValueError("Explicit task planner returned a different execution mode or role")
+            except ValueError as exc:
+                if attempt:
+                    raise ExecutionEntryError(f"Execution decision invalid; no task was started: {exc}") from exc
+                prompt += f"\n上次返回的合同无效：{exc}。按上述完整结构重新生成，不要省略必填字段或改变任务。"
+                continue
+            return decision
+        raise ExecutionEntryError("Execution decision unavailable")
 
     def cancel(self, task_id: int) -> bool:
         changed = self.store.request_cancel(task_id)

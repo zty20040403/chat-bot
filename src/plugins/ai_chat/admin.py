@@ -262,6 +262,7 @@ _DATABASE_RESOURCE_MAP: dict[str, tuple[str, ...]] = {
     "subagent_sessions": ("subagents", "tasks"),
     "subagent_deliveries": ("subagents", "tasks", "deliveries"),
     "subagent_external_calls": ("subagents", "tasks"),
+    "subagent_evidence": ("subagents", "tasks"),
     "bridge_sources": ("overview",),
     "bridge_deliveries": ("overview",),
     "bridge_cursors": ("overview",),

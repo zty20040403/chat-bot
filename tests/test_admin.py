@@ -489,6 +489,15 @@ class AdminTests(unittest.TestCase):
             {"usage", "overview", "observability"},
         )
 
+    def test_task_evidence_changes_refresh_task_details(self) -> None:
+        self.assertEqual(
+            _changed_database_resources(
+                {"subagent_evidence": (1, 0, 0)},
+                {"subagent_evidence": (2, 0, 0)},
+            ),
+            {"subagents", "tasks"},
+        )
+
     def test_alert_notification_control_is_independent_and_versioned(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             preferences = AlertNotificationPreferences(
