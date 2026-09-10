@@ -16,6 +16,7 @@ from src.bot_security.service import MobileAuthorization, current_principal
 from src.bot_security.store import SecurityError, SecurityStore
 from src.plugins.ai_chat.fleet_authorization import FleetAuthorization
 from src.plugins.ai_chat.server_task_authorization import ServerTaskAuthorization, server_task
+from src.plugins.ai_chat.agent.external import active_external
 from tests.test_account_security import PASSWORD, QQ, BOT
 
 
@@ -89,10 +90,25 @@ class ServerTaskAuthorizationTests(unittest.IsolatedAsyncioTestCase):
                 job.cancel()
             await asyncio.gather(*jobs, return_exceptions=True)
         self.assertEqual(len([s for s in self.sent if "一次性口令：" in s]), 1)
+
         self.assertTrue(all(r["submitted"] and not r["approval_required"] for r in results))
         await self.prepare("h310")
         self.assertEqual(len(self.writes), 3)
         self.assertEqual(len([s for s in self.sent if "一次性口令：" in s]), 1)
+
+    async def test_durable_task_returns_approval_handle_without_holding_worker(self):
+        token = active_external.set(object())
+        try:
+            response = await asyncio.wait_for(self.prepare("h610"), timeout=2)
+        finally:
+            active_external.reset(token)
+        self.assertTrue(response["approval_required"])
+        self.assertEqual(response["operation"]["operation_id"], "op_h610")
+        self.assertEqual(response["operation"]["status"], "awaiting_approval")
+        self.assertFalse(self.writes)
+        await self.confirm()
+        await self.fleet.poll()
+        self.assertEqual(self.writes, ["/v1/operations/op_h610/approve"])
 
     async def test_completed_cancelled_revised_and_other_scope_cannot_reuse_grant(self):
         await self.authorize()

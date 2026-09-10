@@ -210,7 +210,7 @@ class SubAgentDispatcher:
                 continue
             name = delivery["payload"].get("filename") or "附件"
             body = decode_onebot_message(Message(MessageSegment.text(
-                f"{task.handle} 文件未送达：{name}。文件准备或上传被拒绝，多次重试后已停止。"
+                f"{task.handle} 文件未送达：{name}。文件准备或上传失败，自动重试已停止。"
                 "这不是成功交付；具体原因见控制台文件记录。"))).body
             notice, _ = self.context.delivery_store.enqueue(
                 idempotency_key=f"subagent-final:{task_id}:{control['revision']}:{phase}",

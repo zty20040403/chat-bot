@@ -35,6 +35,15 @@ def observation(at, free=200, *, host="h610"):
         "root_disk": {"mountpoint": "/", "available_bytes": free, "total_bytes": 1000, "device": "/dev/test"}}]}
 
 
+def metrics_receipt(at, *, host="h610"):
+    def sample(value, labels=None):
+        return {"samples": [{"value": value, "labels": labels or {}, "state": "available", "sample_at_unix_seconds": at}]}
+    return {"ok": True, "operation": "host.metrics", "result": {"host": host, "observed_at": at,
+        "observation": {"state": "available", "metrics": {
+            "cpu_idle_seconds_per_second": sample(0.9, {"cpu": "0"}),
+            "memory_total_bytes": sample(1000), "memory_available_bytes": sample(500)}}}}
+
+
 class TaskEvidenceTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -162,6 +171,39 @@ class TaskEvidenceTests(unittest.TestCase):
         del data["hosts"][0]["resources"]
         ref = self.record(data)
         self.assertEqual(self.evaluate(contract("host_inspection", host_id="h610"), [ref["ref"]])["status"], "unverified")
+
+    def test_native_metrics_can_complete_the_same_host_inspection_with_explicit_evidence(self):
+        data = observation(990)
+        data["hosts"][0]["resources"] = {"status": "unavailable"}
+        host_ref = self.record(data)
+        metric_ref = self.record(metrics_receipt(1015), tool="ops_call", at=1015,
+            args={"operation": "host.metrics", "params": {"host": "h610"}})
+        refs = [host_ref["ref"], metric_ref["ref"]]
+        result = self.evaluate(contract("host_inspection", host_id="h610"), refs)
+        self.assertEqual(result["status"], "passed")
+        self.assertEqual(result["criteria"][0]["detail"]["resource_evidence_ref"], metric_ref["ref"])
+        self.assertEqual(result["criteria"][0]["detail"]["observation"]["resources"]["cpu_busy_percent"], 10)
+        self.record({"ok": False, "error": "metrics unavailable"}, tool="ops_call", at=1020,
+            args={"operation": "host.metrics", "params": {"host": "h610"}})
+        self.assertEqual(self.evaluate(contract("host_inspection", host_id="h610"), refs)["status"], "unverified")
+
+    def test_wrong_host_or_stale_native_metrics_cannot_supply_missing_resources(self):
+        data = observation(1010)
+        data["hosts"][0]["resources"] = {"status": "unavailable"}
+        host_ref = self.record(data)
+        for at, host in ((1015, "tank"), (900, "h610")):
+            ref = self.record(metrics_receipt(at, host=host), tool="ops_call", at=1015,
+                args={"operation": "host.metrics", "params": {"host": "h610"}})
+            self.assertEqual(self.evaluate(contract("host_inspection", host_id="h610"),
+                [host_ref["ref"], ref["ref"]])["status"], "unverified")
+
+    def test_generic_review_cannot_hide_incomplete_host_coverage(self):
+        data = observation(1010)
+        del data["hosts"][0]["resources"]
+        ref = self.record(data)
+        result = self.evaluate(contract(), [ref["ref"]])
+        self.assertEqual(result["status"], "unverified")
+        self.assertEqual(result["criteria"][-1]["criterion_index"], "inspection:h610")
 
     def test_report_and_final_message_cannot_hide_unverified_outcome(self):
         report = {"status": "success", "findings": [{"description": "all fixed", "evidence_refs": ["invented"]}],

@@ -105,6 +105,21 @@ class FileReceiptSettlementTests(unittest.TestCase):
         self.assertEqual(self.store.get(self.task.task_id).result["delivery_state"], "failed_or_unknown")
         self.assertEqual(self.outbox.recent(), [])
 
+    def test_late_receipt_rebuilds_current_report_without_stale_delivery_claims(self):
+        matrix = {"status": "unverified", "criteria": [{"kind": "evidence", "description": "主机数据",
+            "status": "unverified", "reason": "仍有数据缺失"}]}
+        self.result.update(execution_state="succeeded", report_narrative="全部正常", validation={
+            "acceptance": {"status": "passed", "task_outcome": matrix}})
+        self.result["answer"] = "文件交付：0/1 个已确认送达。"
+        self.store.set_task_state(self.task.task_id, "partial", result=self.result)
+        self.dispatcher.settle_file_receipts(self.task.task_id)
+        current = self.store.get(self.task.task_id)
+        self.assertEqual(current.status, "partial")
+        self.assertIn("文件交付：1/1", current.result["answer"])
+        self.assertNotIn("全部正常", current.result["answer"])
+        self.assertNotIn("0/1 个已确认送达", current.result["answer"])
+        self.assertIn("仍有数据缺失", current.result["answer"])
+
     def test_old_revision_cannot_settle_current_task(self):
         control = self.store.control(self.task.task_id)
         self.store.update_control(self.task.task_id, expected_version=control["version"], revision=2)

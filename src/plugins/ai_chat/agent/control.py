@@ -206,6 +206,8 @@ class TaskControlStoreMixin:
         return [int(row["task_id"]) for row in rows]
 
     def sync_file_receipt_summary(self, task_id: int, revision: int) -> dict[str, Any] | None:
+        from .outcomes import acceptance_blocks_completion, outcome_report
+
         with self._transaction() as cursor:
             lock = "" if self._legacy_sqlite else " FOR UPDATE"
             row = cursor.execute("""SELECT t.* FROM subagent_tasks t JOIN subagent_controls c ON c.task_id=t.task_id
@@ -241,8 +243,11 @@ class TaskControlStoreMixin:
                 "notice_needed": bool(notice_needed)}
             status = row["status"]
             acceptance = result.get("validation", {}).get("acceptance")
+            if isinstance(acceptance, dict) and acceptance.get("task_outcome"):
+                result["answer"] = outcome_report(acceptance, str(result.get("report_narrative") or ""), updated)
             if (status == "partial" and all_confirmed and result.get("execution_state") == "succeeded"
-                    and isinstance(acceptance, dict) and acceptance.get("status") == "passed"):
+                    and isinstance(acceptance, dict) and acceptance.get("status") == "passed"
+                    and not acceptance_blocks_completion(acceptance)):
                 status = "completed"
             cursor.execute("UPDATE subagent_tasks SET result_json=?, status=?, updated_at=? WHERE task_id=?",
                 (json.dumps(result, ensure_ascii=False), status, int(time.time()), task_id))

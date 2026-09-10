@@ -1774,7 +1774,8 @@ class SubAgentCoordinator:
                 }
                 result["validation"]["acceptance"] = validation
                 if validation.get("task_outcome"):
-                    result["answer"] = outcome_report(validation, str(outcome.result.get("summary") or ""), deliveries)
+                    result["report_narrative"] = str(outcome.result.get("summary") or "")
+                    result["answer"] = outcome_report(validation, result["report_narrative"], deliveries)
                 self.store.set_task_state(
                     task.task_id,
                     status,
@@ -2000,7 +2001,8 @@ class SubAgentCoordinator:
             }
             result["validation"]["acceptance"] = validation
             if validation.get("task_outcome"):
-                result["answer"] = outcome_report(validation, str(outcome.result.get("summary") or ""), deliveries)
+                result["report_narrative"] = str(outcome.result.get("summary") or "")
+                result["answer"] = outcome_report(validation, result["report_narrative"], deliveries)
             self.store.set_task_state(task.task_id, status, result=result, error=outcome.error)
             if status == "completed":
                 return f"{task.handle} 已从检查点恢复并完成。"
@@ -2161,9 +2163,11 @@ class SubAgentCoordinator:
             trace=final_trace,
         )
         _merge_trace(parent_trace, final_trace)
-        final_text = outcome_report(validation, final_text, delivery_results)
+        report_narrative = final_text
+        final_text = outcome_report(validation, report_narrative, delivery_results)
         result = {
             "answer": final_text,
+            "report_narrative": report_narrative,
             "deliveries": delivery_results,
             **_completion_states(list(completed.values()), delivery_results),
             "steps": {

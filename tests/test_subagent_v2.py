@@ -44,6 +44,7 @@ def decision(mode="direct", answer="你好"):
             "delivery_required": False,
             "objective": "精心写个谷粒商城", "deliverables": [] if mode == "direct" else ["可运行的商城"],
             "constraints": [], "acceptance": [] if mode == "direct" else ["完成集成测试"],
+            "outcome_checks": [] if mode == "direct" else [{"criterion_index": 0, "kind": "evidence"}],
             "steps": [] if mode == "direct" else [
                 {"id": "frontend", "agent": "coder", "objective": "实现前端", "deliverable": "前端源码", "depends_on": []},
                 *([] if mode == "delegate" else [
@@ -81,6 +82,16 @@ class EntryContractTests(unittest.TestCase):
         for raw in invalid:
             with self.subTest(raw=raw), self.assertRaises(ValueError):
                 EntryDecision.parse(raw)
+
+    def test_new_entry_cannot_omit_checks_but_legacy_checkpoint_can_resume(self):
+        raw = decision("workflow")
+        del raw["outcome_checks"]
+        with self.assertRaisesRegex(ValueError, "outcome_checks"):
+            EntryDecision.parse(raw)
+        legacy = dict(raw, contract={"version": 1})
+        self.assertEqual(EntryDecision.from_payload(legacy).contract.outcome_checks[0]["kind"], "evidence")
+        with self.assertRaisesRegex(ValueError, "outcome_checks"):
+            EntryDecision.from_payload(dict(raw, contract={"version": 2}))
 
     def test_direct_branch_normalization_only_discards_inapplicable_contract(self):
         noisy = decision("direct")

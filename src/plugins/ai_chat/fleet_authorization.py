@@ -9,6 +9,7 @@ from typing import Any
 from src.bot_security.service import MobileAuthorization, approved_request, assert_approved, current_principal
 from src.bot_security.store import SecurityError
 from .server_task_authorization import server_task
+from .agent.external import active_external
 
 
 class FleetAuthorization:
@@ -49,7 +50,8 @@ class FleetAuthorization:
             if isinstance(record, dict) and (record.get("operation_id") or record.get("deployment_id")):
                 await self.watch(record, account, actor, origin)
             if isinstance(record, dict) and record.get("status") == "awaiting_approval":
-                approval = await self.propose_record(record, account, actor, origin)
+                approval = await self.propose_record(record, account, actor, origin,
+                    wait=active_external.get() is None)
                 return {**result, **approval}
             return result
         if approved_request.get() is not None:

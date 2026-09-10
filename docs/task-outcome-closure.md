@@ -83,3 +83,37 @@ routing and allows one validation-guided correction, never starting an invalid
 task or silently inventing acceptance criteria. Evidence writes also invalidate
 the live task detail resource. Real inspection, QQ receipts and authorized
 cleanup remain acceptance gates, not completed claims.
+
+## Live Task 59 Findings
+
+2026-09-10: the explicit-entry repair (`f64f54a`, nix-config `dcaf138`)
+created task 59 through the real planner and durable queue. Its three operator
+steps ran concurrently. The task correctly remained partial: the h610 directory
+scan exceeded its 300-second upstream deadline. No cleanup was executed.
+
+The actual UTF-8 Markdown report (5,143 bytes, SHA-256
+`5500502dd8be4e65e7efa1305e6908e0d1d87a1de5e55ca4ccd175091cc6555f`)
+was acknowledged in the QQ group file list. An initially ambiguous upload was
+reconciled without a second upload. Final deliveries 3074 and 3075 both have
+native message receipts; the latter reports the settled file receipt. This
+proves live delivery and reconciliation, not a live process-loss test.
+
+The live run exposed four gaps that fixture-only checks had not caught:
+
+- Durable approval proposals held a worker while awaiting a code. They now
+  return a persistent handle immediately and yield to external continuation.
+- New planner contracts could omit typed outcome checks. Each acceptance
+  criterion now requires an explicit check; legacy version-1 checkpoints
+  remain readable. Full host inspection also has a coverage gate independent
+  of the model's generic review.
+- The compact monitoring client's metrics permission was absent. The Nix
+  client configuration adds only `metrics:read`; native metric tool evidence
+  is also accepted when its target, timestamps and observations match.
+- A late confirmed file receipt left the stored report saying 0/1 delivered.
+  Receipt settlement now rebuilds the report without erasing unresolved
+  acceptance failures or promoting a partial task incorrectly.
+
+The integrated follow-up passed 903 tests against the isolated PostgreSQL
+database. Production console inspection remains pending an authenticated
+session. Live process-loss recovery and explicitly authorized disposable
+cleanup remain open gates; neither is implied by passing unit tests.

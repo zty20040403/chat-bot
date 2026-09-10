@@ -63,7 +63,9 @@ def timestamp(value: Any) -> float | None:
 
 def fresh_at_capture(value: Any, item: dict, task_created_at: int) -> bool:
     observed = timestamp(value)
-    return observed is not None and max(task_created_at - 5, item["recorded_at"] - 180) <= observed <= item["recorded_at"] + 5
+    # Scraped observations can legitimately predate a task by one scrape interval.
+    return (observed is not None and item["recorded_at"] >= task_created_at
+            and item["recorded_at"] - 180 <= observed <= item["recorded_at"] + 5)
 
 
 def operation(item: dict) -> dict:
@@ -181,6 +183,27 @@ def _host_observation(item: dict, host: str, created: int) -> dict | None:
     return None
 
 
+def _inspection_resources(item: dict, observation: dict, items: list[dict], host: str, created: int) -> tuple[dict, str]:
+    # The catalog tool and the compact inspection tool share the same upstream metrics.
+    from ..fleet_tools import summarize_resources
+
+    native = [value for value in items if value["tool_name"] == "ops_call"
+              and value["arguments"].get("operation") == "host.metrics"
+              and value["arguments"].get("params", {}).get("host") == host
+              and value["recorded_at"] >= item["recorded_at"]]
+    if not native:
+        return observation.get("resources") or {}, item["evidence_id"]
+    latest = max(native, key=lambda value: value["recorded_at"])
+    payload = latest["payload"]
+    data = payload.get("result") or {}
+    if (not successful_evidence(latest) or payload.get("operation") != "host.metrics"
+            or not isinstance(data, dict) or data.get("host") != host
+            or not fresh_at_capture(data.get("observed_at"), latest, created)
+            or latest["recorded_at"] - item["recorded_at"] > 180):
+        return {}, latest["evidence_id"]
+    return summarize_resources({"status": "fresh", "data": data}, host, now=latest["recorded_at"]), latest["evidence_id"]
+
+
 def _check_server(check: dict, items: list[dict], created: int) -> tuple[str, str, dict]:
     host, kind = check["host_id"], check["kind"]
     if kind == "host_inspection":
@@ -190,13 +213,15 @@ def _check_server(check: dict, items: list[dict], created: int) -> tuple[str, st
         if relevant:
             item = max(relevant, key=lambda item: item["recorded_at"])
             value = _host_observation(item, host, created)
-            resource = (value or {}).get("resources") or {}
+            resource, resource_ref = _inspection_resources(item, value or {}, items, host, created)
+            resource_item = next((row for row in items if row["evidence_id"] == resource_ref), item)
             if (value and value.get("root_disk") and value.get("failed_service_count") is not None
                     and resource.get("status") == "available"
-                    and fresh_at_capture(resource.get("cpu_observed_at"), item, created)
-                    and fresh_at_capture(resource.get("memory_observed_at"), item, created)):
+                    and fresh_at_capture(resource.get("cpu_observed_at"), resource_item, created)
+                    and fresh_at_capture(resource.get("memory_observed_at"), resource_item, created)):
                 return "passed", "已取得新鲜磁盘、CPU、内存和可见服务状态；发现异常不等于已修复", {
-                    "host_id": host, "observation": value, "evidence_ref": item["evidence_id"]}
+                    "host_id": host, "observation": {**value, "resources": resource},
+                    "evidence_ref": item["evidence_id"], "resource_evidence_ref": resource_ref}
         return "unverified", "最新观测缺少目标主机的新鲜磁盘、资源或服务数据", {}
     if kind in {"service_effect", "host_reboot"}:
         level = "service_state" if kind == "service_effect" else "host_reboot"
@@ -314,5 +339,14 @@ def evaluate_acceptance(contract: Mapping[str, Any], evidence: list[dict], revie
         rows.append({**effect, "criterion_index": f"operation:{op_id}", "description": f"操作 {op_id} 的实际效果",
                      "status": status, "reason": reason, "detail": detail,
                      "evidence_refs": [item["evidence_id"] for item in items]})
+    # A full host inspection needs machine-checked coverage even if classified as generic evidence.
+    checked_hosts = {check["host_id"] for check in checks if check["kind"] == "host_inspection"}
+    observed_hosts = {item["arguments"].get("host_id") for item in evidence if item["tool_name"] == "host_inspect"}
+    for host in sorted(value for value in observed_hosts - checked_hosts if isinstance(value, str) and value):
+        check = {"kind": "host_inspection", "host_id": host}
+        status, reason, detail = _check_server(check, evidence, task_created_at)
+        rows.append({**check, "criterion_index": f"inspection:{host}", "description": f"主机 {host} 的巡检覆盖",
+                     "status": status, "reason": reason, "detail": detail,
+                     "evidence_refs": list(dict.fromkeys(value for key, value in detail.items() if key.endswith("evidence_ref")))})
     status = "passed" if rows and all(row["status"] == "passed" for row in rows) else "failed" if any(row["status"] == "failed" for row in rows) else "unverified"
     return {"version": 2, "status": status, "criteria": rows}

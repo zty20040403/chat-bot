@@ -34,7 +34,7 @@ execution 需要动手执行，不能 direct；project 或 research_delivery 需
 “继续/改成 Java/加购物车”必须结合当前已授权的话题及任务；不要新建一个无关项目。
 持久文件写入、项目实现、构建和交付必须由子任务执行。主控保留解释、检索及最终回复。
 任务需要 objective、deliverables、constraints、acceptance。
-outcome_checks 按 acceptance 的从零开始序号声明机器验收方式。
+outcome_checks 必填，按 acceptance 的从零开始序号逐条声明验收方式，不得遗漏或用空数组跳过。
 服务器巡检用 host_inspection，并为每台目标主机单列条款；空间清理用 disk_delta，指定 host_id、mountpoint 和最低预期变化字节。
 服务启停重启用 service_effect，指定 host_id、完整 unit 和 action；整机重启用 host_reboot。
 其他内容用 evidence，由独立验收人逐项引用宿主证据。不能以“命令退出零”替代这些目标检查。
@@ -83,7 +83,7 @@ DECISION_TOOL = {
                     },
                 },
             },
-            "required": ["mode", "task_type", "reason", "answer", "objective", "deliverables", "constraints", "acceptance", "delivery_required", "steps"],
+            "required": ["mode", "task_type", "reason", "answer", "objective", "deliverables", "constraints", "acceptance", "outcome_checks", "delivery_required", "steps"],
         },
     },
 }
@@ -145,8 +145,11 @@ class EntryDecision:
         if not isinstance(delivery_required, bool):
             raise ValueError("delivery_required must be a boolean")
         acceptance = strings("acceptance")
+        raw_checks = raw.get("outcome_checks")
+        if not isinstance(raw_checks, list) or len(raw_checks) != len(acceptance):
+            raise ValueError("outcome_checks must explicitly cover every acceptance criterion")
         contract = TaskContract(objective, strings("deliverables"), strings("constraints"), acceptance,
-                                delivery_required, normalize_checks(raw.get("outcome_checks"), acceptance))
+                                delivery_required, normalize_checks(raw_checks, acceptance))
         steps = raw.get("steps")
         if mode not in {"direct", "delegate", "workflow", "revise"} or not reason or not isinstance(steps, list):
             raise ValueError("mode, reason and steps are required")
@@ -201,7 +204,11 @@ class EntryDecision:
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any], *, max_steps: int = 8) -> "EntryDecision":
-        return cls.parse({**payload, **payload.get("contract", {}), "answer": payload.get("answer", "")}, max_steps=max_steps)
+        contract = payload.get("contract", {})
+        raw = {**payload, **contract, "answer": payload.get("answer", "")}
+        if contract.get("version", 1) < 2:
+            raw["outcome_checks"] = list(normalize_checks(raw.get("outcome_checks"), raw.get("acceptance", [])))
+        return cls.parse(raw, max_steps=max_steps)
 
 
 def normalize_direct_entry_payload(raw: Mapping[str, Any]) -> dict[str, Any] | None:
