@@ -400,3 +400,47 @@ exhaustion, fresh revision context, replay and untouched sibling sessions. An
 isolated PostgreSQL migration/concurrency test also passed with revision archival,
 stale-writer rejection and preservation of acknowledged file receipts. The test
 database was stopped. Deployment and a fresh production acceptance are pending.
+
+## Revision 7 Production Result
+
+2026-09-11 03:41 HKT: Bot `e205356`, nix-config `36a75d4` deployed to h610 as
+`/nix/store/m97g6g4azg7ri5dcy0wisbr2d3yxsmq5-nixos-system-h610-26.05.20260622.3426825`.
+The gaoji and control services restarted and remain active. Max PID 473603 and
+PostgreSQL node PID 8264 retained their activation times. The sandbox image was
+reused. This supersedes the deployment-pending note above.
+
+Task 59 revision 7 archived the four selected execution sessions and rebuilt
+their contexts. The live phase audit found no prior correction instruction in
+the new execution sessions. All three inspections succeeded. The compiler
+created a new UTF-8 Chinese Markdown report, and its report validation passed
+without a correction pass. The independent reviewer passed all eight acceptance
+criteria. The task nevertheless remains partial because the report honestly
+records missing current h610 directory measurements; a checklist alone does not
+erase that unresolved work.
+
+At 03:59 HKT the persisted QQ receipt confirmed the 7,053-byte file
+`kb-59-r7-b60ee85966-report-20260911-readonly-acceptance.md` was acknowledged after
+one upload. An ambiguous receipt was reconciled against the group file list;
+no second upload was performed. Final text receipt 801317198 was committed.
+
+Remaining acceptance work:
+
+- Fresh h610 `/nix/store` usage and `/var/lib` breakdown. The report-generation
+  rerun deliberately forbade new command execution and labeled earlier scans as
+  historical; those figures are not a current space-attribution measurement.
+  The live execution-profile catalog exposes a diagnostic profile with a
+  7,200-second maximum, but the controller has its own shorter deadline and
+  command submission still requires the existing approval flow. A profile query
+  does not authorize or execute a scan.
+- Actual production upload-in-flight process-loss boundaries. Isolated
+  PostgreSQL/SIGKILL tests used simulated QQ transport. The actual earlier bot
+  restart proved external-wait recovery, not every upload boundary.
+- Authenticated production console interaction. The last browser observation
+  was an expired login on the locked Mac. Backend projection and isolated SSE
+  interaction tests do not replace this acceptance.
+- Explicitly authorized disposable cleanup and before/after verification. The
+  proposed h610 test directory `/var/tmp/gaoji-outcome-acceptance-20260910/`, with
+  at most 256 MiB of generated test data, has not been approved or exercised.
+
+No real cleanup, host reboot, unrelated service restart, or forced interruption
+of a live upload was performed in revision 7. The full checklist remains open.
