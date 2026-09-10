@@ -28,8 +28,8 @@ from .agent import (
 )
 from .ai_tools import ToolDefinition
 from .agent.execution import DECISION_TOOL, ENTRY_PROMPT, EntryDecision, ExecutionEntryError, active_agent_step
-from .agent.evidence import (EVIDENCE_SQL, EvidenceStoreMixin, READ_TASK_EVIDENCE,
-                             decode_result, evidence_index, read_evidence)
+from .agent.evidence import (EVIDENCE_SQL, EvidenceStoreMixin, READ_TASK_EVIDENCE, READ_TASK_EVIDENCE_BATCH,
+                             decode_result, evidence_index, read_evidence, read_evidence_batch)
 from .agent.outcomes import (acceptance_blocks_completion, evaluate_acceptance,
                              outcome_report, validate_report)
 from .agent.file_outbox import FileOutboxStoreMixin, attempt_file
@@ -44,7 +44,8 @@ from .agent.sessions import AgentSessionStoreMixin, READ_AGENT_RESULT, read_upst
 from .agent.external import ExternalCalls, ExternalPending, ExternalStoreMixin, EXTERNAL_SQL, active_external
 from .agent.receipt_links import evidence_fingerprint, link_operation_receipts
 from .agent.worker_report import (checked_report, checked_correction, correction_input, retain_execution_facts,
-                                  separate_cluster_artifacts)
+                                  separate_cluster_artifacts, report_refs)
+from .config import settings
 from .agent.control import (CONTROL_SQL, TaskControlStoreMixin, LeaseLost,
                             active_job_fence, active_task_id, active_model_policy, assert_job_owned)
 from .deepseek import (
@@ -2978,26 +2979,39 @@ class SubAgentCoordinator:
 
         read_refs: set[str] = set()
         next_offsets: dict[str, int] = {}
+        remaining_chars = min(settings.tool_max_context_chars, 60000)
+        max_rounds = min(8, max(4, len(report_refs(original)) + 1))
 
         async def readonly_tool(name: str, arguments: dict) -> str:
+            nonlocal remaining_chars
             check_owned()
-            if name == "read_task_evidence" and tool_enabled(name):
-                raw = read_evidence(evidence, arguments)
+            if (name in {"read_task_evidence", "read_task_evidence_batch"}
+                    and tool_enabled(name) and tool_enabled("read_task_evidence")):
+                budget = min(settings.tool_max_result_chars, remaining_chars, 24000)
+                reader = read_evidence_batch if name == "read_task_evidence_batch" else read_evidence
+                raw = reader(evidence, arguments, max_chars=budget)
                 reply = json.loads(raw)
-                ref = reply.get("ref")
-                if (reply.get("ok") and reply.get("complete") and reply.get("content")
-                        and arguments.get("offset", 0) == next_offsets.get(ref, 0)):
-                    if reply.get("next_offset") is None:
-                        read_refs.add(ref)
-                    else:
-                        next_offsets[ref] = reply["next_offset"]
-                return raw
-            return json.dumps({"ok": False, "error": "Report correction permits only read_task_evidence"})
+                pages = reply.get("results", []) if name == "read_task_evidence_batch" else [reply]
+                requests = arguments.get("requests", []) if name == "read_task_evidence_batch" else [arguments]
+                if len(raw) <= budget and reply.get("ok"):
+                    for request, page in zip(requests, pages):
+                        ref = page.get("ref")
+                        if (page.get("ok") and page.get("complete") and page.get("content")
+                                and request.get("offset", 0) == next_offsets.get(ref, 0)):
+                            if page.get("next_offset") is None:
+                                read_refs.add(ref)
+                            else:
+                                next_offsets[ref] = page["next_offset"]
+            else:
+                raw = json.dumps({"ok": False, "error": "Report correction permits only authorized evidence reads"})
+            remaining_chars = max(remaining_chars - len(raw), 0)
+            return raw
 
         check_owned()
         self.store.append_checkpoint(task.task_id, "report_correction", {
             "revision": revision, "fingerprint": fingerprint, "status": "started",
-            "errors": errors, "original": original,
+            "errors": errors, "original": original, "max_rounds": max_rounds,
+            "max_context_chars": remaining_chars,
         }, run_id=run.run_id)
         history = self.store.agent_session(task.task_id, run.run_id,
             scope_key=task.scope_key, requester_user_id=task.requester_user_id)["messages"]
@@ -3010,8 +3024,8 @@ class SubAgentCoordinator:
             async with self.scheduler.slot(task.scope_key, profile.name), asyncio.timeout(min(90, self.timeout_seconds, spec.timeout_seconds)):
                 with model_scope_for_role(spec.role, profile, self.model_catalog, self.profile_overrides):
                     answer = await ask_deepseek_with_tools(
-                        correction_input(original, evidence, errors), [], [READ_TASK_EVIDENCE], readonly_tool,
-                        profile=profile, max_tool_rounds=3, tool_context=_worker_prompt(spec),
+                        correction_input(original, evidence, errors), [], [READ_TASK_EVIDENCE_BATCH, READ_TASK_EVIDENCE], readonly_tool,
+                        profile=profile, max_tool_rounds=max_rounds, tool_context=_worker_prompt(spec),
                         trace=trace, event_sink=event_sink,
                         transcript_sink=save_correction_transcript,
                     )

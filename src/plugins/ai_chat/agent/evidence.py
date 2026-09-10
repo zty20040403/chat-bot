@@ -117,7 +117,18 @@ READ_TASK_EVIDENCE = {"type": "function", "function": {
         "required": ["ref"]}}}
 
 
-def read_evidence(items: list[dict], arguments: dict) -> str:
+READ_TASK_EVIDENCE_BATCH = {"type": "function", "function": {
+    "name": "read_task_evidence_batch",
+    "description": "批量读取最多8条获准的任务证据。每项独立分页；next_offset非空时必须继续读取，不能把分页片段当成完整证据。",
+    "parameters": {"type": "object", "additionalProperties": False,
+        "properties": {"requests": {"type": "array", "minItems": 1, "maxItems": 8,
+            "items": {"type": "object", "additionalProperties": False,
+                "properties": {"ref": {"type": "string", "maxLength": 80},
+                               "offset": {"type": "integer", "minimum": 0}},
+                "required": ["ref"]}}}, "required": ["requests"]}}}
+
+
+def read_evidence(items: list[dict], arguments: dict, *, max_chars: int = 12000) -> str:
     found = next((item for item in items if item["evidence_id"] == arguments.get("ref")), None)
     if found is None:
         return canonical({"ok": False, "error": "Evidence is outside the authorized task/step context"})
@@ -125,7 +136,40 @@ def read_evidence(items: list[dict], arguments: dict) -> str:
     if type(offset) is not int or offset < 0:
         return canonical({"ok": False, "error": "Invalid offset"})
     body = canonical(found["payload"])
-    return canonical({"ok": True, "ref": found["evidence_id"], "sha256": found["payload_hash"],
-                      "complete": found["complete"], "recorded_at": found["recorded_at"],
-                      "content": body[offset:offset + 12000],
-                      "next_offset": offset + 12000 if offset + 12000 < len(body) else None})
+    def page(length):
+        end = offset + length
+        return canonical({"ok": True, "ref": found["evidence_id"], "sha256": found["payload_hash"],
+            "complete": found["complete"], "recorded_at": found["recorded_at"],
+            "content": body[offset:end], "next_offset": end if end < len(body) else None})
+    # JSON escaping and the evidence envelope count toward the actual model input.
+    low, high = 0, max(0, min(len(body) - offset, 12000))
+    while low < high:
+        middle = (low + high + 1) // 2
+        if len(page(middle)) <= max_chars:
+            low = middle
+        else:
+            high = middle - 1
+    if len(page(low)) > max_chars or (low == 0 and offset < len(body)):
+        return canonical({"ok": False, "error": "Evidence result budget exhausted"})
+    return page(low)
+
+
+def read_evidence_batch(items: list[dict], arguments: dict, *, max_chars: int = 12000) -> str:
+    requests = arguments.get("requests")
+    if (not isinstance(requests, list) or not 1 <= len(requests) <= 8
+            or set(arguments) != {"requests"}):
+        return canonical({"ok": False, "error": "Provide 1 to 8 evidence requests"})
+    if any(not isinstance(item, dict) or not isinstance(item.get("ref"), str)
+           or len(item["ref"]) > 80 or set(item) - {"ref", "offset"}
+           or type(item.get("offset", 0)) is not int or item.get("offset", 0) < 0
+           for item in requests):
+        return canonical({"ok": False, "error": "Invalid evidence batch request"})
+    if len({item["ref"] for item in requests}) != len(requests):
+        return canonical({"ok": False, "error": "Use one page per reference in each batch"})
+    result = {"ok": True, "results": []}
+    for index, request in enumerate(requests):
+        remaining = max_chars - len(canonical(result)) - 1
+        per_item = remaining // (len(requests) - index)
+        result["results"].append(json.loads(read_evidence(items, request, max_chars=per_item)))
+    raw = canonical(result)
+    return raw if len(raw) <= max_chars else canonical({"ok": False, "error": "Evidence result budget exhausted"})

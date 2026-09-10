@@ -71,8 +71,11 @@ def checked_correction(result: dict, evidence: list[dict], read_refs: set[str], 
 def correction_input(original: dict, evidence: list[dict], errors: list[str]) -> str:
     return (
         "[只读交付纠错]\n你已经执行完本步骤。只纠正下面报告的字段和证据引用，不重新执行任务。"
-        "只能读取本轮宿主证据；报告引用的每条证据都必须调用 read_task_evidence 从 offset=0 读完全部分页，"
+        "只能读取本轮宿主证据；先用 read_task_evidence_batch 批量读取本轮需要引用的证据，每批最多8条。"
+        "每条从 offset=0 开始；next_offset 非空就继续批量读取下一页，直到全部读完，"
         "再修正编号、对象和观测时间。只看索引、猜测编号不能通过纠错。"
+        "单条可用 read_task_evidence；两种工具读取权限一致。先列齐要核对的引用，一次请求多条，"
+        "不要为每条小证据单独调用一轮模型。不要重复读取已经读完整的证据。"
         "历史上下文的 evidence# 不能直接沿用。recorded_at 是收取时间，不一定是来源采样时间。"
         "保留真实未完成项、失败和已生成文件；不能通过清空结论或删除文件来通过校验。"
         "不能新建文件、修改文件、执行命令、发送或申请授权。文件正文错误必须留给后续修复步骤。"

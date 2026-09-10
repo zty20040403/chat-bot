@@ -324,3 +324,27 @@ The focused suite passed 109 tests. Two additional isolated PostgreSQL tests
 passed, including five real SIGKILL boundaries with explicitly simulated QQ
 transport. The local test database was stopped afterward. These checks do not
 prove every production QQ crash boundary or authenticated browser interaction.
+
+## Batched Evidence Correction
+
+Revision 5's compiler cited eight distinct references, but its three-round
+read-only correction finished only five. The correction now offers an authorized
+batch reader for up to eight references, retaining the single reader and its
+parent permission switch. Each reference still requires an in-order full read;
+foreign evidence, skipped pages and incomplete source records receive no credit.
+The pass remains single-attempt and read-only, with a 90-second ceiling, four to
+eight model rounds based on the report, and at most 60,000 tool-result characters
+(or the configured lower limit). It cannot repeat execution or hide unresolved
+work. Large evidence may still exceed the bounded budget and must remain partial.
+
+Inspection also found that a 12,000-character body plus JSON escaping and metadata
+could exceed the tool transport limit, even when the reader claimed a full page.
+Pagination now fits the entire serialized response; batches share that budget.
+Only pages actually fitting the transport and cumulative budgets can count as
+read. Batch and single pages can continue one another without skipping content.
+
+The targeted evidence, report correction, policy, outcome, reviewer, runtime and
+tool-loop suite passed 114 tests. The actual tool loop was exercised with mocked
+model responses, eight paginated references and a smaller transport limit; the
+model received parseable, complete pages and reconstructed the original evidence.
+This batch change has not yet passed a production model run or been deployed.

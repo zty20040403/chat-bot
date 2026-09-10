@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
+from dataclasses import replace
 import json
 import unittest
 from types import SimpleNamespace
@@ -15,6 +16,7 @@ from src.plugins.ai_chat.agent.worker_report import (
     checked_report, retain_execution_facts, separate_cluster_artifacts,
 )
 from src.plugins.ai_chat.deepseek import DeepSeekTrace
+from src.plugins.ai_chat.config import settings
 from src.plugins.ai_chat.model_catalog import ModelCatalog
 from src.plugins.ai_chat.subagents import SubAgentCoordinator, SubAgentStore, TaskStep
 
@@ -62,7 +64,7 @@ class ReportCorrectionTests(unittest.IsolatedAsyncioTestCase):
 
         async def model(text, history, tools, execute, **kw):
             self.assertEqual(history, [])
-            self.assertEqual([t["function"]["name"] for t in tools], ["read_task_evidence"])
+            self.assertEqual([t["function"]["name"] for t in tools], ["read_task_evidence_batch", "read_task_evidence"])
             self.assertIn(self.ref, text)
             for name in ("ops_call", "sandbox_exec", "send_file_from_sandbox"):
                 self.assertFalse(json.loads(await execute(name, {}))["ok"])
@@ -83,6 +85,112 @@ class ReportCorrectionTests(unittest.IsolatedAsyncioTestCase):
             result = await self.correct(report(self.ref))
         call.assert_not_called()
         self.assertEqual(result["report_validation"]["status"], "passed")
+
+    async def test_batch_corrects_eight_references_in_one_tool_call_and_survives_resume(self):
+        refs = [self.store.record_evidence(self.task.task_id, self.run.run_id, "host_inspect",
+            {"host_id": f"host-{i}"}, {"ok": True, "observed_at": 1000, "host": f"host-{i}"})["ref"] for i in range(8)]
+        corrected = report(refs[0])
+        corrected["findings"] = [{"description": f"host-{i} is online", "evidence_refs": [ref]}
+                                  for i, ref in enumerate(refs)]
+        async def model(text, history, tools, execute, **kw):
+            self.assertIn("read_task_evidence_batch", text)
+            reply = json.loads(await execute("read_task_evidence_batch", {"requests": [{"ref": ref} for ref in refs]}))
+            self.assertTrue(reply["ok"])
+            self.assertEqual(len(reply["results"]), 8)
+            self.assertTrue(all(page["next_offset"] is None for page in reply["results"]))
+            return json.dumps(corrected)
+        with patch("src.plugins.ai_chat.subagents.ask_deepseek_with_tools", side_effect=model) as call:
+            result = await self.correct()
+            restored = await self.correct()
+        self.assertEqual(result, restored)
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(call.await_count, 1)
+        checkpoint = self.store.latest_run_checkpoint(self.task.task_id, self.run.run_id, "report_correction")
+        self.assertEqual(set(checkpoint["read_refs"]), set(refs))
+
+    async def test_batch_does_not_bypass_parent_switch_or_full_read_requirement(self):
+        async def model(text, history, tools, execute, **kw):
+            with patch("src.plugins.ai_chat.subagents.tool_enabled", side_effect=lambda name: name != "read_task_evidence"):
+                reply = json.loads(await execute("read_task_evidence_batch", {"requests": [{"ref": self.ref}]}))
+                self.assertFalse(reply["ok"])
+            return json.dumps(report(self.ref))
+        with patch("src.plugins.ai_chat.subagents.ask_deepseek_with_tools", side_effect=model):
+            result = await self.correct()
+        self.assertEqual(result["report_validation"]["status"], "incomplete")
+
+    async def test_batch_pages_survive_actual_tool_loop_and_transport_limits(self):
+        refs = [self.store.record_evidence(self.task.task_id, self.run.run_id, "host_inspect",
+            {"host_id": f"host-{i}"}, {"ok": True, "content": '\\"中\n' * 130})["ref"]
+            for i in range(8)]
+        corrected = report(refs[0])
+        corrected["findings"] = [{"description": f"host-{i} inspected", "evidence_refs": [ref]}
+                                  for i, ref in enumerate(refs)]
+        original = deepcopy(corrected)
+        for i, finding in enumerate(original["findings"]):
+            finding["evidence_refs"] = [f"evidence#old-{i}"]
+        fragments = {ref: [] for ref in refs}
+        requests = [{"ref": ref, "offset": 0} for ref in refs]
+        seen_calls = set()
+        limits = replace(settings, tool_max_result_chars=5000, tool_max_context_chars=30000)
+
+        async def completion(*args, **kwargs):
+            nonlocal requests
+            for message in kwargs["messages"]:
+                if message["role"] != "tool" or message["tool_call_id"] in seen_calls:
+                    continue
+                seen_calls.add(message["tool_call_id"])
+                self.assertLessEqual(len(message["content"]), limits.tool_max_result_chars)
+                payload = json.loads(message["content"])
+                self.assertTrue(payload["ok"])
+                requests = []
+                for page in payload["results"]:
+                    self.assertTrue(page["ok"])
+                    fragments[page["ref"]].append(page["content"])
+                    if page["next_offset"] is not None:
+                        requests.append({"ref": page["ref"], "offset": page["next_offset"]})
+            calls = [] if not requests else [SimpleNamespace(id=f"batch-{len(seen_calls)}",
+                function=SimpleNamespace(name="read_task_evidence_batch",
+                    arguments=json.dumps({"requests": requests})))]
+            message = SimpleNamespace(content="" if requests else json.dumps(corrected), tool_calls=calls)
+            return SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=None), ""
+
+        with patch("src.plugins.ai_chat.subagents.settings", limits), patch(
+            "src.plugins.ai_chat.deepseek.settings", limits), patch(
+            "src.plugins.ai_chat.deepseek._completion_with_optional_stream", side_effect=completion):
+            result = await self.correct(original)
+        self.assertGreater(len(seen_calls), 1)
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["report_validation"]["status"], "passed")
+        checkpoint = self.store.latest_run_checkpoint(self.task.task_id, self.run.run_id, "report_correction")
+        self.assertEqual(set(checkpoint["read_refs"]), set(refs))
+        for item in self.store.task_evidence(self.task.task_id):
+            if item["evidence_id"] in fragments:
+                self.assertEqual(json.loads("".join(fragments[item["evidence_id"]])), item["payload"])
+
+    async def test_batch_can_finish_single_read_pagination_but_cannot_skip_pages(self):
+        ref = self.store.record_evidence(self.task.task_id, self.run.run_id, "host_inspect", {},
+            {"content": "x" * 16000})["ref"]
+        async def model(text, history, tools, execute, **kw):
+            page = json.loads(await execute("read_task_evidence", {"ref": ref}))
+            self.assertIsNotNone(page["next_offset"])
+            raw = await execute("read_task_evidence_batch", {"requests": [{"ref": ref, "offset": page["next_offset"]}]})
+            self.assertTrue(json.loads(raw)["results"][0]["next_offset"] is None)
+            return json.dumps(report(ref))
+        with patch("src.plugins.ai_chat.subagents.ask_deepseek_with_tools", side_effect=model):
+            result = await self.correct()
+        self.assertEqual(result["status"], "success")
+
+    async def test_transport_budget_cannot_grant_credit_for_truncated_evidence(self):
+        async def model(text, history, tools, execute, **kw):
+            for _ in range(3):
+                raw = await execute("read_task_evidence_batch", {"requests": [{"ref": self.ref}]})
+                self.assertFalse(json.loads(raw)["ok"])
+            return json.dumps(report(self.ref))
+        settings = SimpleNamespace(tool_max_context_chars=40, tool_max_result_chars=12000)
+        with patch("src.plugins.ai_chat.subagents.settings", settings), patch(
+            "src.plugins.ai_chat.subagents.ask_deepseek_with_tools", side_effect=model):
+            result = await self.correct()
+        self.assertEqual(result["report_validation"]["status"], "incomplete")
 
     async def test_step_corrects_claims_then_captures_real_file(self):
         upload = "artifact_" + "a" * 32
