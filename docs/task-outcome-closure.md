@@ -243,5 +243,24 @@ The full step-resume path restores correction checkpoints before opening any
 execution tools. A corrected evidence reference must have a recorded complete,
 in-order read through the restricted evidence reader; copying an ID from the
 index is not sufficient, including after recovery from a cached correction.
-These checks are not yet a successful production re-run of revision 3, a browser
-acceptance, or an authorized cleanup acceptance.
+These checks alone are not a browser or authorized cleanup acceptance.
+
+2026-09-11 01:45 HKT: Bot `07a18e7`, nix-config `47c9133` deployed to h610 as
+`/nix/store/7fxczb0fxfyjfm82y2pk3ncvms68mqa5-nixos-system-h610-26.05.20260622.3426825`.
+The shared GPU monitoring commits `3537c19` and `2c53572` were retained. Fourteen
+NixOS host evaluations succeeded; gpd, m16 and x470 could not fetch their private
+WireGuard input from h610 because SSH host verification failed. No trust entries
+or credentials were changed. Only gaoji and its control service were restarted;
+Max PID 3710160 and PostgreSQL PID 8264 retained their activation times.
+
+Task 59 revision 4 passed the eight task-acceptance criteria. Its actual 8,307-byte
+Markdown snapshot `c23f070c13402f84fdf4ef7050881c2b7bb707c26bc94ce67a171bd83ba5fca4`
+was acknowledged with QQ file ID `81afe19b30904943991ec3cc4f026c9a`. It was uploaded
+once; an initially unknown receipt was reconciled without retransmission. The
+final text has native receipt 1349797214. The task remained partial because the
+h310 specialist could see four active alerts but only three details. Investigation
+found the compact fleet projection also truncated single-host inspection to three
+alerts and five failed units. The follow-up keeps overview limits, explicitly
+marks truncation and returns the complete provided snapshot for a single host.
+The focused fleet/outcome suite passed 32 tests. This is not yet a new live h310
+inspection, a production browser acceptance, or authorized cleanup acceptance.

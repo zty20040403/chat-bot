@@ -158,6 +158,30 @@ class FleetProjectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary["hosts"][0]["status"], "online")
         self.assertIsNone(summary["hosts"][0]["active_alert_count"])
 
+    def test_single_host_inspection_does_not_inherit_overview_detail_limits(self) -> None:
+        payload = fleet_payload(1000)
+        payload["active_alerts"]["data"]["alerts"] = [
+            {"labels": {"instance": "tank", "alertname": f"Alert{index}", "severity": "warning"},
+             "annotations": {"summary": f"Finding {index}"}}
+            for index in range(4)
+        ]
+        units = [{"unit": f"test{index}.service", "active_state": "failed"} for index in range(6)]
+        payload["failed_units"] = {"status": "fresh", "observed_at": 1000,
+            "data": {"hosts": [{"host": "tank", "state": "available", "units": units}]}}
+        overview = summarize_fleet(payload, now=1000)["hosts"][-1]
+        detail = summarize_fleet(payload, host_id="tank", now=1000)["hosts"][0]
+        self.assertEqual(len(overview["alerts"]), 3)
+        self.assertTrue(overview["alerts_truncated"])
+        self.assertEqual(len(overview["failed_services"]), 5)
+        self.assertTrue(overview["failed_services_truncated"])
+        self.assertEqual(detail["active_alert_count"], 4)
+        self.assertEqual([item["name"] for item in detail["alerts"]], [f"Alert{index}" for index in range(4)])
+        self.assertFalse(detail["alerts_truncated"])
+        self.assertEqual(detail["failed_service_count"], 6)
+        self.assertEqual(len(detail["failed_services"]), 6)
+        self.assertFalse(detail["failed_services_truncated"])
+        self.assertEqual(detail["alerts_observed_at"], payload["active_alerts"].get("observed_at"))
+
     def test_host_query_has_no_dummy_service_argument(self) -> None:
         registry = ToolCatalog([HOST_INSPECT_TOOL, SERVICE_INSPECT_TOOL])
         self.assertTrue(registry.validate("host_inspect", {"host_id": "tank"}).ok)

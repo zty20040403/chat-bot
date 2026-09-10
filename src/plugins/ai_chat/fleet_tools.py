@@ -139,6 +139,8 @@ def summarize_fleet(
             if _object(item.get("labels")).get("instance") == name
         ]
         alert_count = len(host_alerts) if _fresh(alerts_result, timestamp) else None
+        shown_alerts = host_alerts if host_id else host_alerts[:3]
+        shown_units = units if host_id else units[:5]
         status = "online" if online else "stale" if host and not current else "unknown"
         summary = f"{name} 在线"
         if online:
@@ -168,9 +170,12 @@ def summarize_fleet(
                         for key in ("unit", "active_state", "sub_state")
                         if key in item
                     }
-                    for item in units[:5]
+                    for item in shown_units
                 ],
+                "failed_services_truncated": failure_count is not None and failure_count > len(shown_units),
                 "active_alert_count": alert_count,
+                "alerts_truncated": len(host_alerts) > len(shown_alerts),
+                "alerts_observed_at": alerts_result.get("observed_at"),
                 "alerts": [
                     {
                         "name": _object(item.get("labels")).get("alertname"),
@@ -179,7 +184,7 @@ def summarize_fleet(
                             _object(item.get("annotations")).get("summary", "")
                         )[:180],
                     }
-                    for item in host_alerts[:3]
+                    for item in shown_alerts
                 ],
             }
         )
