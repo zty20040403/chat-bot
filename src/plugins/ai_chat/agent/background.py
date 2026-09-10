@@ -15,6 +15,8 @@ from ..deepseek import DeepSeekTrace
 from ..workers.durable_jobs import DurableJobWorker, JobDeferred
 from .external import poll_external
 from ..delivery import body_fingerprint
+from .file_outbox import attempt_file
+from ..tool_policy import tool_enabled
 
 
 class ContinuationCancelled(Exception):
@@ -107,6 +109,11 @@ class SubAgentDispatcher:
                         await asyncio.to_thread(self.enqueue_final, task_id)
                     except Exception as exc:
                         self.context.logger.warning(f"task#{task_id} final outbox reconciliation deferred: {type(exc).__name__}")
+                for task_id in await asyncio.to_thread(self.store.queued_file_tasks):
+                    try:
+                        await self.deliver_queued_files(task_id)
+                    except Exception as exc:
+                        self.context.logger.warning(f"task#{task_id} file outbox deferred: {type(exc).__name__}")
                 for task_id in await asyncio.to_thread(self.store.uncertain_deliveries):
                     try:
                         await self.reconcile(task_id)
@@ -117,6 +124,11 @@ class SubAgentDispatcher:
                         await asyncio.to_thread(self.settle_file_receipts, task_id)
                     except Exception as exc:
                         self.context.logger.warning(f"task#{task_id} file receipt settlement deferred: {type(exc).__name__}")
+                for task_id in await asyncio.to_thread(self.store.rejected_file_tasks):
+                    try:
+                        await asyncio.to_thread(self.notify_rejected_files, task_id)
+                    except Exception as exc:
+                        self.context.logger.warning(f"task#{task_id} file failure notice deferred: {type(exc).__name__}")
                 now = time.time()
                 if now >= next_message_reconcile:
                     try:
@@ -181,6 +193,55 @@ class SubAgentDispatcher:
             except Exception as exc:
                 self.context.logger.warning(f"{delivery.handle} receipt lookup deferred: {type(exc).__name__}")
         return matched
+
+    def notify_rejected_files(self, task_id: int):
+        control = self.store.control(task_id)
+        task = self.store.get(task_id)
+        if task is None or not control["dispatch"] or self.context.delivery_store is None:
+            return
+        event = self.restore_event(control["dispatch"])
+        if scope_from_event(event).key != task.scope_key or event.user_id != task.requester_user_id:
+            raise ValueError("File failure notice does not match task owner")
+        for delivery in self.store.deliveries(task_id):
+            if delivery["revision"] != control["revision"] or delivery["state"] != "rejected":
+                continue
+            phase = f"file_rejected:{control['revision']}:{delivery['key']}"
+            if any(item["phase"] == phase for item in self.store.checkpoints(task_id)):
+                continue
+            name = delivery["payload"].get("filename") or "附件"
+            body = decode_onebot_message(Message(MessageSegment.text(
+                f"{task.handle} 文件未送达：{name}。文件准备或上传被拒绝，多次重试后已停止。"
+                "这不是成功交付；具体原因见控制台文件记录。"))).body
+            notice, _ = self.context.delivery_store.enqueue(
+                idempotency_key=f"subagent-final:{task_id}:{control['revision']}:{phase}",
+                source_scope_key=task.scope_key, source_canonical_message_id=task.trigger_message_id,
+                target_scope=scope_from_event(event), body=body, reply_to_native_message_id=str(event.message_id))
+            self.store.append_checkpoint(task_id, phase, {"delivery_id": notice.delivery_id})
+
+    async def deliver_queued_files(self, task_id: int):
+        from ..agent_tools import AgentToolExecutor
+        task = self.store.get(task_id)
+        control = self.store.control(task_id)
+        if task is None or task.cancel_requested or not control["dispatch"] or not tool_enabled("send_file_from_sandbox"):
+            return
+        event = self.restore_event(control["dispatch"])
+        if scope_from_event(event).key != task.scope_key or event.user_id != task.requester_user_id:
+            raise ValueError("File outbox does not match the original task owner")
+        if not isinstance(event, GroupMessageEvent) or not self.services.group_enabled(event.group_id):
+            return
+        # No claim is made while QQ is disconnected, so reconnect can safely retry.
+        bot = get_bot(str(control["dispatch"]["bot_id"]))
+        executor = AgentToolExecutor(bot=bot, event=event, owner=task.conversation_id,
+            sandbox_manager=self.context.sandbox_manager, max_file_bytes=self.context.settings.sandbox_max_file_bytes,
+            scope=scope_from_event(event))
+        workspaces = StepWorkspaces(self.context.state_dir, executor,
+            retention_seconds=self.context.settings.subagent_retention_seconds)
+        for delivery in self.store.deliveries(task_id):
+            if delivery["revision"] != control["revision"] or delivery["state"] != "queued":
+                continue
+            async with asyncio.timeout(120):
+                await attempt_file(self.store, task_id, delivery,
+                    prepare=lambda item: workspaces.prepare_delivery(task_id, item), send=executor.send_file_content)
 
     async def prune_workspaces(self):
         root = self.context.state_dir / "subagent_artifacts"

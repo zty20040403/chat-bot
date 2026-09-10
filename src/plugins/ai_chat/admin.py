@@ -952,7 +952,12 @@ def register_admin(
             raise HTTPException(status_code=404, detail="Sub-Agent task not found")
         control = services.subagent_store.control(task_id)
         final = services.delivery_store.find_by_key(f"subagent-final:{task_id}:{control['revision']}") if services.delivery_store else None
+        from .agent.progress import task_progress
+        progress = task_progress(task, services.subagent_store.runs(task_id), services.subagent_store.task_evidence(task_id),
+            services.subagent_store.external_calls(task_id), services.subagent_store.deliveries(task_id), final,
+            revision=control["revision"])
         return {
+            "progress": progress,
             "control": {key: control[key] for key in ("version", "revision", "policy")},
             "background": bool(control["dispatch"]),
             "final_delivery": {"delivery_id": final.delivery_id, "status": final.status, "attempts": final.attempts,
@@ -1004,6 +1009,19 @@ def register_admin(
             "run_contexts": services.subagent_store.run_contexts(task_id),
             "events": services.subagent_store.events(task_id),
         }
+
+    @router.get("/api/subagents/{task_id}/evidence/{evidence_id}")
+    def subagent_evidence(task_id: int, evidence_id: str,
+                          authorization: Optional[str] = Header(default=None)) -> dict[str, object]:
+        authorize(authorization)
+        if services.subagent_store is None:
+            raise HTTPException(status_code=404, detail="Task evidence unavailable")
+        item = next((value for value in services.subagent_store.task_evidence(task_id)
+                     if value["evidence_id"] == evidence_id), None)
+        if item is None:
+            raise HTTPException(status_code=404, detail="Evidence outside current task revision")
+        return {key: item[key] for key in ("evidence_id", "task_id", "revision", "run_id", "tool_name",
+            "arguments", "payload", "payload_hash", "complete", "recorded_at")}
 
     @router.put("/api/subagents/{task_id}/models")
     def subagent_models(task_id: int, payload: SubAgentModelUpdate,

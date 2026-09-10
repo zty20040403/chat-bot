@@ -263,7 +263,7 @@ class SessionAndSchedulingTests(unittest.IsolatedAsyncioTestCase):
     async def test_reuses_entry_plan_and_same_role_workers_really_overlap(self):
         started, barrier = set(), asyncio.Event()
         async def worker(text, history, tools, execute_tool, **kwargs):
-            current = "frontend" if "实现前端" in text else "backend" if "实现后端" in text else "integration"
+            current = "acceptance" if "你是独立验收人" in text else "frontend" if "实现前端" in text else "backend" if "实现后端" in text else "integration"
             self.assertEqual(history, [])
             if current in {"frontend", "backend"}:
                 started.add(current)
@@ -273,18 +273,25 @@ class SessionAndSchedulingTests(unittest.IsolatedAsyncioTestCase):
             else:
                 self.assertTrue(barrier.is_set())
             kwargs["transcript_sink"]([{"role": "user", "content": current}])
-            return json.dumps({"status": "success", "summary": current})
+            tool = json.loads(await execute_tool("web_search", {"query": current}))
+            ref = tool["_task_evidence"]["ref"]
+            return json.dumps({"status": "success", "summary": current,
+                "findings": [], "completed": [{"description": current, "evidence_refs": [ref]}],
+                "authorization": [], "next_verification": [],
+                "metadata": {"criterion_reviews": [{"criterion_index": 0, "status": "passed",
+                    "reason": "测试替身提供独立验收回执", "evidence_refs": [ref]}]} if current == "acceptance" else {}})
         with patch("src.plugins.ai_chat.subagents.ask_deepseek_json", new=AsyncMock()) as planner, \
              patch("src.plugins.ai_chat.subagents.ask_deepseek_with_tools", side_effect=worker), \
              patch("src.plugins.ai_chat.subagents.ask_deepseek", new=AsyncMock(return_value="已集成")):
             result = await self.coordinator.run(scope_key="group:1", conversation_id="group:1:user:2", requester_user_id=2,
                 trigger_message_id=3, objective="商城", context="", selected_profile=self.profile,
-                tools=[TOOL], execute_tool=AsyncMock(), entry_decision=EntryDecision.parse(decision("workflow")))
+                tools=[TOOL], execute_tool=AsyncMock(return_value='{"ok":true,"content":"test evidence"}'), entry_decision=EntryDecision.parse(decision("workflow")))
         planner.assert_not_awaited()
         self.assertIn("已集成", result)
         task = self.store.recent(limit=1)[0]
         histories = [self.store.agent_session(task.task_id, run.run_id, scope_key="group:1", requester_user_id=2)["messages"] for run in self.store.runs(task.task_id)]
-        self.assertEqual([items[0]["content"] for items in histories], ["frontend", "backend", "integration"])
+        self.assertEqual([items[0]["content"] for items in histories], ["frontend", "backend", "integration", "acceptance"])
+        self.assertEqual(task.result["validation"]["acceptance"]["task_outcome"]["status"], "passed")
 
     async def test_sessions_are_versioned_and_scoped(self):
         task = self.task()

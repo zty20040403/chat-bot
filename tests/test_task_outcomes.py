@@ -1,0 +1,219 @@
+from __future__ import annotations
+
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+
+from tests.test_subagent_v2 import decision
+from src.plugins.ai_chat.agent.evidence import MAX_EVIDENCE_BYTES, read_evidence
+from src.plugins.ai_chat.agent.execution import EntryDecision
+from src.plugins.ai_chat.agent.outcomes import (
+    acceptance_blocks_completion, evaluate_acceptance, normalize_checks,
+    outcome_report, validate_report,
+)
+from src.plugins.ai_chat.subagents import SubAgentStore, TaskStep
+from src.plugins.ai_chat.agent.progress import task_progress
+
+
+def review(refs, index=0):
+    return {"metadata": {"criterion_reviews": [{"criterion_index": index, "status": "passed",
+        "reason": "已读取实际工具证据并核对目标", "evidence_refs": refs}]}}
+
+
+def contract(kind="evidence", **params):
+    return {"version": 2, "acceptance": ["验证目标"],
+        "outcome_checks": [{"criterion_index": 0, "kind": kind, **params}]}
+
+
+def observation(at, free=200, *, host="h610"):
+    return {"ok": True, "status": "fresh", "hosts": [{"host_id": host, "status": "online",
+        "exporter_sample_at": at, "failed_service_count": 2,
+        "resources": {"status": "available", "cpu_observed_at": at, "memory_observed_at": at,
+            "cpu_busy_percent": 10, "memory_total_bytes": 1000, "memory_available_bytes": 500},
+        "root_disk": {"mountpoint": "/", "available_bytes": free, "total_bytes": 1000, "device": "/dev/test"}}]}
+
+
+class TaskEvidenceTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "tasks.sqlite3"
+        self.store = SubAgentStore(self.path)
+        self.task = self.new_task("group:a")
+        self.run = self.store.create_run(self.task.task_id, TaskStep("inspect", "operator", "inspect", "report"),
+                                         allowed_tools=[], model_profile="test")
+
+    def new_task(self, scope):
+        return self.store.create_task(scope_key=scope, conversation_id=scope + ":user:2",
+            requester_user_id=2, trigger_message_id=None, objective="inspection", max_parallelism=3, max_steps=5, now=1000)
+
+    def tearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
+
+    def record(self, payload, tool="host_inspect", at=1010, args=None):
+        return self.store.record_evidence(self.task.task_id, self.run.run_id, tool,
+                                         args or {"host_id": "h610"}, payload, now=at)
+
+    def evaluate(self, plan, refs):
+        return evaluate_acceptance(plan, self.store.task_evidence(self.task.task_id), review(refs), task_created_at=1000)
+
+    def test_receipt_is_immutable_deduplicated_and_recovers(self):
+        first = self.record(observation(1010))
+        duplicate = self.record(observation(1010), at=1020)
+        self.assertEqual(first, duplicate)
+        changed = self.record(observation(1020, 210), at=1020)
+        self.assertNotEqual(first["ref"], changed["ref"])
+        self.store.close()
+        self.store = SubAgentStore(self.path)
+        items = self.store.task_evidence(self.task.task_id)
+        self.assertEqual(len(items), 2)
+        self.assertEqual(items[0]["payload"]["hosts"][0]["root_disk"]["available_bytes"], 200)
+
+    def test_scope_run_and_revision_are_hard_boundaries(self):
+        first = self.record(observation(1010))
+        other = self.new_task("group:b")
+        self.assertEqual(self.store.task_evidence(other.task_id), [])
+        with self.assertRaises(PermissionError):
+            self.store.record_evidence(other.task_id, self.run.run_id, "host_inspect", {}, observation(1010))
+        self.assertFalse(json.loads(read_evidence([], {"ref": first["ref"]}))["ok"])
+        self.store.update_control(self.task.task_id, expected_version=0, revision=2)
+        self.assertEqual(self.store.task_evidence(self.task.task_id), [])
+        with self.assertRaises(PermissionError):
+            self.store.record_evidence(self.task.task_id, self.run.run_id, "host_inspect", {}, observation(1010), revision=1)
+
+    def test_overlarge_evidence_cannot_pass_and_secrets_are_redacted(self):
+        ref = self.record({"ok": True, "api_key": "secret", "headers": {"authorization": "Bearer xyz"},
+                           "body": "sk-12345678901234567890", "command": "df  -B1\ntrue"})
+        item = self.store.task_evidence(self.task.task_id)[0]
+        self.assertNotIn("sk-123", item["payload_json"])
+        self.assertEqual(item["payload"]["api_key"], "[REDACTED]")
+        self.assertEqual(item["payload"]["command"], "df  -B1\ntrue")
+        ref = self.record({"content": "a" * (MAX_EVIDENCE_BYTES + 1)})
+        self.assertFalse(ref["complete"])
+        self.assertEqual(self.evaluate(contract(), [ref["ref"]])["status"], "unverified")
+
+    def test_inspection_can_finish_with_findings_but_not_wrong_host_or_stale_data(self):
+        ref = self.record(observation(1010))
+        self.assertEqual(self.evaluate(contract("host_inspection", host_id="h610"), [ref["ref"]])["status"], "passed")
+        self.assertEqual(self.evaluate(contract("host_inspection", host_id="tank"), [ref["ref"]])["status"], "unverified")
+        stale = self.record(observation(500))
+        self.assertEqual(self.evaluate(contract("host_inspection", host_id="h610"), [stale["ref"]])["status"], "unverified")
+
+    def test_disk_comparison_requires_completed_action_between_samples(self):
+        before = self.record(observation(1010, 200))
+        after = self.record(observation(1040, 300), at=1040)
+        plan = contract("disk_delta", host_id="h610", mountpoint="/", minimum_delta_bytes=50)
+        refs = [before["ref"], after["ref"]]
+        self.assertEqual(self.evaluate(plan, refs)["status"], "unverified")
+        op = self.record({"operation_id": "op_one", "host_id": "h610", "status": "succeeded",
+                          "created_at": 1020, "updated_at": 1030}, tool="operation_status", at=1030)
+        refs.append(op["ref"])
+        result = self.evaluate(plan, refs)
+        self.assertEqual(result["status"], "passed")
+        self.assertEqual(result["criteria"][0]["detail"]["delta_bytes"], 100)
+        self.assertEqual(result["criteria"][0]["detail"]["operation_ids"], ["op_one"])
+        plan["outcome_checks"][0]["minimum_delta_bytes"] = 101
+        self.assertEqual(self.evaluate(plan, refs)["status"], "failed")
+
+    def test_service_needs_verified_native_receipt_not_just_exit_zero(self):
+        plan = contract("service_effect", host_id="h610", unit="test.service", action="restart")
+        payload = {"operation_id": "op_one", "host_id": "h610", "status": "succeeded",
+                   "created_at": 1005,
+                   "result": {"verification": {"level": "command_exit", "verified": False}}}
+        ref = self.record(payload, tool="operation_status")
+        self.assertEqual(self.evaluate(plan, [ref["ref"]])["status"], "unverified")
+        payload["result"]["verification"] = {"level": "service_state", "verified": True,
+            "host": "h610", "unit": "test.service", "action": "restart", "current": {"observed_at": 1010}}
+        ref = self.record(payload, tool="operation_status")
+        self.assertEqual(self.evaluate(plan, [ref["ref"]])["status"], "passed")
+        forged = self.record(payload, tool="sandbox_exec")
+        self.assertEqual(self.evaluate(plan, [forged["ref"]])["status"], "unverified")
+        payload["created_at"] = 900
+        old_operation = self.record(payload, tool="operation_status")
+        self.assertEqual(self.evaluate(plan, [old_operation["ref"]])["status"], "unverified")
+
+    def test_planner_cannot_omit_the_effect_of_a_typed_mutation(self):
+        read = self.record({"ok": True, "content": "read fine"}, tool="web_search")
+        self.record({"operation_id": "op_unverified", "host_id": "h610", "created_at": 1005,
+                     "status": "succeeded", "result": {"verification": {"verified": False}}},
+            tool="service_control", args={"host_id": "h610", "unit": "test.service", "action": "restart"})
+        result = self.evaluate(contract(), [read["ref"]])
+        self.assertEqual(result["status"], "unverified")
+        self.assertEqual(len(result["criteria"]), 2)
+
+    def test_missing_duplicate_and_foreign_reviews_never_pass(self):
+        ref = self.record({"ok": True, "content": "evidence"})
+        items = self.store.task_evidence(self.task.task_id)
+        self.assertEqual(evaluate_acceptance(contract(), items, {}, task_created_at=1000)["status"], "unverified")
+        value = review([ref["ref"]])
+        value["metadata"]["criterion_reviews"] *= 2
+        self.assertEqual(evaluate_acceptance(contract(), items, value, task_created_at=1000)["status"], "unverified")
+        self.assertEqual(self.evaluate(contract(), ["evidence#invented"])["status"], "unverified")
+
+    def test_reviewer_cannot_cherry_pick_an_old_success_over_a_later_failure(self):
+        ref = self.record(observation(1010))
+        self.record({"ok": False, "error": "host unreachable"}, at=1020)
+        self.assertEqual(self.evaluate(contract("host_inspection", host_id="h610"), [ref["ref"]])["status"], "unverified")
+
+    def test_missing_resource_samples_are_not_a_complete_host_inspection(self):
+        data = observation(1010)
+        del data["hosts"][0]["resources"]
+        ref = self.record(data)
+        self.assertEqual(self.evaluate(contract("host_inspection", host_id="h610"), [ref["ref"]])["status"], "unverified")
+
+    def test_report_and_final_message_cannot_hide_unverified_outcome(self):
+        report = {"status": "success", "findings": [{"description": "all fixed", "evidence_refs": ["invented"]}],
+                  "completed": [], "authorization": [], "next_verification": []}
+        validated = validate_report(report, [], required=True)
+        self.assertEqual(validated["status"], "partial")
+        self.assertEqual(validated["findings"], [])
+        matrix = self.evaluate(contract(), [])
+        validation = {"status": "unverified", "task_outcome": matrix}
+        self.assertTrue(acceptance_blocks_completion(validation))
+        text = outcome_report(validation, "所有服务器都修好了")
+        self.assertNotIn("所有服务器都修好了", text)
+        self.assertIn("尚未验证", text)
+
+    def test_timeline_never_confuses_execution_with_delivery(self):
+        self.store.set_task_state(self.task.task_id, "completed", plan={"contract": {"delivery_required": True}},
+                                  result={"execution_state": "succeeded"})
+        task = self.store.get(self.task.task_id)
+        final = SimpleNamespace(status="committed", updated_at=1100)
+        rows = [{"revision": 1, "state": "unknown", "updated_at": 1100}]
+        progress = task_progress(task, [], [], [], rows, final, revision=1)
+        self.assertEqual(progress["execution_status"], "completed")
+        self.assertEqual(progress["delivery_status"], "partial")
+        self.assertEqual(progress["stages"][4]["status"], "unverified")
+        rows[0]["state"] = "acknowledged"
+        self.assertEqual(task_progress(task, [], [], [], rows, final, revision=1)["delivery_status"], "committed")
+        final.status = "ambiguous"
+        self.assertEqual(task_progress(task, [], [], [], rows, final, revision=1)["delivery_status"], "ambiguous")
+
+
+class OutcomeContractTests(unittest.TestCase):
+    def test_entry_persists_typed_requirements(self):
+        raw = decision("delegate")
+        raw["acceptance"] = ["检查 h610", "检查 tank"]
+        raw["outcome_checks"] = [{"criterion_index": i, "kind": "host_inspection", "host_id": host}
+                                  for i, host in enumerate(("h610", "tank"))]
+        parsed = EntryDecision.parse(raw)
+        restored = EntryDecision.from_payload(parsed.as_payload())
+        self.assertEqual(restored.contract, parsed.contract)
+        self.assertEqual(parsed.contract.as_payload()["version"], 2)
+
+    def test_invalid_checks_are_rejected_and_omissions_still_need_review(self):
+        self.assertEqual(normalize_checks([], ["prove it"])[0]["kind"], "evidence")
+        for value in (
+            [{"criterion_index": 1, "kind": "evidence"}],
+            [{"criterion_index": 0, "kind": "host_inspection", "host_id": "h610;rm"}],
+            [{"criterion_index": 0, "kind": "service_effect", "host_id": "h610", "unit": "x"}],
+            [{"criterion_index": 0, "kind": "disk_delta", "host_id": "h610", "minimum_delta_bytes": 0}],
+        ):
+            with self.assertRaises(ValueError):
+                normalize_checks(value, ["prove it"])
+
+
+if __name__ == "__main__":
+    unittest.main()

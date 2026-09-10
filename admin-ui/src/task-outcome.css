@@ -1,0 +1,33 @@
+.task-outcome { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--border, #dedee3); min-width: 0; }
+.outcome-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 16px; }
+.outcome-heading h3 { font-size: 16px; margin: 0; }
+.outcome-heading small, .outcome-stages small { color: var(--muted, #71717a); }
+.outcome-stages { list-style: none; padding: 0; margin: 0 0 20px; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; }
+.outcome-stages li { min-width: 0; display: flex; align-items: center; gap: 8px; }
+.outcome-stages li > div { flex: 1; min-width: 0; display: grid; justify-items: start; gap: 7px; }
+.outcome-stages li > svg { flex-shrink: 0; color: #a1a1aa; }
+.outcome-stages small { font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.outcome-stages strong { font-size: 13px; }
+.outcome-row-heading { display: flex; justify-content: space-between; align-items: start; gap: 12px; }
+.outcome-row-heading > strong { min-width: 0; overflow-wrap: anywhere; font-size: 14px; }
+.outcome-criteria article, .outcome-operations article, .outcome-findings article { padding: 12px 0; border-top: 1px solid #e4e4e7; min-width: 0; }
+.outcome-criteria p, .outcome-findings p, .outcome-operations p { font-size: 13px; line-height: 1.6; margin: 6px 0; overflow-wrap: anywhere; }
+.outcome-ref-list { display: flex; flex-wrap: wrap; gap: 4px; }
+.outcome-comparison { font-variant-numeric: tabular-nums; }
+.outcome-comparison small { display: block; color: #71717a; }
+.outcome-dialog { width: min(1140px, calc(100vw - 32px)); max-width: calc(100vw - 32px); max-height: calc(100dvh - 32px); padding: 24px; border: 1px solid #d4d4d8; border-radius: 6px; background: #fff; color: #18181b; overflow: auto; box-sizing: border-box; }
+.outcome-dialog::backdrop { background: rgb(0 0 0 / 35%); }
+.outcome-tabs { display: flex; gap: 4px; border-bottom: 1px solid #d4d4d8; margin-bottom: 16px; overflow-x: auto; }
+.outcome-tabs button { border: 0; border-radius: 0; padding: 10px 12px; background: transparent; color: #71717a; font-size: 13px; flex: 0 0 auto; }
+.outcome-tabs button[aria-selected="true"] { border-bottom: 2px solid #18181b; color: #18181b; }
+.outcome-tab-content { min-height: 260px; min-width: 0; }
+.outcome-tab-content pre { margin: 10px 0; padding: 12px; max-height: 480px; overflow: auto; background: #f4f4f5; border-radius: 4px; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.outcome-hash { display: block; font-size: 12px; overflow-wrap: anywhere; }
+.outcome-evidence-select { display: grid; gap: 8px; font-size: 13px; }
+.outcome-evidence-select select { min-width: 0; width: 100%; max-width: 100%; }
+.outcome-findings h4, .outcome-tab-content h4 { font-size: 14px; margin: 16px 0 8px; }
+@media (max-width: 760px) {
+  .outcome-stages { grid-template-columns: repeat(3, minmax(0, 1fr)); row-gap: 18px; }
+  .outcome-stages li:nth-child(3n) > svg { display: none; }
+  .outcome-dialog { padding: 16px; }
+}

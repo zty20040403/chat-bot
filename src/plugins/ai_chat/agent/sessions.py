@@ -63,7 +63,7 @@ READ_AGENT_RESULT = {
             "type": "object", "additionalProperties": False,
             "properties": {
                 "step_id": {"type": "string"},
-                "section": {"type": "string", "enum": ["summary", "facts", "artifacts", "cluster_artifacts", "metadata", "citations", "warnings", "unresolved", "handoff", "previous_evidence"]},
+                "section": {"type": "string", "enum": ["summary", "facts", "artifacts", "cluster_artifacts", "metadata", "citations", "warnings", "unresolved", "handoff", "previous_evidence", "findings", "completed", "authorization", "next_verification", "evidence_index"]},
                 "offset": {"type": "integer", "minimum": 0},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 20},
             },
@@ -75,7 +75,7 @@ READ_AGENT_RESULT = {
 
 def read_upstream_result(upstream, arguments) -> str:
     key, section = str(arguments.get("step_id", "")), str(arguments.get("section", ""))
-    if key not in upstream or section not in {"summary", "facts", "artifacts", "cluster_artifacts", "metadata", "citations", "warnings", "unresolved", "handoff", "previous_evidence"}:
+    if key not in upstream or section not in {"summary", "facts", "artifacts", "cluster_artifacts", "metadata", "citations", "warnings", "unresolved", "handoff", "previous_evidence", "findings", "completed", "authorization", "next_verification", "evidence_index"}:
         return json.dumps({"ok": False, "error": "No authorized upstream result or section"})
     value = cluster_artifact_refs(upstream[key]) if section == "cluster_artifacts" else upstream[key].get(section, "" if section == "summary" else [])
     offset = max(int(arguments.get("offset", 0)), 0)
@@ -122,7 +122,7 @@ def upstream_index(upstream) -> str:
         refs = cluster_artifact_refs(result)
         index[key] = {
             "status": result.get("status", "partial"), "summary": str(result.get("summary", ""))[:160],
-            "sections": {field: len(result.get(field) or []) for field in ("facts", "artifacts", "citations", "unresolved", "handoff", "previous_evidence")},
+            "sections": {field: len(result.get(field) or []) for field in ("facts", "artifacts", "citations", "unresolved", "handoff", "previous_evidence", "findings", "completed", "authorization", "next_verification", "evidence_index")},
             "read_with": "read_agent_result", "step_id": key,
         }
         if refs:

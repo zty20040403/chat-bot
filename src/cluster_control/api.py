@@ -270,6 +270,10 @@ def create_app(
     async def host(host: str) -> dict[str, object]:
         return await service.host_facts(valid_host(host))
 
+    @app.get("/v1/hosts/{host}/metrics", dependencies=auth)
+    async def host_metrics(host: str) -> dict[str, object]:
+        return (await service.query_capability("host.metrics.read", {"host": valid_host(host)})).as_dict()
+
     @app.get("/v1/hosts/{host}/units/{unit}", dependencies=auth)
     async def unit(host: str, unit: str) -> dict[str, object]:
         return await service.unit_status(valid_host(host), valid_unit(unit))

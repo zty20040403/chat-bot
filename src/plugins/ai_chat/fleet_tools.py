@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import re
 import time
 from typing import Any
@@ -47,7 +48,9 @@ def _fresh(payload: dict[str, Any], now: int) -> bool:
 
 def _root_disk(host: dict[str, Any]) -> dict[str, Any] | None:
     pressure = _object(host.get("pressure"))
-    values: dict[str, int] = {}
+    values: dict[str, Any] = {}
+    devices: set[str] = set()
+    device_count = 0
     for metric, label in (
         ("filesystem_size_bytes", "total_bytes"),
         ("filesystem_available_bytes", "available_bytes"),
@@ -62,11 +65,16 @@ def _root_disk(host: dict[str, Any]) -> dict[str, Any] | None:
                 and value >= 0
             ):
                 values[label] = int(value)
+                device = _object(sample.get("labels")).get("device")
+                if device:
+                    devices.add(str(device))
+                    device_count += 1
                 break
     if "available_bytes" not in values:
         return None
     return {
         "mountpoint": "/",
+        "device": next(iter(devices)) if len(devices) == 1 and device_count == 2 else None,
         **values,
         "available_gib": round(values["available_bytes"] / 1024**3, 1),
     }
@@ -234,6 +242,37 @@ async def fleet_overview(client: Any, *, now: int | None = None) -> dict[str, An
     return summary
 
 
+def summarize_resources(payload: dict[str, Any], host_id: str, *, now: int) -> dict[str, Any]:
+    data = _object(payload.get("data"))
+    if not _fresh(payload, now) or data.get("host") != host_id:
+        return {"status": "unavailable"}
+    metrics = _object(_object(data.get("observation")).get("metrics"))
+    def samples(name):
+        return [sample for sample in _items(_object(metrics.get(name)).get("samples"))
+            if sample.get("state") == "available" and type(sample.get("value")) in (int, float)
+            and math.isfinite(sample["value"]) and type(sample.get("sample_at_unix_seconds")) in (int, float)
+            and 0 <= now - sample["sample_at_unix_seconds"] <= 90]
+    def scalar(name):
+        values = samples(name)
+        return values[0] if len(values) == 1 else None
+    total, available = scalar("memory_total_bytes"), scalar("memory_available_bytes")
+    idle = samples("cpu_idle_seconds_per_second")
+    cpu_ids = [sample.get("labels", {}).get("cpu") for sample in idle]
+    valid_cpu = bool(idle) and None not in cpu_ids and len(set(cpu_ids)) == len(idle) and all(0 <= sample["value"] <= 1 for sample in idle)
+    valid_memory = total and available and 0 <= available["value"] <= total["value"] and total["value"] > 0
+    result = {"status": "available" if valid_cpu and valid_memory else "partial"}
+    if valid_cpu:
+        result.update(cpu_busy_percent=round((1 - sum(s["value"] for s in idle) / len(idle)) * 100, 2),
+            cpu_window_seconds=300, cpu_observed_at=min(s["sample_at_unix_seconds"] for s in idle), logical_cpus=len(idle))
+    if valid_memory:
+        result.update(memory_total_bytes=int(total["value"]), memory_available_bytes=int(available["value"]),
+            memory_observed_at=min(total["sample_at_unix_seconds"], available["sample_at_unix_seconds"]))
+    load = scalar("load1")
+    if load:
+        result["load1"] = load["value"]
+    return result
+
+
 async def inspect_host(client: Any, host_id: str) -> dict[str, Any]:
     async def read(call: Any) -> dict[str, Any]:
         try:
@@ -248,6 +287,10 @@ async def inspect_host(client: Any, host_id: str) -> dict[str, Any]:
         read(client.host(host_id)), read(client.fleet())
     )
     summary = summarize_fleet(fleet_result, host_id=host_id)
+    metrics_call = getattr(client, "host_metrics", None)
+    metrics = await read(metrics_call(host_id)) if callable(metrics_call) else {"status": "unavailable"}
+    for host in summary["hosts"]:
+        host["resources"] = summarize_resources(metrics, host_id, now=int(time.time()))
     facts = _object(_object(facts_result.get("data")).get("facts"))
     summary["system"] = {
         "status": facts_result.get("status", "unavailable"),

@@ -2831,6 +2831,9 @@ class ToolExecutor(HandlerService):
                 if self.context.subagent_coordinator is None:
                     raise ValueError("Sub-Agent 任务模式暂时没有开启。")
                 packet = subagent_context_packet(objective)
+                if decision is None:
+                    decision = await self.context.subagent_coordinator.prepare_entry(
+                        packet, selected_profile, role=role, parent_trace=turn_trace)
                 if decision is not None:
                     packet = with_task_contract(packet, decision)
                 return await self.context.subagent_coordinator.delegate(
@@ -2859,6 +2862,9 @@ class ToolExecutor(HandlerService):
                         await execute_tool(SAY_TOOL_NAME, {"text": text[:200]})
 
                 packet = subagent_context_packet(goal)
+                if decision is None:
+                    decision = await self.context.subagent_coordinator.prepare_entry(
+                        packet, selected_profile, parent_trace=turn_trace)
                 if decision is not None:
                     packet = with_task_contract(packet, decision)
                 if self.context.subagent_coordinator.dispatcher is not None and resume_task_id is None:

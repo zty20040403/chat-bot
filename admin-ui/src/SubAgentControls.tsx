@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Save, RotateCcw, ChevronDown, ChevronUp, Square } from 'lucide-react'
 import { StatusBadge, fmtTime, fmtNumber } from './components'
 import type { useControlPlane } from './useControlPlane'
+import { TaskOutcomePanel } from './TaskOutcomePanel'
 
 type Plane = ReturnType<typeof useControlPlane>
 
@@ -54,5 +55,6 @@ export function SubAgentControls({ detail, plane, models, roles }: { detail: any
     <div className="table-scroll"><table className="agent-model-table"><thead><tr><th>完成时间</th><th>Agent</th><th>计划模型</th><th>实际模型</th><th>Token</th></tr></thead><tbody>{modelEvents.slice(0, showAll ? undefined : 5).map((e: any) => <tr key={e.event_id}><td>{fmtTime(e.created_at)}</td><td>agent#{e.run_id}</td><td>{e.payload.selected_profile}</td><td title={JSON.stringify(e.payload.routing)}>{e.payload.actual_profile || '未返回'}<small>{e.payload.actual_model}</small></td><td title={`输入 ${e.payload.input_tokens ?? 0} / 输出 ${e.payload.output_tokens ?? 0}`}>{fmtNumber(Number(e.payload.input_tokens ?? 0) + Number(e.payload.output_tokens ?? 0))}</td></tr>)}</tbody></table></div>
     {modelEvents.length > 5 && <button className="icon-button" aria-label={showAll ? '收起模型记录' : '展开模型记录'} title={showAll ? '收起模型记录' : '展开模型记录'} onClick={() => setShowAll(!showAll)}>{showAll ? <ChevronUp size={16} /> : <ChevronDown size={16} />}</button>}
     {(detail.artifact_deliveries ?? []).slice(-5).reverse().map((item: any) => <div className="agent-delivery-row" key={`${item.revision}:${item.key}`}><time>{fmtTime(item.updated_at)}</time><span title={item.payload?.filename}>{item.payload?.filename}</span><StatusBadge value={item.state} /></div>)}
+    <TaskOutcomePanel key={task.task_id} detail={detail} plane={plane} />
   </section>
 }

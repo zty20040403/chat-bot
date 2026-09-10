@@ -289,6 +289,11 @@ class AgentResult:
     confidence: float = 0.5
     metadata: dict[str, Any] = field(default_factory=dict)
     handoff: tuple[str, ...] = ()
+    findings: tuple[dict[str, Any], ...] = ()
+    completed: tuple[dict[str, Any], ...] = ()
+    authorization: tuple[dict[str, Any], ...] = ()
+    next_verification: tuple[str, ...] = ()
+    report_missing_fields: tuple[str, ...] = ()
 
     @classmethod
     def parse(cls, answer: str) -> "AgentResult":
@@ -345,6 +350,7 @@ class AgentResult:
             "confidence",
             "metadata",
             "handoff",
+            "findings", "completed", "authorization", "next_verification",
         }
         raw_metadata = payload.get("metadata")
         metadata = dict(raw_metadata) if isinstance(raw_metadata, Mapping) else {}
@@ -362,6 +368,13 @@ class AgentResult:
             confidence=min(max(confidence, 0.0), 1.0),
             metadata=metadata,
             handoff=_string_tuple(payload.get("handoff")),
+            findings=tuple(item for item in payload.get("findings", []) if isinstance(item, dict)) if isinstance(payload.get("findings"), list) else (),
+            completed=tuple(item for item in payload.get("completed", []) if isinstance(item, dict)) if isinstance(payload.get("completed"), list) else (),
+            authorization=tuple(item for item in payload.get("authorization", []) if isinstance(item, dict)) if isinstance(payload.get("authorization"), list) else (),
+            next_verification=_string_tuple(payload.get("next_verification")),
+            report_missing_fields=tuple(key for key in
+                ("findings", "completed", "authorization", "next_verification")
+                if not isinstance(payload.get(key), list)),
         )
 
     def as_payload(self) -> dict[str, Any]:
@@ -376,6 +389,8 @@ class AgentResult:
             "confidence": self.confidence,
             "metadata": dict(self.metadata),
             "handoff": list(self.handoff),
+            "findings": list(self.findings), "completed": list(self.completed),
+            "authorization": list(self.authorization), "next_verification": list(self.next_verification),
         }
 
 

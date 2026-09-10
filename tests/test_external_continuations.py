@@ -91,7 +91,12 @@ class ExternalContinuationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(args.args, ("GET", "/v1/operations/op_test"))
         self.assertEqual(args.kwargs, {"actor": "qq:2", "origin": self.scope})
         hydrated = self.store.hydrate_external_session(self.task.task_id, self.run.run_id)
-        self.assertEqual(json.loads(hydrated["messages"][-1]["content"]), final)
+        hydrated_result = json.loads(hydrated["messages"][-1]["content"])
+        evidence_ref = hydrated_result.pop("_task_evidence")
+        self.assertEqual(hydrated_result, final)
+        evidence = next(item for item in self.store.task_evidence(self.task.task_id) if item["evidence_id"] == evidence_ref["ref"])
+        self.assertEqual(evidence["payload"], final)
+        self.assertEqual(evidence["run_id"], self.run.run_id)
         self.tracker().pause()
 
     async def test_service_verification_waits_then_delivers_verified_summary_to_agent(self):

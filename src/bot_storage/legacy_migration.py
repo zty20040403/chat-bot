@@ -58,6 +58,7 @@ TABLES: tuple[TableSpec, ...] = (
     TableSpec("subagents.sqlite3", "subagent_controls", ("task_id",)),
     TableSpec("subagents.sqlite3", "subagent_deliveries", ("task_id", "revision", "delivery_key")),
     TableSpec("subagents.sqlite3", "subagent_external_calls", ("task_id", "revision", "run_id", "call_id")),
+    TableSpec("subagents.sqlite3", "subagent_evidence", ("evidence_id",)),
     TableSpec("subagents.sqlite3", "subagent_events", ("event_id",), "event_id"),
     TableSpec(
         "subagents.sqlite3",

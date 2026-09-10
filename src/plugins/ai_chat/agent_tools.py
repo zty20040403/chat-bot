@@ -992,10 +992,12 @@ class AgentToolExecutor:
     ) -> str:
         """Upload trusted bytes independently from the producing container."""
         if not content:
-            return _json_result(ok=False, error="交付文件为空，未发送。")
+            return _json_result(ok=False, not_sent=True, retryable=False, error="交付文件为空，未发送。")
         if self.max_file_bytes and len(content) > self.max_file_bytes:
             return _json_result(
                 ok=False,
+                not_sent=True,
+                retryable=False,
                 error=(
                     f"交付文件大小 {len(content)} 字节，超过发送上限 "
                     f"{self.max_file_bytes} 字节。"
@@ -1027,6 +1029,8 @@ class AgentToolExecutor:
             size=len(content),
             upload_started_at=upload_started_at,
             uploaded=accepted,
+            not_sent=not accepted,
+            retryable=not accepted,
             state="acknowledged" if delivered else "unknown",
             receipt=receipt,
             error=(

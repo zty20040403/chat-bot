@@ -1,0 +1,139 @@
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import AsyncMock, patch
+
+import nonebot
+
+nonebot.init()
+
+from src.plugins.ai_chat.agent.file_outbox import attempt_file
+from src.plugins.ai_chat.subagents import SubAgentStore
+
+
+class TaskFileOutboxTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "task.sqlite3"
+        self.store = SubAgentStore(self.path)
+        self.task = self.store.create_task(scope_key="group:1", conversation_id="group:1:user:2",
+            requester_user_id=2, trigger_message_id=None, objective="file", max_parallelism=1, max_steps=2)
+        self.artifact = {"name": "result.txt", "size": 4, "snapshot": hashlib.sha256(b"test").hexdigest(),
+                         "handle": "sandbox#s123abc/result.txt"}
+        self.prepare = AsyncMock(return_value=b"test")
+        self.send = AsyncMock(return_value={"ok": True, "file_id": "file-1"})
+
+    def tearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
+
+    def queue(self):
+        return self.store.queue_file(self.task.task_id, self.artifact, "test-result.txt")
+
+    async def attempt(self, delivery=None):
+        return await attempt_file(self.store, self.task.task_id, delivery or self.queue(),
+                                  prepare=self.prepare, send=self.send)
+
+    async def test_restart_before_upload_recovers_manifest_without_recreating_artifact(self):
+        self.queue()
+        self.store.close()
+        self.store = SubAgentStore(self.path)
+        result = await self.attempt(self.store.deliveries(self.task.task_id)[0])
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["artifact"], self.artifact)
+        self.send.assert_awaited_once_with(b"test", "test-result.txt")
+        await self.attempt()
+        self.assertEqual(self.send.await_count, 1)
+
+    async def test_crash_after_upload_started_requires_receipt_reconciliation_not_resend(self):
+        self.send.side_effect = asyncio.CancelledError
+        with self.assertRaises(asyncio.CancelledError):
+            await self.attempt()
+        self.store.close()
+        self.store = SubAgentStore(self.path)
+        row = self.store.deliveries(self.task.task_id)[0]
+        self.assertEqual(row["state"], "sending")
+        self.send.side_effect = None
+        await self.attempt(row)
+        self.assertEqual(self.send.await_count, 1)
+        self.store.finish_delivery(self.task.task_id, row["key"], "acknowledged",
+            {**row["payload"], "ok": True, "file_id": "reconciled"}, revision=1)
+        self.assertTrue((await self.attempt())["ok"])
+        self.assertEqual(self.send.await_count, 1)
+
+    async def test_ambiguous_response_does_not_retry(self):
+        self.send.side_effect = TimeoutError()
+        result = await self.attempt()
+        self.assertEqual(result["state"], "unknown")
+        await self.attempt()
+        self.assertEqual(self.send.await_count, 1)
+
+    async def test_explicit_no_upload_retries_with_backoff_and_keeps_original_manifest(self):
+        self.send.return_value = {"ok": False, "not_sent": True, "retryable": True, "error": "rejected"}
+        result = await self.attempt()
+        self.assertEqual(result["state"], "queued")
+        await self.attempt()
+        self.assertEqual(self.send.await_count, 1)
+        self.send.return_value = {"ok": True, "file_id": "file-2"}
+        with patch("src.plugins.ai_chat.agent.file_outbox.time.time", return_value=result["next_attempt_at"] + 1):
+            result = await self.attempt()
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["attempts"], 2)
+        self.assertEqual(result["artifact"], self.artifact)
+
+    async def test_missing_snapshot_never_uploads_and_eventually_reports_rejection(self):
+        self.prepare.side_effect = FileNotFoundError("missing snapshot")
+        result = await self.attempt()
+        for _ in range(4):
+            with patch("src.plugins.ai_chat.agent.file_outbox.time.time", return_value=result["next_attempt_at"] + 1):
+                result = await self.attempt()
+        self.assertEqual(result["state"], "rejected")
+        self.send.assert_not_awaited()
+
+    async def test_revision_and_cancellation_fence_stale_dispatch(self):
+        row = self.queue()
+        self.store.update_control(self.task.task_id, expected_version=0, revision=2)
+        await self.attempt(row)
+        self.send.assert_not_awaited()
+        row = self.queue()
+        self.store.request_cancel(self.task.task_id)
+        await self.attempt(row)
+        self.send.assert_not_awaited()
+
+    async def test_concurrent_dispatch_claims_only_one_upload(self):
+        row = self.queue()
+        results = await asyncio.gather(self.attempt(row), self.attempt(row))
+        self.assertTrue(any(item.get("ok") for item in results))
+        self.send.assert_awaited_once()
+
+    async def test_permanent_failure_notice_is_persistent_and_not_duplicated(self):
+        from types import SimpleNamespace
+        from nonebot.adapters.onebot.v11 import GroupMessageEvent
+        from src.plugins.ai_chat.agent.background import SubAgentDispatcher
+        from src.plugins.ai_chat.delivery import DeliveryStore
+        from src.plugins.ai_chat.onebot_codec import scope_from_event
+        event = GroupMessageEvent(time=100, self_id=123, post_type="message", message_type="group",
+            sub_type="normal", message_id=42, group_id=1, user_id=2, message="生成文件", raw_message="生成文件",
+            font=0, sender={"user_id": 2, "nickname": "Test", "role": "member"})
+        self.task = self.store.create_task(scope_key=scope_from_event(event).key, conversation_id="group:1:user:2",
+            requester_user_id=2, trigger_message_id=None, objective="file", max_parallelism=1, max_steps=2)
+        self.store.update_control(self.task.task_id, expected_version=0,
+            dispatch={"bot_id": "123", "event": event.model_dump(mode="json")})
+        self.send.return_value = {"ok": False, "not_sent": True, "retryable": False}
+        await self.attempt()
+        outbox = DeliveryStore(Path(self.tmp.name) / "deliveries.sqlite3")
+        try:
+            dispatcher = object.__new__(SubAgentDispatcher)
+            dispatcher.store = self.store
+            dispatcher.context = SimpleNamespace(delivery_store=outbox)
+            self.assertIn(self.task.task_id, self.store.rejected_file_tasks())
+            dispatcher.notify_rejected_files(self.task.task_id)
+            dispatcher.notify_rejected_files(self.task.task_id)
+            self.assertEqual(len(outbox.recent()), 1)
+            self.assertNotIn(self.task.task_id, self.store.rejected_file_tasks())
+        finally:
+            outbox.close()

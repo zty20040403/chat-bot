@@ -246,6 +246,9 @@ class FleetControlClient:
     async def host(self, host_id: str) -> dict[str, Any]:
         return await self._get(f"/v1/hosts/{quote(host_id, safe='')}")
 
+    async def host_metrics(self, host_id: str) -> dict[str, Any]:
+        return await self._get(f"/v1/hosts/{quote(host_id, safe='')}/metrics")
+
     async def unit(self, host_id: str, unit: str) -> dict[str, Any]:
         return await self._get(
             f"/v1/hosts/{quote(host_id, safe='')}/units/{quote(unit, safe='')}"

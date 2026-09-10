@@ -58,6 +58,17 @@ class RuntimeV2Tests(unittest.IsolatedAsyncioTestCase):
         return self.coordinator.submit(packet=self.packet, decision=EntryDecision.parse(decision("workflow")),
             dispatch={"bot_id": "123", "event": {"user_id": 2}, "profile": "qwen-local"})
 
+    async def test_explicit_task_entry_gets_the_same_acceptance_contract(self):
+        with patch.object(self.coordinator, "_supervisor_json", new=AsyncMock(return_value=decision("workflow"))) as planner:
+            entry = await self.coordinator.prepare_entry(self.packet, self.catalog.default)
+        self.assertEqual(entry.contract.as_payload()["version"], 2)
+        self.assertTrue(entry.contract.acceptance)
+        planner.assert_awaited_once()
+        with patch.object(self.coordinator, "_supervisor_json", new=AsyncMock(return_value=decision("direct"))):
+            with self.assertRaises(ValueError):
+                await self.coordinator.prepare_entry(self.packet, self.catalog.default)
+
+
     async def test_queued_plan_reuses_entry_and_can_survive_reopen(self):
         task = self.submit()
         self.assertEqual(task.status, "queued")
@@ -758,7 +769,7 @@ class RuntimeV2Tests(unittest.IsolatedAsyncioTestCase):
         manager.write_file = AsyncMock(side_effect=write)
         executor.send_file_content = AsyncMock(return_value='{"ok":true}')
         workspaces = StepWorkspaces(Path(self.tmp.name), executor)
-        artifact = {"name": "result.txt", "snapshot": workspaces._persist(1, b"test")}
+        artifact = {"name": "result.txt", "size": 4, "snapshot": workspaces._persist(1, b"test")}
         self.assertTrue((await workspaces.validate(1, artifact))["ok"])
         await workspaces.deliver(1, artifact)
         self.assertEqual(checked, ["acceptance.txt"])

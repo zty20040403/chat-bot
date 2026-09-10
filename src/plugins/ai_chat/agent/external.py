@@ -86,6 +86,11 @@ class ExternalStoreMixin:
         state = str(remote_record(response).get("status") or "")
         # A handle without a recognized final state is not proof of completion.
         waiting = bool(path and state not in TERMINAL)
+        if self.control(item["task_id"])["revision"] == item["revision"]:
+            request = item.get("request") or json.loads(item.get("request_json") or "{}")
+            ref = self.record_evidence(item["task_id"], item["run_id"], request.get("tool_name", ""),
+                request.get("tool_arguments", {}), response, call_id=item["call_id"], revision=item["revision"])
+            response = {**response, "_task_evidence": ref}
         with self._transaction() as cursor:
             cursor.execute("""UPDATE subagent_external_calls SET status=?, remote_path=?, response_json=?, updated_at=?
                 WHERE task_id=? AND revision=? AND run_id=? AND call_id=?""",

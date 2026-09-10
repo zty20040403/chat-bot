@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from contextvars import ContextVar
 from typing import Any, Mapping
+from .outcomes import CHECK_SCHEMA, normalize_checks
 
 
 WORKERS = ("researcher", "coder", "document", "media", "analyst", "operator")
@@ -33,6 +34,10 @@ execution 需要动手执行，不能 direct；project 或 research_delivery 需
 “继续/改成 Java/加购物车”必须结合当前已授权的话题及任务；不要新建一个无关项目。
 持久文件写入、项目实现、构建和交付必须由子任务执行。主控保留解释、检索及最终回复。
 任务需要 objective、deliverables、constraints、acceptance。
+outcome_checks 按 acceptance 的从零开始序号声明机器验收方式。
+服务器巡检用 host_inspection，并为每台目标主机单列条款；空间清理用 disk_delta，指定 host_id、mountpoint 和最低预期变化字节。
+服务启停重启用 service_effect，指定 host_id、完整 unit 和 action；整机重启用 host_reboot。
+其他内容用 evidence，由独立验收人逐项引用宿主证据。不能以“命令退出零”替代这些目标检查。
 delivery_required 专指必须上传文件（如 PDF、源码包、图片附件），不是普通文字回复。
 “把巡检结果/前后对比发群里”若未要求文件，delivery_required=false；最终文字始终由宿主消息队列发送。
 acceptance 只列发送前可验证的内容质量和可运行性，不把“已发送到群”列为文件验收条件。
@@ -60,6 +65,7 @@ DECISION_TOOL = {
                 "answer": {"type": "string", "description": "direct 的最终答复；需要工具时为空"},
                 "objective": {"type": "string"},
                 "deliverables": _STRINGS, "constraints": _STRINGS, "acceptance": _STRINGS,
+                "outcome_checks": CHECK_SCHEMA,
                 "delivery_required": {"type": "boolean", "description": "是否必须上传文件附件；仅发送文字结论/巡检报告为 false，宿主仍会发送最终文字"},
                 "steps": {
                     "type": "array", "maxItems": 12,
@@ -90,11 +96,13 @@ class TaskContract:
     constraints: tuple[str, ...]
     acceptance: tuple[str, ...]
     delivery_required: bool = False
+    outcome_checks: tuple[dict[str, Any], ...] = ()
 
     def as_payload(self) -> dict[str, Any]:
-        return {"version": 1, "objective": self.objective,
+        return {"version": 2, "objective": self.objective,
                 "deliverables": list(self.deliverables), "constraints": list(self.constraints),
-                "acceptance": list(self.acceptance), "delivery_required": self.delivery_required}
+                "acceptance": list(self.acceptance), "delivery_required": self.delivery_required,
+                "outcome_checks": list(normalize_checks(list(self.outcome_checks), self.acceptance))}
 
 
 @dataclass(frozen=True)
@@ -136,7 +144,9 @@ class EntryDecision:
         delivery_required = raw.get("delivery_required", False)
         if not isinstance(delivery_required, bool):
             raise ValueError("delivery_required must be a boolean")
-        contract = TaskContract(objective, strings("deliverables"), strings("constraints"), strings("acceptance"), delivery_required)
+        acceptance = strings("acceptance")
+        contract = TaskContract(objective, strings("deliverables"), strings("constraints"), acceptance,
+                                delivery_required, normalize_checks(raw.get("outcome_checks"), acceptance))
         steps = raw.get("steps")
         if mode not in {"direct", "delegate", "workflow", "revise"} or not reason or not isinstance(steps, list):
             raise ValueError("mode, reason and steps are required")
@@ -222,6 +232,7 @@ def normalize_direct_entry_payload(raw: Mapping[str, Any]) -> dict[str, Any] | N
             "constraints": [],
             "acceptance": [],
             "delivery_required": False,
+            "outcome_checks": [],
             "step_ids": [],
         }
     )

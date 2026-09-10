@@ -139,9 +139,15 @@ class StepWorkspaces:
 
     async def deliver(self, task_id: int, artifact: dict) -> str:
         assert_job_owned()
-        content = await asyncio.to_thread(self._path(task_id, artifact["snapshot"]).read_bytes)
+        content = await self.prepare_delivery(task_id, artifact)
         assert_job_owned()
         return await self.executor.send_file_content(content, artifact["name"])
+
+    async def prepare_delivery(self, task_id: int, artifact: dict) -> bytes:
+        content = await asyncio.to_thread(self._path(task_id, artifact["snapshot"]).read_bytes)
+        if not content or hashlib.sha256(content).hexdigest() != artifact["snapshot"] or len(content) != artifact["size"]:
+            raise ValueError("Artifact bytes changed after acceptance")
+        return content
 
     async def reconcile(self, filename: str, size: int) -> dict:
         result = await self.executor.confirm_group_file(filename, size, attempts=1)

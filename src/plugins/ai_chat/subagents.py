@@ -27,7 +27,12 @@ from .agent import (
     SubAgentRole,
 )
 from .ai_tools import ToolDefinition
-from .agent.execution import EntryDecision, active_agent_step
+from .agent.execution import ENTRY_PROMPT, EntryDecision, active_agent_step
+from .agent.evidence import (EVIDENCE_SQL, EvidenceStoreMixin, READ_TASK_EVIDENCE,
+                             decode_result, evidence_index, read_evidence)
+from .agent.outcomes import (acceptance_blocks_completion, evaluate_acceptance,
+                             outcome_report, validate_report)
+from .agent.file_outbox import FileOutboxStoreMixin, attempt_file
 from .agent.artifact_acceptance import (
     ACCEPTANCE_VERSION, artifact_delivery_allowed, artifact_identity, artifact_verdicts,
 )
@@ -194,7 +199,7 @@ class RunRecord:
         return f"agent#{self.run_id}"
 
 
-class SubAgentStore(AgentSessionStoreMixin, TaskControlStoreMixin, ExternalStoreMixin):
+class SubAgentStore(AgentSessionStoreMixin, TaskControlStoreMixin, ExternalStoreMixin, EvidenceStoreMixin, FileOutboxStoreMixin):
     def __init__(self, source: DatabaseSource) -> None:
         self._legacy_sqlite = not isinstance(source, PostgresDatabase)
         self.path, self._connection = open_store_connection(source)
@@ -205,6 +210,7 @@ class SubAgentStore(AgentSessionStoreMixin, TaskControlStoreMixin, ExternalStore
             self._migrate()
             self._connection.executescript(CONTROL_SQL)
             self._connection.executescript(EXTERNAL_SQL)
+            self._connection.executescript(EVIDENCE_SQL)
             if "final_queued_revision" not in {row["name"] for row in self._connection.execute("PRAGMA table_info(subagent_controls)").fetchall()}:
                 self._connection.execute("ALTER TABLE subagent_controls ADD COLUMN final_queued_revision INTEGER NOT NULL DEFAULT 0")
                 self._connection.execute("UPDATE subagent_controls SET final_queued_revision=revision WHERE task_id IN (SELECT task_id FROM subagent_events WHERE event_type='task.final_delivery_queued')")
@@ -1400,6 +1406,22 @@ class SubAgentCoordinator:
         with model_scope_for_role("supervisor", profile, self.model_catalog, self.profile_overrides):
             return await ask_deepseek(*args, profile=profile, **kwargs)
 
+    async def prepare_entry(self, packet: ContextPacket, selected_profile: ModelProfile, *,
+                            role: str | None = None, parent_trace: DeepSeekTrace | None = None) -> EntryDecision:
+        """Give explicit task tools the same contract as automatic routing."""
+        mode = "delegate" if role else "workflow"
+        trace = DeepSeekTrace()
+        payload = await self._supervisor_json(
+            ENTRY_PROMPT + f"\n这是用户已明确提交的执行任务，mode 必须为 {mode}。"
+            + (f"恰好一个步骤，agent 必须为 {role}。" if role else "")
+            + "直接返回 decide_execution 的参数 JSON，不再调用工具。",
+            packet.render_for_planner(), profile=self._profile_for("supervisor", selected_profile), trace=trace)
+        _merge_trace(parent_trace, trace)
+        decision = EntryDecision.parse(payload, max_steps=self.max_steps)
+        if decision.mode != mode or role and decision.steps[0]["agent"] != role:
+            raise ValueError("Explicit task planner returned a different execution mode")
+        return decision
+
     def cancel(self, task_id: int) -> bool:
         changed = self.store.request_cancel(task_id)
         running = self._active.get(int(task_id))
@@ -1721,7 +1743,7 @@ class SubAgentCoordinator:
                 delivery_failed = any(not bool(item.get("ok")) for item in deliveries)
                 if outcome.state == "failed":
                     status = "failed"
-                elif outcome.state == "partial" or delivery_failed or validation.get("status") == "failed":
+                elif outcome.state == "partial" or delivery_failed or acceptance_blocks_completion(validation):
                     status = "partial"
                 else:
                     status = "completed"
@@ -1734,6 +1756,8 @@ class SubAgentCoordinator:
                     **_completion_states([outcome], deliveries),
                 }
                 result["validation"]["acceptance"] = validation
+                if validation.get("task_outcome"):
+                    result["answer"] = outcome_report(validation, str(outcome.result.get("summary") or ""), deliveries)
                 self.store.set_task_state(
                     task.task_id,
                     status,
@@ -1945,7 +1969,7 @@ class SubAgentCoordinator:
             delivery_failed = any(not bool(item.get("ok")) for item in deliveries)
             if outcome.state == "failed":
                 status = "failed"
-            elif outcome.state == "partial" or delivery_failed or validation.get("status") == "failed":
+            elif outcome.state == "partial" or delivery_failed or acceptance_blocks_completion(validation):
                 status = "partial"
             else:
                 status = "completed"
@@ -1958,6 +1982,8 @@ class SubAgentCoordinator:
                 **_completion_states([outcome], deliveries),
             }
             result["validation"]["acceptance"] = validation
+            if validation.get("task_outcome"):
+                result["answer"] = outcome_report(validation, str(outcome.result.get("summary") or ""), deliveries)
             self.store.set_task_state(task.task_id, status, result=result, error=outcome.error)
             if status == "completed":
                 return f"{task.handle} 已从检查点恢复并完成。"
@@ -2112,11 +2138,13 @@ class SubAgentCoordinator:
                 "直接、自然的最终答复。明确说明失败和未解决事项；不要暴露内部 JSON，"
                 "不要声称没有证据的工作已经完成。先用短句说明完成了什么、实际改动、"
                 "未完成事项和下一步；详细流水留在控制台，不加入无关吐槽。"
-                "这是终态通知，没有登记自动接续，不得承诺等结果出来会继续或稍后自动补发。"
+                "这是本轮终态通知，不得承诺未登记的自动接续。仅 deliveries 中 state=queued 的附件"
+                "有持久重试；unknown/sending 仅核对回执，其他失败不会自动重做任务。"
             ),
             trace=final_trace,
         )
         _merge_trace(parent_trace, final_trace)
+        final_text = outcome_report(validation, final_text, delivery_results)
         result = {
             "answer": final_text,
             "deliveries": delivery_results,
@@ -2142,9 +2170,12 @@ class SubAgentCoordinator:
 
     async def _validate_workflow(self, task, completed, *, context, selected_profile, tools_by_name,
                                  execute_tool, hooks, parent_trace, progress):
-        if not hooks or not hooks.workspaces:
+        contract = (self.store.get(task.task_id) or task).plan.get("contract", {})
+        outcome_v2 = contract.get("version", 1) >= 2
+        has_artifacts = any(item.result.get("artifacts") for item in completed.values())
+        if (has_artifacts or not outcome_v2) and (not hooks or not hooks.workspaces):
             return {"status": "not_verified", "reason": "workspace verifier unavailable"}
-        if not tool_enabled("sandbox_create") or not tool_enabled("sandbox_exec"):
+        if has_artifacts and (not tool_enabled("sandbox_create") or not tool_enabled("sandbox_exec")):
             return {"status": "failed", "reason": "管理员已禁止验收所需的沙盒工具"}
         self.store.set_task_state(task.task_id, "verifying")
         checks = []
@@ -2163,11 +2194,17 @@ class SubAgentCoordinator:
                 checks.append({"step": outcome.step.key, "artifact": artifact.get("name"),
                                "artifact_key": artifact_identity(artifact), **check})
         self.store.append_checkpoint(task.task_id, "artifact_validation", {"checks": checks})
-        contract = (self.store.get(task.task_id) or task).plan.get("contract", {})
         revision = self.store.control(task.task_id)["revision"]
         fingerprint = hashlib.sha256(json.dumps({"acceptance_version": ACCEPTANCE_VERSION,
-            "results": {k: v.result for k, v in completed.items()}}, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:8]
+            "contract": contract, "results": {k: v.result for k, v in completed.items()}}, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:8]
         key = f"acceptance_r{revision}_{fingerprint}"
+        def attach_matrix(value, reviewer):
+            if outcome_v2:
+                value["task_outcome"] = evaluate_acceptance(contract, self.store.task_evidence(task.task_id), reviewer,
+                    task_created_at=task.created_at)
+                if value["task_outcome"]["status"] != "passed":
+                    value["status"] = value["task_outcome"]["status"]
+            return value
         previous = next((r for r in self.store.runs(task.task_id) if r.step_key == key), None)
         if previous and previous.status in {"succeeded", "partial", "failed"}:
             accepted = previous.status == "succeeded"
@@ -2175,9 +2212,9 @@ class SubAgentCoordinator:
             executed = _has_acceptance_execution(events, previous.run_id)
             verdicts = artifact_verdicts(checks, previous.result, executed=executed)
             accepted = accepted and all(v["status"] == "passed" for v in verdicts)
-            return {"status": "passed" if accepted else "failed", "run_id": previous.run_id, "checks": checks,
+            return attach_matrix({"status": "passed" if accepted else "failed", "run_id": previous.run_id, "checks": checks,
                     "artifacts": verdicts,
-                    "summary": previous.result.get("summary"), "unresolved": previous.result.get("unresolved", [])}
+                    "summary": previous.result.get("summary"), "unresolved": previous.result.get("unresolved", [])}, previous.result)
         step = TaskStep(key=key, role="coder" if checks else "analyst",
             objective=("你是独立验收人，不是产物作者。这里只做发送前验收：检查内容、格式、"
                 "可运行性和用户要求的功能，不检查文件是否已发送、是否已出现在群文件中。"
@@ -2195,10 +2232,16 @@ class SubAgentCoordinator:
                 "不得生成新文件替代未通过的文件，不得把原始文件名当作 artifact_key。"
                 "不满足发送前目标才返回 partial/failed；发送前内容真正通过就返回 success，"
                 "把后续发送动作写进 handoff，不要写进 unresolved。\n"
+                "对每条 acceptance 在 metadata.criterion_reviews 返回一条："
+                '[{"criterion_index":0,"status":"passed或failed或unverified","reason":"实际验收说明","evidence_refs":["evidence#..."]}]。'
+                "证据必须来自 read_task_evidence 或工具返回的宿主编号；缺少证据标 unverified。"
+                "编号使用下面 acceptance_all 的原始序号，不能改序或遗漏。"
+                "按 outcome_checks 核实具体主机、服务动作或处理前后空间；不要把查询成功说成修复成功。\n"
                 + json.dumps({"objective": task.objective, "pre_delivery_acceptance": [
                     item for item in contract.get("acceptance", [])
                     if not _DELIVERY_REQUEST_PATTERN.search(str(item))
-                ], "artifact_checks": checks}, ensure_ascii=False)),
+                ], "acceptance_all": contract.get("acceptance", []), "outcome_checks": contract.get("outcome_checks", []),
+                    "artifact_checks": checks}, ensure_ascii=False)),
             deliverable="发送前独立验收结果、实际执行的检查与内容缺陷", dependencies=tuple(completed))
         run = previous or self.store.create_run(task.task_id, step,
             allowed_tools=sorted(self.registry.worker(step.role).allowed_tools & tools_by_name.keys()),
@@ -2223,6 +2266,7 @@ class SubAgentCoordinator:
         result = {"status": status, "run_id": run.run_id, "checks": checks,
                   "artifacts": verdicts,
                   "summary": outcome.result.get("summary"), "unresolved": outcome.result.get("unresolved", [])}
+        result = attach_matrix(result, outcome.result)
         self.store.append_checkpoint(task.task_id, "independent_acceptance", result)
         return result
 
@@ -2515,6 +2559,17 @@ class SubAgentCoordinator:
                 filename = str(raw_artifact.get("name") or "").strip()
                 if raw_artifact.get("snapshot"):
                     filename = f"kb-{task.task_id}-r{self.store.control(task.task_id)['revision']}-{raw_artifact['snapshot'][:10]}-{filename}"
+                if raw_artifact.get("snapshot") and hooks and hooks.workspaces and isinstance(contract, Mapping) and contract.get("version", 1) >= 2:
+                    queued = self.store.queue_file(task.task_id, raw_artifact, filename)
+                    payload = await attempt_file(self.store, task.task_id, queued,
+                        prepare=lambda item: hooks.workspaces.prepare_delivery(task.task_id, item),
+                        send=hooks.workspaces.executor.send_file_content)
+                    raw_artifact["delivery"] = payload
+                    deliveries.append(payload)
+                    self.store.append_checkpoint(task.task_id, "artifact_delivery", {"run_id": outcome.run.run_id,
+                        "filename": filename, "ok": bool(payload.get("ok")), "state": payload.get("state"),
+                        "error": str(payload.get("error") or "")}, run_id=outcome.run.run_id)
+                    continue
                 if not raw_artifact.get("snapshot") and parsed in delivered_artifacts:
                     payload: dict[str, Any] = {
                         "ok": True,
@@ -2644,6 +2699,11 @@ class SubAgentCoordinator:
         )
         session_version = session["version"]
         external = ExternalCalls(self.store, task.task_id, run.run_id) if self.store.control(task.task_id)["dispatch"] else None
+        allowed_tools.append(READ_TASK_EVIDENCE)
+        evidence_run_ids = {run.run_id} | {item.run_id for item in self.store.runs(task.task_id)
+                                          if item.step_key in upstream}
+        def allowed_evidence():
+            return self.store.task_evidence(task.task_id, run_ids=evidence_run_ids)
         if upstream:
             allowed_tools.append(READ_AGENT_RESULT)
             if hooks and hooks.workspaces:
@@ -2669,9 +2729,16 @@ class SubAgentCoordinator:
                 return json.dumps({"ok": False, "error": "This workflow already runs in the background. Execute this step inline; do not create a detached nested job."})
             if name == "read_agent_result":
                 return read_upstream_result(upstream, arguments)
+            if name == "read_task_evidence":
+                return read_evidence(allowed_evidence(), arguments)
             if name == "import_agent_artifact" and hooks and hooks.workspaces:
                 return await hooks.workspaces.import_artifact(task.task_id, dict(upstream), arguments)
-            return await execute_tool(name, arguments)
+            raw = await execute_tool(name, arguments)
+            if name != "say":
+                ref = self.store.record_evidence(task.task_id, run.run_id, name, arguments, raw,
+                                                 call_id=external.call_id if external else "")
+                raw = json.dumps({**decode_result(raw), "_task_evidence": ref}, ensure_ascii=False)
+            return raw
 
         self.store.append_event(task.task_id, "agent.model_selected", {
             "role": step.role, "requested_profile": selected_profile.name,
@@ -2725,6 +2792,7 @@ class SubAgentCoordinator:
         else:
             worker_input = _worker_input(task.objective, step, agent_context)
         worker_input += f"\n[本步骤工作目录]\n/workspace/tasks/{task.task_id}/steps/{step.key}\n"
+        worker_input += "\n[宿主证据索引，必要时用 read_task_evidence 读取]\n" + json.dumps(evidence_index(allowed_evidence()), ensure_ascii=False)
         try:
             async with self.scheduler.slot(task.scope_key, profile.name), asyncio.timeout(min(self.timeout_seconds, spec.timeout_seconds)):
                 self.store.start_run(run.run_id, continuation=run.result.get("status") == "waiting")
@@ -2748,6 +2816,8 @@ class SubAgentCoordinator:
                         after_tool_round=external.pause if external else None,
                     )
             result = _normalize_worker_scope_result(_parse_worker_result(answer))
+            result = validate_report(result, allowed_evidence(), required=((self.store.get(task.task_id) or task).plan.get("contract", {}).get("version", 1) >= 2))
+            result["evidence_index"] = evidence_index(allowed_evidence())
             if hooks and hooks.workspaces and result.get("artifacts"):
                 try:
                     result["artifacts"] = await hooks.workspaces.capture(
@@ -3110,8 +3180,15 @@ unresolved 只填写本步骤交付标准中仍未完成的缺口；需要后续
   "warnings": ["限制和风险"],
   "unresolved": ["尚未解决的本步骤问题"],
   "handoff": ["交给下游步骤继续处理的事项"],
+  "findings": [{{"description":"发现的问题或事实", "evidence_refs":["工具返回的 evidence# 标识"]}}],
+  "completed": [{{"description":"本步骤实际完成的工作", "evidence_refs":["对应证据标识"]}}],
+  "authorization": [{{"host_id":"目标主机", "action":"待授权动作", "affected_paths":["具体绝对路径"], "estimated_bytes":0, "evidence_refs":["evidence#实际检查依据"], "impact":"具体影响", "reason":"需要授权的原因"}}],
+  "next_verification": ["尚缺的检查及怎样验证；没有则为空数组"],
   "confidence": 0.0
 }}
+以上四个交付字段必须存在，没有内容用空数组。证据标识必须来自本步骤或获准上游的实际工具返回，不能编造。
+需要处理服务器问题时先检查并报告；授权只能由宿主完成，不能在结果中自行声称已获批。
+清理空间前，affected_paths、estimated_bytes 和 evidence_refs 必须是实际检查得到的路径、估计字节数和宿主证据；不能猜测。非空间清理授权省略这些字段。
 不要使用 Markdown 代码围栏包裹 JSON。"""
 
 
@@ -3271,7 +3348,8 @@ def _outcome_from_run(task: TaskRecord, run: RunRecord) -> StepOutcome:
 
 
 def _parse_worker_result(answer: str) -> dict[str, Any]:
-    return AgentResult.parse(answer).as_payload()
+    parsed = AgentResult.parse(answer)
+    return {**parsed.as_payload(), "_report_missing_fields": list(parsed.report_missing_fields)}
 
 
 def _normalize_worker_result(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -3546,7 +3624,7 @@ def _settled_task_status(
         and outcome.step.key not in repaired for outcome in outcomes)
     execution_complete = bool(outcomes) and all(outcome.succeeded for outcome in outcomes)
     independently_accepted = validation.get("status") == "passed"
-    return "completed" if (validation.get("status") != "failed" and not delivery_failed and not unresolved_failure
+    return "completed" if (not acceptance_blocks_completion(validation) and not delivery_failed and not unresolved_failure
         and (execution_complete or independently_accepted)) else "partial"
 
 

@@ -18,6 +18,7 @@ from src.plugins.ai_chat.fleet_tools import (
     model_status,
     requires_local_model_status,
     summarize_fleet,
+    summarize_resources,
 )
 from src.plugins.ai_chat.tool_policy import ToolCatalog
 
@@ -59,6 +60,21 @@ def fleet_payload(now: int) -> dict:
 
 
 class FleetProjectionTests(unittest.IsolatedAsyncioTestCase):
+    def test_resource_metrics_require_fresh_unambiguous_host_samples(self):
+        def metric(value, labels=None, at=1000):
+            return {"samples": [{"labels": labels or {}, "state": "available", "value": value, "sample_at_unix_seconds": at}]}
+        metrics = {"memory_total_bytes": metric(1024), "memory_available_bytes": metric(256),
+            "cpu_idle_seconds_per_second": metric(0.25, {"cpu": "0"}), "load1": metric(0.8)}
+        payload = {"status": "fresh", "data": {"host": "h610", "observation": {"metrics": metrics}}}
+        result = summarize_resources(payload, "h610", now=1010)
+        self.assertEqual(result["status"], "available")
+        self.assertEqual(result["cpu_busy_percent"], 75)
+        self.assertEqual(result["memory_available_bytes"], 256)
+        self.assertEqual(summarize_resources(payload, "tank", now=1010)["status"], "unavailable")
+        self.assertEqual(summarize_resources(payload, "h610", now=1200)["status"], "partial")
+        metrics["cpu_idle_seconds_per_second"]["samples"] *= 2
+        self.assertNotIn("cpu_busy_percent", summarize_resources(payload, "h610", now=1010))
+
     def test_typed_host_actions_never_generate_shell_commands(self) -> None:
         from src.plugins.ai_chat.ai_tools import HOST_REBOOT_TOOL, SERVICE_CONTROL_TOOL, host_operation_call
         from src.plugins.ai_chat.tool_policy import policy_for_tool
