@@ -43,7 +43,9 @@ authorized Ops executor profile. It cannot grant a caller additional privilege.
 - [x] Console/API evidence and actionable user-facing results.
 - [x] Unit tests, PostgreSQL takeover/concurrency tests and local fake-target tests.
 - [x] Helper Nix package build and standalone module evaluation for all three hosts.
-- [ ] Full Linux host configuration evaluation and executor-profile smoke checks.
+- [x] Full Linux configuration evaluation for all three hosts and Bot package build.
+- [x] Packaged target helper preflight checks on Linux without executing commands.
+- [ ] Installed helper smoke checks in the actual authorized executor profiles.
 - [ ] Pin the verified Bot commit and deploy; verify the installed helper on each host.
 
 Tests must cover missing paths, hostile arguments, absent working directories,
@@ -100,16 +102,29 @@ This deliberately sacrifices automatic retry rather than risk repeating a reboot
 - TypeScript/Vite build and synthetic Playwright checks passed at 1440px and
   390px. The open detail view updates from waiting-for-reboot to verified over
   SSE; long paths and parameters stay within its bounds.
-- The standalone helper Nix package built on aarch64-darwin. Module evaluation
-  passed for the h310, h610 and tank identities. Evaluation of the actual
-  nix-config options also confirmed each helper's identity and the three-target
-  controller map. These are not full Linux configuration or live executor-profile
-  acceptance tests.
+- The standalone helper Nix package built on aarch64-darwin and x86_64-linux.
+  Module evaluation passed for the h310, h610 and tank identities. Evaluation of
+  the actual nix-config options also confirmed each helper's identity and the
+  three-target controller map.
 - Read-only target checks confirmed all three Ops agents active and the standard
   systemctl path and boot-ID interface present. An existing h310 operator job
   confirmed the expected per-job StateDirectory convention. This did not execute
   the new helper in that profile or retry the existing failed job.
-- Full h610 evaluation on the Mac requires a Linux `cabal2nix` derivation from
-  another service. Copying the source snapshots to h610 for Linux verification
-  was blocked by approval review and awaits explicit permission. Nothing was
-  switched, installed on the targets, or rebooted during this verification.
+- With explicit permission, source snapshots of Bot `228e727` and nix-config
+  `1266a6d` plus the three helper-module edits were copied into a temporary h610
+  directory. Full NixOS toplevel derivation evaluation passed for h310, h610 and
+  tank using a temporary `qq-bot` override, without changing the production lock.
+  This resolved the Mac's Linux-only `cabal2nix` evaluation limitation.
+- The actual h610 Bot package, including TypeScript/Vite assets, built on Linux.
+  The sandbox image and complete operating-system closures were not built.
+  Linux helper tests (25) and operation/recovery tests (23) passed again using
+  isolated temporary state, without connecting to the production database.
+- The h610-configured, Nix-built helper wrapper passed seven preflight-only
+  checks: PATH lookup, fixed reboot program, incorrect absolute program path,
+  wrong host, missing cwd, invalid shell syntax and forbidden reboot arguments.
+  Every result reported `command_started=false`. No requested command or reboot
+  was executed by these wrapper checks.
+- No system was switched and no online service restarted. The configured helper
+  is not installed yet. Packaged preflight checks run as the SSH user do not
+  replace installed-helper checks in the actual diagnostic/operator profiles;
+  those remain part of the separately authorized deployment acceptance.
