@@ -106,7 +106,7 @@ OPS_CALL_TOOL: ToolDefinition = {
 SERVICE_CONTROL_TOOL: ToolDefinition = {
     "type": "function", "function": {
         "name": SERVICE_CONTROL_TOOL_NAME,
-        "description": "管理员启动、停止、重启或重载 systemd 服务的专用工具。先用 service_inspect 确认目标服务；调用已授权的 units.* 接口，不生成 shell 命令。沿用本任务授权，用 operation_status 等最终验收；重启需确认运行实例变化。",
+        "description": "管理员启动、停止、重启或重载 systemd 服务的专用工具。先用 service_inspect 确认目标服务；调用已授权的 units.* 接口，不生成 shell 命令。沿用本任务授权，用 operation_status 等自动验收：宿主核对操作回执、实例编号和两次新鲜服务状态。只有 status=succeeded 且 result.verification.verified=true 才可报告成功；照 result.summary 说明证据，不要把排队或命令退出零当成重启成功。",
         "parameters": {"type": "object", "properties": {
             "host_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"},
             "unit": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,119}\\.service$"},
@@ -390,7 +390,7 @@ OPERATION_STATUS_TOOL: ToolDefinition = {
     "type": "function",
     "function": {
         "name": OPERATION_STATUS_TOOL_NAME,
-        "description": "读取已准备远程操作的真实状态和追加式事件，不会触发新操作。",
+        "description": "读取远程操作的真实状态、验收证据和事件，不会触发新操作。重启或启停只有 status=succeeded 且 result.verification.verified=true 才算已验证，最终回复用 result.summary 说明目标、前后变化和当前状态。verifying_service/reconciling 仍在复查，不要当成成功或另开一次重启；needs_attention 表示证据不足，failed 表示失败。普通命令的 command_exit 仅证明正常退出，不证明业务目标完成。",
         "parameters": {
             "type": "object", "additionalProperties": False,
             "properties": {"operation_id": {"type": "string", "pattern": "^op_[a-f0-9]{32}$"}},

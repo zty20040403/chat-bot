@@ -94,6 +94,22 @@ class ExternalContinuationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(hydrated["messages"][-1]["content"]), final)
         self.tracker().pause()
 
+    async def test_service_verification_waits_then_delivers_verified_summary_to_agent(self):
+        tracker, response = await self.submit_remote()
+        self.session(response)
+        self.client._request.return_value = {"operation_id": "op_test", "status": "reconciling",
+            "result": {"phase": "verifying_service", "verification": {"verified": False}}}
+        self.assertFalse(await poll_external(self.store, self.task, self.client))
+        with self.assertRaises(ExternalPending):
+            tracker.pause()
+        summary = "h610 的 test.service 已重启，实例编号已变化，当前 PID 234，两次复查均正常。"
+        self.client._request.return_value = {"operation_id": "op_test", "status": "succeeded",
+            "result": {"phase": "verified", "summary": summary, "verification": {"verified": True}}}
+        self.assertTrue(await poll_external(self.store, self.task, self.client))
+        hydrated = self.store.hydrate_external_session(self.task.task_id, self.run.run_id)
+        self.assertEqual(json.loads(hydrated["messages"][-1]["content"])["result"]["summary"], summary)
+        self.assertTrue(all(call.args == ("GET", "/v1/operations/op_test") for call in self.client._request.call_args_list))
+
     async def test_lost_submission_receipt_replays_host_owned_key(self):
         perform = AsyncMock(side_effect=FleetControlError("timeout", "lost receipt", retryable=True))
         tracker, response = await self.submit_remote(perform)

@@ -162,3 +162,41 @@ are already cached there. The initial cross-build on h610 was stopped; 5.87 GiB
 of newly registered, unreferenced outputs from that exact build were removed via
 Nix's native deletion checks. Existing system generations and other data were not
 garbage-collected. h610 had approximately 155 GiB available after cleanup.
+
+### Service Outcome Verification
+
+The follow-up service fix separates a completed upstream job from a verified
+target effect. Native `units.start/stop/restart/reload` still use the existing
+authorization and durable job identity, without a new shell execution path.
+
+- Verify the receipt's job, host, unit, action, expected invocation, systemd job
+  attribution and explicit before/after states. Missing evidence is not success.
+- A restart requires a changed invocation ID. A start of an already-running
+  service is reported as a no-op, not as a restart. Reloads validate the native
+  reload result and do not require a new process.
+- Query `units.status` twice, using distinct fresh observations at least five
+  seconds apart. The current invocation must agree with the action receipt;
+  service failures, changed instances or stale/wrong-target data cannot pass.
+- The completed receipt and first observation persist in the existing operation
+  result. Controller recovery continues observation, never repeats the write.
+  Verification is bounded by two minutes and the original operation deadline.
+- `result.summary` supplies a factual Chinese outcome to the agent. The console
+  shows instance IDs, current PID, state, observation time and verification reason.
+  Pending verification keeps the parent task waiting; its final transcript gets
+  the verified outcome once available.
+- This proves the systemd state, not application endpoint health. A generic
+  command exit has `level=command_exit`, `exit_success=true`, `verified=false`;
+  it must not be presented as proof that a business goal was achieved.
+
+Reboot verification can also continue during a retryable job-status outage:
+it uses the persisted target preflight (or recovers it from the original job's
+validated first log line) and a fresh matching host observation. It neither
+infers a baseline from the current boot nor dispatches another reboot. The
+deadline is checked again after the observation, and timeout/failure summaries
+replace any earlier pending text.
+
+Local validation: 869 Python tests passed, including isolated PostgreSQL tests;
+TypeScript/Vite built successfully. Synthetic Playwright checks at desktop 1440
+and mobile 390 verified that SSE updates keep the detail dialog open and that
+the evidence does not overflow. No live restart was performed by these tests.
+Deployment of this follow-up requires the separately requested h610 approval.

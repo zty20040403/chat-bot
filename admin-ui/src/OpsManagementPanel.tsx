@@ -12,6 +12,8 @@ const hostPhases: Record<string, string> = {
   verified: '已验收', preflight_failed: '执行前检查失败', reboot_command_failed: '重启命令失败',
   outcome_unknown: '结果尚未确认', finished: '执行已结束', cancelled_before_submission: '提交前已取消',
   submission_rejected: '提交被拒绝，未执行命令',
+  verifying_service: '正在复查服务状态', service_failed: '服务操作或复查失败',
+  command_completed: '命令已结束，业务目标未验收',
 }
 
 export function OpsManagementPanel({ plane }: { plane: Plane }) {
@@ -104,6 +106,16 @@ export function OpsManagementPanel({ plane }: { plane: Plane }) {
         {selected.backend_operation_id && <p>远端任务：<code>{selected.backend_operation_id}</code></p>}
         {selected.error_code && <p className="ops-error">{selected.error_code}</p>}
         {selected.result?.phase && <p><strong>{hostPhases[selected.result.phase] || selected.result.phase}</strong></p>}
+        {selected.result?.summary && <p>{selected.result.summary}</p>}
+        {selected.result?.verification?.level === 'service_state' && <dl className="ops-evidence">
+          <dt>操作前实例</dt><dd><code>{selected.result.verification.before?.invocation_id || '未运行'}</code></dd>
+          <dt>操作后实例</dt><dd><code>{selected.result.verification.after?.invocation_id || '未运行'}</code></dd>
+          <dt>当前服务状态</dt><dd>{selected.result.verification.current ? `${selected.result.verification.current.active_state}/${selected.result.verification.current.sub_state}` : '等待复查'}</dd>
+          <dt>当前进程 PID</dt><dd>{selected.result.verification.current?.main_pid == null ? '尚未获取' : selected.result.verification.current.main_pid || '无运行进程'}</dd>
+          <dt>最新复查时间</dt><dd>{fmtTime(selected.result.verification.current?.observed_at)}</dd>
+          <dt>验收结论</dt><dd>{selected.result.verification.reason || '等待目标证据'}</dd>
+          <dt>业务接口健康</dt><dd>未单独检测</dd>
+        </dl>}
         {selected.result?.preflight?.evidence && <dl className="ops-evidence">
           <dt>执行身份</dt><dd>UID {selected.result.preflight.evidence.uid} · GID {selected.result.preflight.evidence.gid}</dd>
           <dt>工作目录</dt><dd><code>{selected.result.preflight.evidence.cwd?.resolved}</code></dd>

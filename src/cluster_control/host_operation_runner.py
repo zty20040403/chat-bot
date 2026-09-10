@@ -45,8 +45,51 @@ async def recover_handle(manager: OpsManagementService, record: dict[str, Any], 
     return None
 
 
+async def confirm_reboot(manager: OpsManagementService, record: dict[str, Any], result: dict[str, Any], proof: dict[str, Any]) -> bool:
+    result["phase"] = "waiting_for_reboot"
+    result["summary"] = f"{record['host_id']} 重启请求已发出，尚未确认新的开机编号，不能宣称重启成功。"
+    try:
+        facts = await request(manager, "host.facts", {"host": record["host_id"]})
+        verification = reboot_observation(facts, {**record, "result": result}, proof)
+        result["verification"] = verification
+        if time.time() >= record["deadline_at"]:
+            verification["verified"] = False
+            result.update(phase="outcome_unknown", summary=f"{record['host_id']} 重启验收超时，最终结果未确认；不重复执行。")
+        elif verification["verified"]:
+            result.update(phase="verified", command_started=True)
+            result["summary"] = f"{record['host_id']} 已确认重启，开机编号已变化，目标监控代理重新上报了新鲜状态。"
+            result["instruction"] = "可以确认整机已重启；这不等于所有业务服务恢复正常，未检查的服务不要声称正常。"
+            if record["status"] == "cancelling":
+                result["cancellation_note"] = "Cancellation arrived after the reboot took effect; it cannot undo a reboot."
+            return True
+    except (OpsError, ValueError, TypeError) as exc:
+        result["observation_error"] = str(exc)[:1000]
+    return False
+
+
 async def observe(manager: OpsManagementService, record: dict[str, Any], result: dict[str, Any], backend_id: str) -> tuple[str, str]:
-    job = await request(manager, "jobs.status", {"job_id": backend_id})
+    reboot = record["arguments"]["op"] == "host.reboot"
+    try:
+        job = await request(manager, "jobs.status", {"job_id": backend_id})
+    except OpsError as exc:
+        if not (exc.retryable and reboot):
+            raise
+        # The execution receipt endpoint can be unavailable after a reboot while
+        # the host agent is already reporting its new boot. Never resubmit.
+        result["job_observation_error"] = str(exc)[:1000]
+        proof = result.get("preflight")
+        if proof is None:
+            logs = await request(manager, "jobs.logs", {"job_id": backend_id, "limit": 65536})
+            stdout, _ = decode_logs(logs, backend_id)
+            proof = preflight_from_logs(stdout, record)
+            if proof is None:
+                raise exc
+            result["preflight"] = proof
+        if await confirm_reboot(manager, record, result, proof):
+            return "succeeded", ""
+        if result["phase"] == "outcome_unknown":
+            return "needs_attention", "observation_deadline"
+        return "reconciling", ""
     handle = job.get("handle", {})
     if (not isinstance(handle, dict) or handle.get("job_id") != backend_id
         or handle.get("host") != record["host_id"] or handle.get("operation") != "exec.run"):
@@ -72,23 +115,16 @@ async def observe(manager: OpsManagementService, record: dict[str, Any], result:
             if isinstance(error, dict) and error.get("ok") is False and error.get("command_started") is False:
                 result.update(phase="preflight_failed", preflight_error=error, command_started=False)
                 return "failed", str(error.get("code", "preflight_failed"))[:80]
-    reboot = record["arguments"]["op"] == "host.reboot"
     if reboot and proof:
-        result["phase"] = "waiting_for_reboot"
-        try:
-            facts = await request(manager, "host.facts", {"host": record["host_id"]})
-            verification = reboot_observation(facts, {**record, "result": result}, proof)
-            result["verification"] = verification
-            if verification["verified"]:
-                result.update(phase="verified", command_started=True)
-                if record["status"] == "cancelling":
-                    result["cancellation_note"] = "Cancellation arrived after the reboot took effect; it cannot undo a reboot."
-                return "succeeded", ""
-        except (OpsError, ValueError, TypeError) as exc:
-            result["observation_error"] = str(exc)[:1000]
+        if await confirm_reboot(manager, record, result, proof):
+            return "succeeded", ""
+        if result["phase"] == "outcome_unknown":
+            return "needs_attention", "observation_deadline"
         exit_code = (job.get("result") or {}).get("exit_code")
         if state == "failed" and isinstance(exit_code, int) and exit_code != 0:
             result.update(phase="reboot_command_failed", exit_code=exit_code)
+            result["summary"] = f"{record['host_id']} 重启命令失败，退出码 {exit_code}，未验证到主机重启。"
+            result["instruction"] = "报告失败和退出码，不要保留之前的等待成功描述或自动再次重启。"
             return "failed", "reboot_command_failed"
         # A reboot can kill its own executor before the final exit receipt. Wait for
         # the host, even if the job reports failed/unknown during the disconnect.
@@ -98,8 +134,11 @@ async def observe(manager: OpsManagementService, record: dict[str, Any], result:
                                               "reason": "Administrator cancellation"})
         return "cancelling", ""
     if state in TERMINAL_JOB_STATES:
-        result["phase"] = "verified" if state == "succeeded" and proof else "finished"
+        result["phase"] = "command_completed" if state == "succeeded" and proof else "finished"
         if state == "succeeded" and proof:
+            result["verification"] = {"level": "command_exit", "verified": False, "exit_success": True}
+            result["summary"] = "命令已正常退出；只验证了命令执行结果，没有验证业务目标是否完成。"
+            result["instruction"] = "服务启停必须使用 service_control 并读取验收证据；其他任务也需检查目标状态，不能把退出零当作目标已完成。"
             return "succeeded", ""
         if state == "cancelled":
             return "cancelled", "cancelled"
@@ -124,6 +163,7 @@ async def run_host_operation(manager: OpsManagementService, record: dict[str, An
                 instruction="The submission deadline expired before dispatch. No command was sent.")
         elif record["deadline_at"] <= int(time.time()):
             result.update(phase="outcome_unknown", instruction="Observation deadline reached. Inspect the existing job; do not repeat the command.")
+            result["summary"] = f"{record['host_id']} 操作验收超时，最终结果未确认；保留原任务供核查，不重复执行。"
             error = "observation_deadline"
             if (backend_id and record["arguments"]["op"] != "host.reboot"
                     and time.time() <= record["deadline_at"] + 120):

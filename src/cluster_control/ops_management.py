@@ -15,6 +15,7 @@ from .adapters.ops import OpsClient, OpsError
 from .execution_contracts import canonical_json, content_hash, new_handle
 from .execution_storage import ClusterExecutionStore
 from .host_operations import REBOOT_DEFINITION, execution_params, host_contract, parse_helpers
+from .service_verification import SERVICE_ACTIONS, verify_service
 
 
 class OpsManagementService:
@@ -96,6 +97,11 @@ class OpsManagementService:
             Draft202012Validator(definition["params_schema"]).validate(params)
         except ValidationError as exc:
             raise ValueError(f"Invalid operation parameters: {exc.message[:500]}") from None
+        if operation in SERVICE_ACTIONS and (
+            definition.get("kind") != "job_submission" or definition.get("idempotency") != "required"
+            or not isinstance(params.get("unit"), str) or not params["unit"].endswith(".service")
+        ):
+            raise ValueError("Service actions require an explicit service and a durable native job")
         for field in ("host", "target_host"):
             if params.get(field) and params[field] not in self.hosts:
                 raise PermissionError("Host is outside the management grant")
@@ -144,6 +150,8 @@ class OpsManagementService:
     def proposal_result(record: dict[str, Any]) -> dict[str, Any]:
         awaiting = record["status"] == "awaiting_approval"
         return {"ok": True, "executed": record["status"] == "succeeded", "approval_required": awaiting, "operation": record,
+                "effect_verified": (record["status"] == "succeeded"
+                                    and (record.get("result") or {}).get("verification", {}).get("verified") is True),
                 "next_action": (
                     "Administrator must review the exact parameters and confirm the one-time code in private QQ. Do not claim execution."
                     if awaiting else "Inspect this existing operation; do not submit the same effect under a new key."
@@ -244,7 +252,15 @@ class OpsManagementService:
         submission_started = bool(backend_id)
         try:
             if backend_id:
-                result = await self._observe_job(record, backend_id)
+                saved = record.get("result") or {}
+                if (record["arguments"]["op"] in SERVICE_ACTIONS and saved.get("verification_started_at")
+                        and saved.get("handle", {}).get("state") == "succeeded"):
+                    # The completed native receipt is durable. Subsequent polls only
+                    # need live unit state, even if the upstream job is later retired.
+                    await self.validate_binding(record)
+                    result = dict(saved)
+                else:
+                    result = await self._observe_job(record, backend_id)
                 handle = result.get("handle", {})
                 if not isinstance(handle, dict) or handle.get("job_id") != backend_id:
                     raise ValueError("Upstream returned an unrelated job handle")
@@ -253,6 +269,14 @@ class OpsManagementService:
                     raise ValueError("Upstream returned an unknown job state")
                 status = {"succeeded": "succeeded", "failed": "failed", "cancelled": "cancelled",
                           "timed_out": "failed", "outcome_unknown": "needs_attention"}.get(state, "running")
+                if record["arguments"]["op"] in SERVICE_ACTIONS:
+                    if status == "succeeded":
+                        status = "needs_attention"
+                        status, result, error = await verify_service(self, record, result)
+                    elif status in {"failed", "needs_attention"}:
+                        result.update(phase="service_failed" if status == "failed" else "outcome_unknown",
+                            summary=f"{record['host_id']} 的 {record['arguments']['params'].get('unit', '服务')}操作未确认成功，上游任务状态为 {state}。",
+                            instruction="不得声称服务已恢复正常；报告任务状态，必要时读取同一服务的状态和日志，不要重复执行。")
                 if record["status"] == "cancelling" and status == "running":
                     cancelled = await self.client._request("POST", "/v1/execute", body=canonical_json({
                         "op": "jobs.cancel", "params": {"job_id": backend_id,
@@ -278,10 +302,15 @@ class OpsManagementService:
                 else:
                     status = "succeeded"
         except (OpsError, PermissionError, ValueError, KeyError, TypeError) as exc:
+            status = "needs_attention"
             error = getattr(exc, "code", type(exc).__name__)
-            result = {"error": str(exc)[:1000], "upstream_idempotency_key": record["operation_id"],
+            result = {**(record.get("result") or {}), **(result if isinstance(result, dict) else {}),
+                      "error": str(exc)[:1000], "upstream_idempotency_key": record["operation_id"],
                       "submission_started": submission_started,
                       "instruction": "Check upstream jobs before retrying; the effect may already have happened."}
+            if isinstance(result.get("verification"), dict):
+                result["verification"] = {**result["verification"], "verified": False}
+            result.update(phase="outcome_unknown", summary="无法确认操作最终结果：" + str(exc)[:400])
             # An unavailable observation must not turn an existing remote job into a failure.
             if backend_id and isinstance(exc, OpsError) and exc.retryable and record["deadline_at"] > int(time.time()):
                 status = record["status"] if record["status"] == "cancelling" else "reconciling"

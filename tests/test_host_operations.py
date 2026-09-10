@@ -59,6 +59,7 @@ class HostOperationTests(unittest.IsolatedAsyncioTestCase):
         self.posts = []
         self.fail_submit = False
         self.fail_read = False
+        self.fail_job_read = False
         self.boot = BEFORE_BOOT
         self.facts_host = "h310"
         self.facts_age = 0
@@ -88,6 +89,8 @@ class HostOperationTests(unittest.IsolatedAsyncioTestCase):
         if op == "jobs.list":
             return httpx.Response(200, json={"jobs": list(self.jobs.values()), "next_cursor": None})
         if op == "jobs.status":
+            if self.fail_job_read:
+                raise httpx.ReadTimeout("Job receipt endpoint unavailable", request=request)
             return httpx.Response(200, json=self.jobs[params["job_id"]])
         if op == "jobs.logs":
             job = self.jobs[params["job_id"]]
@@ -218,6 +221,57 @@ class HostOperationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.record()["status"], "reconciling")
         self.assertFalse(self.record()["result"]["verification"]["verified"])
 
+    async def test_new_boot_can_be_confirmed_while_job_receipt_endpoint_is_down(self):
+        await self.start("host.reboot")
+        self.report(state="running", exit_code=None)
+        await self.manager.run_once()
+        self.boot = AFTER_BOOT
+        self.fail_job_read = True
+        await self.manager.run_once()
+        self.assertEqual(self.record()["status"], "succeeded")
+        self.assertEqual(self.record()["result"]["verification"]["after_boot_id"], AFTER_BOOT)
+        self.assertIn("已确认重启", self.record()["result"]["summary"])
+        self.assertEqual(self.submission_count(), 1)
+
+    async def test_missing_reboot_baseline_cannot_use_current_boot_as_success(self):
+        await self.start("host.reboot")
+        self.boot = AFTER_BOOT
+        self.fail_job_read = True
+        await self.manager.run_once()
+        self.assertEqual(self.record()["status"], "reconciling")
+        self.assertNotIn("verification", self.record()["result"])
+        self.assertFalse(any(post["op"] == "host.facts" for post in self.posts))
+        self.assertEqual(self.submission_count(), 1)
+
+    async def test_reboot_baseline_can_be_recovered_from_original_job_logs(self):
+        await self.start("host.reboot")
+        self.report(state="running", exit_code=None)
+        self.boot, self.fail_job_read = AFTER_BOOT, True
+        await self.manager.run_once()
+        self.assertEqual(self.record()["status"], "succeeded")
+        self.assertIn("preflight", self.record()["result"])
+        self.assertEqual(self.submission_count(), 1)
+
+    async def test_job_read_outage_does_not_accept_stale_new_boot(self):
+        await self.start("host.reboot")
+        self.report(state="running", exit_code=None)
+        await self.manager.run_once()
+        self.boot, self.facts_age, self.fail_job_read = AFTER_BOOT, 120, True
+        await self.manager.run_once()
+        self.assertEqual(self.record()["status"], "reconciling")
+        self.assertFalse(self.record()["result"]["verification"]["verified"])
+        self.assertEqual(self.submission_count(), 1)
+
+    async def test_reboot_timeout_replaces_pending_summary(self):
+        await self.start("host.reboot")
+        self.report(state="running", exit_code=None)
+        await self.manager.run_once()
+        self.store.records[self.record()["operation_id"]]["deadline_at"] = int(time.time()) - 1
+        await self.manager.run_once()
+        self.assertEqual(self.record()["status"], "needs_attention")
+        self.assertIn("验收超时", self.record()["result"]["summary"])
+        self.assertEqual(self.submission_count(), 1)
+
     async def test_stale_or_wrong_host_observation_never_proves_reboot(self):
         await self.start("host.reboot")
         self.report()
@@ -229,10 +283,15 @@ class HostOperationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_explicit_reboot_failure_is_reported(self):
         await self.start("host.reboot")
+        self.report(state="running", exit_code=None)
+        await self.manager.run_once()
+        self.assertIn("尚未确认", self.record()["result"]["summary"])
         self.report(state="failed", exit_code=1)
         await self.manager.run_once()
         self.assertEqual(self.record()["status"], "failed")
         self.assertEqual(self.record()["error_code"], "reboot_command_failed")
+        self.assertIn("退出码 1", self.record()["result"]["summary"])
+        self.assertNotIn("尚未确认新的开机编号", self.record()["result"]["summary"])
 
     async def test_target_check_error_is_preserved_with_suggestion(self):
         await self.start()

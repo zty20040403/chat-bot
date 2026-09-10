@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from datetime import datetime, timezone
 import json
 import os
 import tempfile
@@ -63,11 +64,25 @@ class ManagementTests(unittest.IsolatedAsyncioTestCase):
         self.fail_poll = False
         self.poll_errors = []
         self.response_job_id = 'job_test'
+        self.now = time.time()
+        self.finished_at = self.now
+        self.clock = patch('src.cluster_control.service_verification.time', SimpleNamespace(time=lambda: self.now))
+        self.clock.start()
+        self.addCleanup(self.clock.stop)
+        self.params = {'host': 'h610', 'unit': 'test.service'}
+        self.before = {'active_state': 'active', 'sub_state': 'running', 'invocation_id': 'a' * 32}
+        self.after = {'active_state': 'active', 'sub_state': 'running', 'invocation_id': 'b' * 32,
+                      'reload_result': 'success', 'service_result': 'success'}
+        self.live = {'unit': 'test.service', 'load_state': 'loaded', 'active_state': 'active', 'sub_state': 'running',
+                     'details': {'invocation_id': 'b' * 32, 'main_pid': 234, 'restarts': 0}}
+        self.live_age = 0
+        self.live_host = None
+        self.fail_unit_read = False
         self.definitions = [{
             'name': name, 'read_only': readonly, 'kind': kind,
             'idempotency': 'none' if readonly else 'required',
             'summary': 'Test operation', 'params_schema': {
-                'type': 'object', 'properties': {'host': {'type': 'string'}},
+                'type': 'object', 'properties': {'host': {'type': 'string'}, 'unit': {'type': 'string'}},
                 'required': ['host'], 'additionalProperties': False,
             },
         } for name, readonly, kind in [('host.facts', True, 'observation'), ('units.restart', False, 'job_submission')]]
@@ -81,10 +96,22 @@ class ManagementTests(unittest.IsolatedAsyncioTestCase):
                     return httpx.Response(self.poll_errors.pop(0), json={'error': 'test observation error'})
                 if self.fail_poll:
                     raise httpx.ReadTimeout('unavailable', request=request)
-                return httpx.Response(200, json={'handle': {'job_id': self.response_job_id, 'revision': 2, 'state': self.state}})
+                return httpx.Response(200, json={'handle': {'job_id': self.response_job_id, 'revision': 2, 'state': self.state,
+                    'host': self.params['host'], 'operation': self.unit_operation}, 'spec': self.params,
+                    'updated_at': datetime.fromtimestamp(self.finished_at, timezone.utc).isoformat(),
+                    'result': {'unit': self.params['unit'], 'action': self.unit_operation.removeprefix('units.'),
+                        'success': True, 'attribution': 'systemd_job_accepted_and_target_observed',
+                        'manager_job': '/org/freedesktop/systemd1/job/123', 'before': self.before, 'after': self.after}})
+            if op == 'units.status':
+                if self.fail_unit_read:
+                    raise httpx.ReadTimeout('unit observation unavailable', request=request)
+                return httpx.Response(200, json={'host': self.live_host or self.params['host'], 'unit': self.live,
+                    'observed_at': datetime.fromtimestamp(self.now - self.live_age, timezone.utc).isoformat()})
             if op == 'jobs.cancel':
                 return httpx.Response(200, json={'handle': {'job_id': 'job_test', 'revision': 3, 'state': 'running'}})
-            if op == 'units.restart':
+            if op in {'units.start', 'units.stop', 'units.restart', 'units.reload'}:
+                self.params = json.loads(request.content)['params']
+                self.unit_operation = op
                 if self.fail_submission:
                     raise httpx.ReadTimeout('lost receipt', request=request)
                 return httpx.Response(200, json={'job_id': 'job_test', 'revision': 1, 'state': 'queued'})
@@ -98,7 +125,11 @@ class ManagementTests(unittest.IsolatedAsyncioTestCase):
         self.tmp.cleanup()
 
     async def propose(self, key='test-intent-0001', host='h610'):
-        return await self.manager.call('units.restart', {'host': host}, actor='qq:3526452465', origin='group:123', idempotency_key=key)
+        return await self.manager.call('units.restart', {'host': host, 'unit': 'test.service'}, actor='qq:3526452465', origin='group:123', idempotency_key=key)
+
+    async def finish_verification(self):
+        self.now += 6
+        await self.manager.run_once()
 
     async def approve(self, proposal):
         r = proposal['operation']
@@ -156,6 +187,7 @@ class ManagementTests(unittest.IsolatedAsyncioTestCase):
         await self.manager.run_once()
         self.state = 'succeeded'
         await self.manager.run_once()
+        await self.finish_verification()
         again = await self.propose()
         self.assertTrue(again['executed'])
         self.assertFalse(again['approval_required'])
@@ -258,9 +290,10 @@ class ManagementTests(unittest.IsolatedAsyncioTestCase):
         self.state = 'succeeded'
         with patch('src.cluster_control.ops_management.asyncio.sleep', new_callable=AsyncMock):
             await self.manager.run_once()
+        self.assertEqual(len(self.posts('jobs.status')), 2)
+        await self.finish_verification()
         self.assertEqual(self.store.get_operation(proposal['operation']['operation_id'])['status'], 'succeeded')
         self.assertEqual(len(self.posts('units.restart')), 1)
-        self.assertEqual(len(self.posts('jobs.status')), 2)
         self.assertTrue(all(json.loads(r.content)['params'] == {'job_id': 'job_test'}
                             for r in self.posts('jobs.status')))
 
@@ -288,10 +321,11 @@ class ManagementTests(unittest.IsolatedAsyncioTestCase):
                 self.state = 'succeeded'
                 with patch('src.cluster_control.ops_management.asyncio.sleep', new_callable=AsyncMock):
                     await self.manager.run_once()
+                self.assertEqual(len(self.posts('jobs.status')), 2)
+                await self.finish_verification()
                 record = self.store.get_operation(proposal['operation']['operation_id'])
                 self.assertEqual(record['status'], 'succeeded')
                 self.assertEqual(len(self.posts('units.restart')), 1)
-                self.assertEqual(len(self.posts('jobs.status')), 2)
                 self.assertTrue(all(json.loads(request.content)['params'] == {'job_id': 'job_test'}
                                     for request in self.posts('jobs.status')))
 
@@ -373,7 +407,7 @@ class ManagementPostgresTests(unittest.TestCase):
                 async def definitions():
                     return [{'name': 'units.restart', 'read_only': False, 'kind': 'job_submission', 'idempotency': 'required', 'params_schema': {'type': 'object'}}]
                 manager.definitions = definitions
-                result = __import__('asyncio').run(manager.call('units.restart', {'host': 'h610'}, actor='qq:3526452465', origin='test', idempotency_key='database-intent'))
+                result = __import__('asyncio').run(manager.call('units.restart', {'host': 'h610', 'unit': 'test.service'}, actor='qq:3526452465', origin='test', idempotency_key='database-intent'))
                 r = result['operation']
                 self.assertIsNone(store.claim_managed_operation('worker'))
                 store.approve_operation(r['operation_id'], actor_id='admin:kenneth', expected_hash=r['contract_hash'], expected_version=1, expires_at=int(time.time()) + 300)
