@@ -72,6 +72,60 @@ class TaskFileOutboxTests(unittest.IsolatedAsyncioTestCase):
         await self.attempt()
         self.assertEqual(self.send.await_count, 1)
 
+    async def test_late_upload_reply_settles_after_reconciler_marked_unknown(self):
+        for reply, expected in (({"ok": True, "file_id": "late"}, "acknowledged"),
+                                ({"ok": False, "not_sent": True, "retryable": True}, "queued")):
+            with self.subTest(expected=expected):
+                control = self.store.control(self.task.task_id)
+                self.store.update_control(self.task.task_id, expected_version=control["version"],
+                                          revision=control["revision"] + 1)
+                row = self.queue()
+                claim = self.store.claim_file(self.task.task_id, row)
+                self.store.finish_delivery(self.task.task_id, row["key"], "unknown",
+                    {**claim, "state": "unknown", "ok": False}, revision=row["revision"])
+                result = self.store.settle_file_attempt(self.task.task_id, row, claim, reply)
+                stored = next(item for item in self.store.deliveries(self.task.task_id) if item["revision"] == row["revision"])
+                self.assertEqual(result["state"], expected)
+                self.assertEqual(stored["state"], expected)
+
+    async def test_stale_reconciliation_cannot_erase_successful_receipt(self):
+        row = self.queue()
+        claim = self.store.claim_file(self.task.task_id, row)
+        self.store.settle_file_attempt(self.task.task_id, row, claim, {"ok": True, "file_id": "confirmed"})
+        self.store.finish_delivery(self.task.task_id, row["key"], "unknown",
+            {**claim, "state": "unknown", "ok": False}, revision=row["revision"])
+        stored = self.store.deliveries(self.task.task_id)[0]
+        self.assertEqual(stored["state"], "acknowledged")
+        self.assertEqual(stored["payload"]["file_id"], "confirmed")
+
+    async def test_late_sender_failure_cannot_override_reconciled_success(self):
+        row = self.queue()
+        claim = self.store.claim_file(self.task.task_id, row)
+        self.store.finish_delivery(self.task.task_id, row["key"], "acknowledged",
+            {**claim, "state": "acknowledged", "ok": True, "file_id": "observed"}, revision=row["revision"])
+        result = self.store.settle_file_attempt(self.task.task_id, row, claim, {"ok": False, "error": "late timeout"})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["state"], "acknowledged")
+        self.assertEqual(result["file_id"], "observed")
+
+    async def test_old_attempt_and_old_reconciliation_cannot_clobber_new_attempt(self):
+        row = self.queue()
+        first = self.store.claim_file(self.task.task_id, row)
+        retry = self.store.settle_file_attempt(self.task.task_id, row, first,
+            {"ok": False, "not_sent": True, "retryable": True})
+        with patch("src.plugins.ai_chat.agent.file_outbox.time.time", return_value=retry["next_attempt_at"] + 1):
+            second = self.store.claim_file(self.task.task_id, self.store.deliveries(self.task.task_id)[0])
+        self.assertEqual(second["attempts"], 2)
+        result = self.store.settle_file_attempt(self.task.task_id, row, first, {"ok": False, "error": "old reply"})
+        self.assertEqual(result["state"], "sending")
+        self.assertEqual(result["attempts"], 2)
+        changed = self.store.finish_delivery(self.task.task_id, row["key"], "unknown",
+            {**first, "ok": False}, revision=row["revision"], expected_payload=first)
+        self.assertFalse(changed)
+        current = self.store.deliveries(self.task.task_id)[0]
+        self.assertEqual(current["state"], "sending")
+        self.assertEqual(current["payload"]["attempts"], 2)
+
     async def test_explicit_no_upload_retries_with_backoff_and_keeps_original_manifest(self):
         self.send.return_value = {"ok": False, "not_sent": True, "retryable": True, "error": "rejected"}
         result = await self.attempt()

@@ -174,16 +174,29 @@ class TaskControlStoreMixin:
                 (task_id, revision, key, json.dumps(payload, ensure_ascii=False), int(time.time())))
             return cursor.rowcount == 1
 
-    def finish_delivery(self, task_id: int, key: str, state: str, payload: dict[str, Any], *, revision: int | None = None) -> None:
+    def finish_delivery(self, task_id: int, key: str, state: str, payload: dict[str, Any], *,
+                        revision: int | None = None, expected_payload: dict | None = None) -> bool:
         if state not in {"acknowledged", "unknown", "rejected"}:
             raise ValueError("Invalid delivery state")
         if revision is None:
             revision = self.control(task_id)["revision"]
         with self._transaction() as cursor:
+            lock = "" if self._legacy_sqlite else " FOR UPDATE"
+            row = cursor.execute("""SELECT state, payload_json FROM subagent_deliveries
+                WHERE task_id=? AND revision=? AND delivery_key=?""" + lock, (task_id, revision, key)).fetchone()
+            if row is None or row["state"] not in {"sending", "unknown"}:
+                return False
+            if expected_payload is not None and json.loads(row["payload_json"]) != expected_payload:
+                return False
+            payload = {**payload, "state": state, "ok": state == "acknowledged"}
             cursor.execute("""UPDATE subagent_deliveries SET state=?, payload_json=?, updated_at=?
-                WHERE task_id=? AND revision=? AND delivery_key=?""",
-                (state, json.dumps(payload, ensure_ascii=False), int(time.time()), task_id, revision, key))
-        self._notify_changed(task_id)
+                WHERE task_id=? AND revision=? AND delivery_key=? AND state IN ('sending','unknown')
+                AND payload_json=?""",
+                (state, json.dumps(payload, ensure_ascii=False), int(time.time()), task_id, revision, key, row["payload_json"]))
+            changed = cursor.rowcount == 1
+        if changed:
+            self._notify_changed(task_id)
+        return changed
 
     def deliveries(self, task_id: int) -> list[dict[str, Any]]:
         with self._lock:

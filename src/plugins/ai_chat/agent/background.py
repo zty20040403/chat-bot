@@ -289,9 +289,10 @@ class SubAgentDispatcher:
                 updated["file_id"] = found.get("file_id")
                 updated.update(state="acknowledged", error="",
                     receipt={"ok": True, "reconciled": True, "file_id": found.get("file_id")})
+            changed = self.store.finish_delivery(task_id, delivery["key"], "acknowledged" if found else "unknown", updated,
+                revision=delivery["revision"], expected_payload=payload)
+            if found and changed:
                 matched += 1
-            self.store.finish_delivery(task_id, delivery["key"], "acknowledged" if found else "unknown", updated,
-                                       revision=delivery["revision"])
         if matched:
             task = self.store.get(task_id)
             if task is not None:

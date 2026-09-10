@@ -101,8 +101,18 @@ class FileOutboxStoreMixin:
             "ok": state == "acknowledged", "state": state,
             "next_attempt_at": now + min(15 * 2 ** claimed["attempts"], 300) if state == "queued" else 0}
         with self._transaction() as cursor:
+            lock = "" if self._legacy_sqlite else " FOR UPDATE"
+            row = cursor.execute("""SELECT state, payload_json FROM subagent_deliveries
+                WHERE task_id=? AND revision=? AND delivery_key=?""" + lock,
+                (task_id, delivery["revision"], delivery["key"])).fetchone()
+            if row is None:
+                raise ValueError("File delivery manifest disappeared")
+            current = json.loads(row["payload_json"])
+            same_attempt = all(current.get(key) == claimed.get(key) for key in ("attempts", "upload_started_at"))
+            if row["state"] not in {"sending", "unknown"} or not same_attempt:
+                return {**current, "state": row["state"], "ok": row["state"] == "acknowledged"}
             cursor.execute("""UPDATE subagent_deliveries SET state=?, payload_json=?, updated_at=?
-                WHERE task_id=? AND revision=? AND delivery_key=? AND state='sending'""",
+                WHERE task_id=? AND revision=? AND delivery_key=? AND state IN ('sending','unknown')""",
                 (state, json.dumps(payload, ensure_ascii=False), now, task_id, delivery["revision"], delivery["key"]))
         self._notify_changed(task_id)
         return payload

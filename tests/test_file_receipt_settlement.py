@@ -135,10 +135,12 @@ class FileReceiptSettlementTests(unittest.TestCase):
         self.assertNotIn(self.task.task_id, self.store.unsettled_file_receipts())
 
     def test_nested_file_id_is_preserved(self):
-        self.store.finish_delivery(self.task.task_id, "digest", "acknowledged",
+        self.store.begin_delivery(self.task.task_id, "nested-digest", self.payload)
+        self.store.finish_delivery(self.task.task_id, "nested-digest", "acknowledged",
             {**self.payload, "ok": True, "receipt": {"ok": True, "file_id": "nested-id"}})
         self.dispatcher.settle_file_receipts(self.task.task_id)
-        receipt = self.store.deliveries(self.task.task_id)[0]["payload"]["receipt"]
+        receipt = next(row["payload"]["receipt"] for row in self.store.deliveries(self.task.task_id)
+                       if row["key"] == "nested-digest")
         self.assertEqual(receipt["file_id"], "nested-id")
 
     def test_changed_owner_cannot_emit_receipt_to_another_group(self):

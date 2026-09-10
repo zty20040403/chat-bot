@@ -293,3 +293,34 @@ The focused artifact, report correction, runtime, file outbox and outcome suite
 passed 111 tests, including the real review-step path and persisted cache reuse.
 The production browser still shows an expired login; disposable cleanup remains
 unauthorized. Live acceptance of this reviewer change is still pending deployment.
+
+2026-09-11 02:25 HKT: Bot `1168a71`, nix-config `d09bcd9` deployed to h610 as
+`/nix/store/z4kc9xcigddysdlz8xnv2pl0islb14k2-nixos-system-h610-26.05.20260622.3426825`.
+The two gaoji services restarted; Max PID 473603 and PostgreSQL PID 8264 did not.
+Task 59 revision 5 independently re-observed all three hosts without replaying
+server commands. The h310 specialist succeeded with all four alert details.
+Reviewer run 149 succeeded without re-exporting the author's sandbox. Acceptance
+was 8/8, the new file was acknowledged after one upload, and final text receipt
+11321751 was committed. The compiler remained partial: its bounded correction
+pass exhausted three tool rounds before rereading all evidence. That remaining
+report-production gap is not hidden by the passed checklist or file receipt.
+
+## Concurrent File Receipts
+
+Focused tests reproduced four failure cases in the two concurrent receipt paths:
+an old reconciliation could downgrade acknowledged delivery to unknown; a late
+upload result could be returned to the caller but fail to persist after a
+reconciler changed sending to unknown; and a confirmed rejection could lose its
+safe retry state for the same reason.
+
+Receipt writes now lock the row and compare the observed payload. A confirmed
+receipt is not downgraded. The sender may settle sending or unknown only for its
+same upload attempt, and returns the persisted result when another path has won.
+Stale reconciliation cannot replace a newer attempt or a safely queued retry.
+The automatic retry boundary remains unchanged: only explicit not-sent results
+may retry, while an unobservable upload stays unknown and is checked, not replayed.
+
+The focused suite passed 109 tests. Two additional isolated PostgreSQL tests
+passed, including five real SIGKILL boundaries with explicitly simulated QQ
+transport. The local test database was stopped afterward. These checks do not
+prove every production QQ crash boundary or authenticated browser interaction.
