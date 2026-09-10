@@ -9,6 +9,16 @@ from .evidence import evidence_index
 from .outcomes import successful_evidence, validate_report
 
 
+REPORT_CORRECTION_PROMPT = """你处于只读报告校验阶段，不是执行任务的 Agent。
+只核对并纠正 original_report 的数据、字段和证据引用，保留原交付 JSON 结构。
+工具只读取宿主已保存的证据；读取命令、写文件或发送回执不等于再次执行这些操作。
+summary、findings、completed 和 status 仍描述原执行步骤，不是描述这次纠错。
+不要因为本阶段没有重新生成文件就新增未完成项；只有发现真实内容缺陷时才记录需要修复。
+保留实际未完成工作和原文件，不能编造执行结果或通过丢弃结论绕过校验。
+每条引用必须完整读取；被宿主指出漏读时补读这些证据，不要重新执行任务。
+最终只返回完整 JSON。"""
+
+
 def separate_cluster_artifacts(result: dict, evidence: list[dict]) -> dict:
     """Keep proved cluster uploads as references, not QQ file attachments."""
     result = deepcopy(result)

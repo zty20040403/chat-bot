@@ -146,6 +146,66 @@ class RuntimeV2Tests(unittest.IsolatedAsyncioTestCase):
             execute_tool=execute, delivered_artifacts=set(), progress=None), [])
         execute.assert_not_awaited()
 
+    async def test_revision_archives_old_instructions_and_freezes_fresh_scoped_context(self):
+        task = self.submit()
+        runs = {}
+        old_contexts = {}
+        histories = {}
+        for key, dependencies in (("frontend", ()), ("backend", ()), ("integration", ("frontend", "backend"))):
+            run = self.store.create_run(task.task_id, TaskStep(key, "coder", key, "new file", dependencies),
+                allowed_tools=[], model_profile="qwen-local")
+            runs[key] = run
+            self.store.finish_run(run.run_id, "succeeded", result={"status": "success", "summary": key,
+                "artifacts": [{"handle": "s123abc:/workspace/old.txt", "snapshot": "a" * 64}]})
+            histories[key] = [{"role": "user", "content": "legacy correction: do not generate files"},
+                              {"role": "assistant", "content": key}]
+            self.store.save_agent_session(task.task_id, run.run_id, histories[key], scope_key=task.scope_key,
+                requester_user_id=2, model_profile="qwen-local", expected_version=0)
+            old_contexts[key] = self.store.save_run_context(task.task_id, run.run_id,
+                self.packet.for_agent(self.coordinator.registry.worker("coder"), upstream={"research": {"summary": "old research"}}))
+        self.store.set_task_state(task.task_id, "completed")
+        self.coordinator.revise(task.task_id, scope_key=task.scope_key, requester_user_id=2,
+            instruction="generate a fresh report", step_keys=["frontend"], expected_version=1)
+        archive = self.store.revision_checkpoints(task.task_id)[-1]["state"]["previous_sessions"]
+        self.assertEqual({row["run_id"] for row in archive}, {runs["frontend"].run_id, runs["integration"].run_id})
+        for key, run in runs.items():
+            session = self.store.agent_session(task.task_id, run.run_id, scope_key=task.scope_key, requester_user_id=2)
+            if key == "backend":
+                self.assertEqual(session["messages"], histories[key])
+                self.assertEqual(session["version"], 1)
+                self.assertEqual(self.store.run_context(run.run_id), old_contexts[key])
+            else:
+                self.assertEqual(session["messages"], [])
+                self.assertEqual(session["version"], 2)
+                self.assertIsNone(self.store.run_context(run.run_id))
+                snapshot = next(row for row in archive if row["run_id"] == run.run_id)
+                self.assertEqual(snapshot["session"]["messages"], histories[key])
+                self.assertEqual(snapshot["context"], old_contexts[key].as_payload())
+                with self.assertRaises(RuntimeError):
+                    self.store.save_agent_session(task.task_id, run.run_id, histories[key], scope_key=task.scope_key,
+                        requester_user_id=2, model_profile="qwen-local", expected_version=1)
+        self.store.close()
+        self.store = SubAgentStore(Path(self.tmp.name) / "agents.sqlite3")
+        self.coordinator.store = self.store
+        async def worker(text, history, tools, execute, **kwargs):
+            self.assertEqual(history, [])
+            self.assertIn("new research", text)
+            self.assertIn("previous_version", text)
+            self.assertNotIn("legacy correction", text)
+            previous = json.loads(await execute("read_agent_result", {"step_id": "previous_version", "section": "artifacts"}))
+            self.assertEqual(previous["data"][0]["snapshot"], "a" * 64)
+            return json.dumps({"status": "success", "summary": "new report", "findings": [], "completed": [],
+                "authorization": [], "next_verification": [], "unresolved": [], "artifacts": []})
+        run = next(row for row in self.store.runs(task.task_id) if row.step_key == "frontend")
+        with patch("src.plugins.ai_chat.subagents.ask_deepseek_with_tools", side_effect=worker):
+            result = await self.coordinator._run_step(self.store.get(task.task_id),
+                TaskStep("frontend", "coder", run.objective, "new file"), run, context=self.packet,
+                upstream={"research": {"summary": "new research"}}, selected_profile=self.catalog.default,
+                tools_by_name={}, execute_tool=AsyncMock())
+        self.assertEqual(result.state, "success")
+        self.assertNotEqual(self.store.run_context(run.run_id).context_hash, old_contexts["frontend"].context_hash)
+        self.assertEqual(self.store.revision_checkpoints(task.task_id)[-1]["state"]["previous_sessions"], archive)
+
     async def test_lost_lease_fences_state_writes(self):
         task = self.submit()
         token = active_job_fence.set(JobFence(1, "worker", 1, lambda: False))

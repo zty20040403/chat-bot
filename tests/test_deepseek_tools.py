@@ -10,6 +10,7 @@ import nonebot
 nonebot.init()
 
 from src.plugins.ai_chat.deepseek import (
+    DeepSeekConfigError,
     DeepSeekTrace,
     FinalStreamState,
     _create_streaming_completion,
@@ -20,6 +21,17 @@ from src.plugins.ai_chat.config import settings
 
 
 class DeepSeekToolLoopTests(unittest.IsolatedAsyncioTestCase):
+    async def test_host_final_feedback_cannot_stream_or_create_an_unbounded_loop(self):
+        base = {"user_text": "check", "history": [], "execute_tool": AsyncMock(),
+            "tools": [{"type": "function", "function": {"name": "read_task_evidence", "parameters": {"type": "object"}}}],
+            "final_feedback": lambda text: "not verified"}
+        with patch("src.plugins.ai_chat.deepseek._create_completion", new=AsyncMock()) as model:
+            for override in ({"max_tool_rounds": None}, {"max_tool_rounds": 0}, {"tools": []},
+                             {"final_text_sink": AsyncMock()}, {"entry_handler": AsyncMock()}):
+                with self.subTest(override=override), self.assertRaises(DeepSeekConfigError):
+                    await ask_deepseek_with_tools(**{**base, **override})
+        model.assert_not_called()
+
     async def test_stream_releases_only_complete_paragraphs(self) -> None:
         class Stream:
             def __init__(self):

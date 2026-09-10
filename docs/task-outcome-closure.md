@@ -370,3 +370,33 @@ still running at the last observation. No final revision-6 file receipt has yet
 been confirmed. The browser remains at expired login and the Mac is locked;
 authorized disposable cleanup and real production upload-loss boundaries remain
 unaccepted. The overall checklist is intentionally not complete.
+
+## Execution and Correction Contexts
+
+At 03:19 HKT revision 6 was terminal partial, with 7/8 acceptance criteria.
+The new file was acknowledged after one upload and final text receipt 1290047123
+was committed. The remaining authorization criterion lacked an independent
+review with valid evidence. This is not a lost-file case or a completed task.
+
+Code inspection confirmed correction transcripts were appended to the execution
+session, while explicit revisions reused that session and its frozen upstream
+context. The next report writer consequently received prior read-only correction
+instructions as conversation history. Correction now persists in separate phase
+checkpoints with its own prompt; it assesses the original work, not whether the
+correction pass itself generated a file. Feedback identifies unread/invalid
+references inside the same bounded, non-streaming loop. It cannot reset the
+execution budget, acquire approval or reopen command tools.
+
+Explicit revision atomically archives selected steps' sessions and frozen
+contexts, advances session versions, then starts those steps with fresh context.
+Unselected steps retain their sessions. Prior results and immutable artifacts
+remain available through the scoped previous-version handoff; archived raw
+instructions are not fed to the new executor. Stale session writers fail their
+version check. Process-loss recovery within the same revision is unchanged and
+does not reopen execution after a correction checkpoint.
+
+The focused suite passed 159 tests, including actual loop feedback, budget
+exhaustion, fresh revision context, replay and untouched sibling sessions. An
+isolated PostgreSQL migration/concurrency test also passed with revision archival,
+stale-writer rejection and preservation of acknowledged file receipts. The test
+database was stopped. Deployment and a fresh production acceptance are pending.

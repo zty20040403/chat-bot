@@ -527,9 +527,14 @@ async def ask_deepseek_with_tools(
     entry_allowed_profiles: frozenset[str] | None = None,
     transcript_sink: TranscriptSink | None = None,
     after_tool_round: Callable[[], None] | None = None,
+    final_feedback: Callable[[str], str | None] | None = None,
 ) -> str:
     _last_completion_profile.set(None)
     selected_profile = _resolve_profile(profile, model)
+    if final_feedback is not None and (final_text_sink is not None or entry_handler is not None
+            or not tools or not selected_profile.capabilities.tools
+            or max_tool_rounds is None or max_tool_rounds < 1):
+        raise DeepSeekConfigError("Host final feedback requires a bounded non-streaming tool loop without entry dispatch")
     if entry_handler is not None and not (entry_profile or selected_profile).capabilities.tools:
         raise DeepSeekConfigError("The execution entry requires a tool-capable model")
     if entry_handler is None and (not tools or not selected_profile.capabilities.tools):
@@ -657,6 +662,16 @@ async def ask_deepseek_with_tools(
         tool_calls = list(getattr(message, "tool_calls", None) or [])
         if not tool_calls:
             content = (message.content or "").strip()
+            feedback = final_feedback(content) if final_feedback is not None else None
+            if feedback and (max_tool_rounds is None or tool_round < max_tool_rounds):
+                candidate = _assistant_final_message(message)
+                messages.extend([candidate, {"role": "system", "content": feedback}])
+                if trace is not None:
+                    trace.messages.append(candidate)
+                if transcript_sink is not None:
+                    transcript_sink([item for item in messages if item.get("role") != "system"])
+                next_tool_choice = "auto"
+                continue
             raced_feedback = (
                 [] if emitted else await _drain_feedback(feedback_provider)
             )

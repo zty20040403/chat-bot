@@ -42,7 +42,6 @@ class ReportCorrectionTests(unittest.IsolatedAsyncioTestCase):
             TaskStep("inspect", "operator", "inspect", "report"), allowed_tools=[], model_profile="test")
         self.ref = self.store.record_evidence(self.task.task_id, self.run.run_id, "host_inspect",
             {"host_id": "h610"}, {"ok": True, "observed_at": 1000, "host": "h610"})["ref"]
-        self.saved = Mock()
 
     def tearDown(self):
         self.store.close()
@@ -51,7 +50,7 @@ class ReportCorrectionTests(unittest.IsolatedAsyncioTestCase):
         return await self.coordinator._correct_worker_report(self.task, self.run, original or report(),
             evidence=self.store.task_evidence(self.task.task_id),
             spec=DEFAULT_AGENT_REGISTRY.worker("operator"), profile=self.profile,
-            trace=DeepSeekTrace(), save_transcript=self.saved, event_sink=AsyncMock())
+            trace=DeepSeekTrace(), event_sink=AsyncMock())
 
     async def valid_correction(self, text, history, tools, execute, **kwargs):
         await execute("read_task_evidence", {"ref": self.ref})
@@ -64,6 +63,8 @@ class ReportCorrectionTests(unittest.IsolatedAsyncioTestCase):
 
         async def model(text, history, tools, execute, **kw):
             self.assertEqual(history, [])
+            self.assertIn("只读报告校验阶段", kw["tool_context"])
+            self.assertIn("仍描述原执行步骤", kw["tool_context"])
             self.assertEqual([t["function"]["name"] for t in tools], ["read_task_evidence_batch", "read_task_evidence"])
             self.assertIn(self.ref, text)
             for name in ("ops_call", "sandbox_exec", "send_file_from_sandbox"):
@@ -77,7 +78,12 @@ class ReportCorrectionTests(unittest.IsolatedAsyncioTestCase):
             result = await self.correct()
         self.assertEqual(result["report_validation"]["status"], "passed")
         self.assertEqual(result["status"], "success")
-        self.assertEqual(self.saved.call_args.args[0][0], history[0])
+        stored = self.store.agent_session(self.task.task_id, self.run.run_id,
+            scope_key=self.task.scope_key, requester_user_id=2)
+        self.assertEqual(stored["messages"], history)
+        self.assertEqual(stored["version"], 1)
+        transcript = self.store.latest_run_checkpoint(self.task.task_id, self.run.run_id, "report_correction_transcript")
+        self.assertEqual(transcript["messages"], [{"role": "assistant", "content": "corrected"}])
         self.assertEqual(call.call_count, 1)
 
     async def test_valid_report_costs_no_extra_model_call(self):
@@ -117,6 +123,47 @@ class ReportCorrectionTests(unittest.IsolatedAsyncioTestCase):
         with patch("src.plugins.ai_chat.subagents.ask_deepseek_with_tools", side_effect=model):
             result = await self.correct()
         self.assertEqual(result["report_validation"]["status"], "incomplete")
+
+    async def test_actual_loop_asks_for_missing_evidence_without_reopening_execution(self):
+        calls = 0
+        async def completion(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            tool_calls = []
+            if calls == 2:
+                feedback = [m["content"] for m in kwargs["messages"]
+                            if m["role"] == "system" and "报告尚未通过宿主校验" in m["content"]]
+                self.assertEqual(len(feedback), 1)
+                self.assertIn(self.ref, feedback[0])
+                tool_calls = [SimpleNamespace(id="read-missing", function=SimpleNamespace(
+                    name="read_task_evidence", arguments=json.dumps({"ref": self.ref})))]
+            message = SimpleNamespace(content="" if tool_calls else json.dumps(report(self.ref)), tool_calls=tool_calls)
+            return SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=None), ""
+        with patch("src.plugins.ai_chat.deepseek._completion_with_optional_stream", side_effect=completion):
+            result = await self.correct()
+        self.assertEqual(calls, 3)
+        self.assertEqual(result["report_validation"]["status"], "passed")
+        self.assertEqual(result["artifacts"], report()["artifacts"])
+        self.assertEqual(self.store.agent_session(self.task.task_id, self.run.run_id,
+            scope_key=self.task.scope_key, requester_user_id=2)["messages"], [])
+        feedback = self.store.latest_run_checkpoint(self.task.task_id, self.run.run_id, "report_correction_feedback")
+        self.assertIn(self.ref, feedback["errors"][0])
+        transcript = self.store.latest_run_checkpoint(self.task.task_id, self.run.run_id, "report_correction_transcript")
+        self.assertTrue(any(m["role"] == "tool" for m in transcript["messages"]))
+        with patch("src.plugins.ai_chat.subagents.ask_deepseek_with_tools") as model:
+            self.assertEqual(await self.correct(), result)
+        model.assert_not_called()
+
+    async def test_invalid_final_feedback_exhausts_same_budget_and_stays_partial(self):
+        response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+            content=json.dumps(report(self.ref)), tool_calls=[]))], usage=None), ""
+        with patch("src.plugins.ai_chat.deepseek._completion_with_optional_stream",
+                   new=AsyncMock(return_value=response)) as model:
+            result = await self.correct()
+        self.assertEqual(model.await_count, 4)
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["report_validation"]["status"], "incomplete")
+        self.assertEqual(result["artifacts"], report()["artifacts"])
 
     async def test_batch_pages_survive_actual_tool_loop_and_transport_limits(self):
         refs = [self.store.record_evidence(self.task.task_id, self.run.run_id, "host_inspect",

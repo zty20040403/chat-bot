@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import logging
 import os
 import unittest
 import uuid
@@ -49,6 +50,37 @@ class TaskOutcomePostgresTests(unittest.TestCase):
             claimed = next(value for value in claims if value is not None)
             store.settle_file_attempt(task.task_id, row, claimed, {"ok": True, "file_id": "verified-file"})
             self.assertEqual(store.deliveries(task.task_id)[0]["state"], "acknowledged")
+
+            from tests.test_subagent_v2 import profile
+            from src.plugins.ai_chat.agent import ContextPacket, DEFAULT_AGENT_REGISTRY
+            from src.plugins.ai_chat.model_catalog import ModelCatalog
+            from src.plugins.ai_chat.subagents import SubAgentCoordinator
+            model = profile()
+            coordinator = SubAgentCoordinator(store, ModelCatalog({"test": model}, default_profile="test"),
+                logger=logging.getLogger("test-outcome"))
+            store.update_control(task.task_id, expected_version=0, dispatch={"bot_id": "123", "profile": "test"})
+            history = [{"role": "user", "content": "old correction instructions"}]
+            context = ContextPacket("group:1", "group:1:user:2", 2, None, "inspect").for_agent(
+                DEFAULT_AGENT_REGISTRY.worker("operator"), upstream={})
+            store.save_run_context(task.task_id, run.run_id, context)
+            store.save_agent_session(task.task_id, run.run_id, history,
+                scope_key="group:1", requester_user_id=2, model_profile="test", expected_version=0)
+            store.set_task_state(task.task_id, "partial")
+            coordinator.revise(task.task_id, scope_key="group:1", requester_user_id=2,
+                instruction="new inspection", step_keys=["inspect"], expected_version=1)
+            store.close()
+            store = SubAgentStore(database)
+            session = store.agent_session(task.task_id, run.run_id, scope_key="group:1", requester_user_id=2)
+            self.assertEqual(session["messages"], [])
+            self.assertEqual(session["version"], 2)
+            self.assertIsNone(store.run_context(run.run_id))
+            archived = store.revision_checkpoints(task.task_id)[-1]["state"]["previous_sessions"][0]
+            self.assertEqual(archived["session"]["messages"], history)
+            self.assertEqual(archived["context"], context.as_payload())
+            self.assertEqual(store.deliveries(task.task_id)[0]["state"], "acknowledged")
+            with self.assertRaises(RuntimeError):
+                store.save_agent_session(task.task_id, run.run_id, history,
+                    scope_key="group:1", requester_user_id=2, model_profile="test", expected_version=1)
             store.close()
         finally:
             if database:
