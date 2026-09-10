@@ -171,6 +171,7 @@ from .handler_services import HandlerService
 from .handler_constants import (TURN_PROMPT_VERSION)
 from .fleet_client import FleetControlError
 from .ai_tools import OPS_CATALOG_TOOL_NAME, OPS_CALL_TOOL_NAME
+from .ai_tools import SERVICE_CONTROL_TOOL_NAME, HOST_REBOOT_TOOL_NAME, host_operation_call
 from .fleet_case_recall import semantic_runbook_scores
 from .fleet_tools import fleet_overview, inspect_host, model_status, requires_local_model_status, summarize_fleet
 
@@ -1574,6 +1575,8 @@ class ToolExecutor(HandlerService):
             if name in {
                 OPS_CATALOG_TOOL_NAME,
                 OPS_CALL_TOOL_NAME,
+                SERVICE_CONTROL_TOOL_NAME,
+                HOST_REBOOT_TOOL_NAME,
                 FLEET_OVERVIEW_TOOL_NAME,
                 HOST_INSPECT_TOOL_NAME,
                 SERVICE_INSPECT_TOOL_NAME,
@@ -1601,7 +1604,7 @@ class ToolExecutor(HandlerService):
                         {"ok": False, "error": "当前会话无权读取服务器日志。"},
                         ensure_ascii=False,
                     )
-                if name in {OPS_CATALOG_TOOL_NAME, OPS_CALL_TOOL_NAME} and not self._registered_admin(event.user_id):
+                if name in {OPS_CATALOG_TOOL_NAME, OPS_CALL_TOOL_NAME, SERVICE_CONTROL_TOOL_NAME, HOST_REBOOT_TOOL_NAME} and not self._registered_admin(event.user_id):
                     return json.dumps({"ok": False, "error": "仅管理员可以访问服务器管理接口。"}, ensure_ascii=False)
                 host_id = str(arguments.get("host_id") or "").strip()
                 unit = str(arguments.get("unit") or "").strip()
@@ -1625,6 +1628,9 @@ class ToolExecutor(HandlerService):
                             actor=f"qq:{event.user_id}", origin=self.services.chat._conversation_scope(event).key)
                     elif name == OPS_CALL_TOOL_NAME:
                         payload = await client.ops_call(arguments,
+                            actor=f"qq:{event.user_id}", origin=self.services.chat._conversation_scope(event).key)
+                    elif name in {SERVICE_CONTROL_TOOL_NAME, HOST_REBOOT_TOOL_NAME}:
+                        payload = await client.ops_call(host_operation_call(name, arguments),
                             actor=f"qq:{event.user_id}", origin=self.services.chat._conversation_scope(event).key)
                     elif name == FLEET_OVERVIEW_TOOL_NAME:
                         payload = await fleet_overview(client)

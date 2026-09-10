@@ -296,7 +296,9 @@ class ClusterExecutionStore:
                     problem = "approval_changed"
                 else:
                     cursor.execute("UPDATE fleet_approvals SET consumed_at=? WHERE approval_id=?", (now, item["approval_ref"]))
-            elif not item["backend_operation_id"]:
+            elif not item["backend_operation_id"] and not (
+                _decode(item["arguments_json"], {}).get("host_control", {}).get("version") == 1
+            ):
                 problem = "submission_outcome_unknown"
             if problem:
                 cursor.execute("""UPDATE fleet_operations SET status='needs_attention', error_code=?,
@@ -336,12 +338,43 @@ class ClusterExecutionStore:
             cursor.execute("""UPDATE fleet_operations SET status=?, result_json=?, backend_operation_id=?,
                 error_code=?, lease_owner=NULL, lease_expires_at=?, updated_at=? WHERE operation_id=?""",
                 (status, canonical_json(result), backend_id, error, now+5, now, operation_id))
-            if row["status"] != status or row["backend_operation_id"] != backend_id or row["error_code"] != error:
+            old_phase = _decode(row["result_json"], {}).get("phase")
+            phase = result.get("phase") if isinstance(result, dict) else None
+            if row["status"] != status or row["backend_operation_id"] != backend_id or row["error_code"] != error or old_phase != phase:
                 self._event(cursor, "fleet_operation_events", "operation_id", operation_id,
                     event_type="upstream_observed", status=status, fence=fence, created_at=now,
-                    payload={"backend_operation_id": backend_id, "error_code": error})
+                    payload={"backend_operation_id": backend_id, "error_code": error, "phase": phase})
             connection.commit()
             return True
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            cursor.close()
+            connection.close()
+
+    def checkpoint_managed_operation(self, operation_id: str, *, owner: str, fence: int,
+                                     result: dict[str, Any]) -> None:
+        now = int(time.time())
+        connection = self.database.store_connection()
+        cursor = connection.cursor()
+        try:
+            row = cursor.execute("SELECT * FROM fleet_operations WHERE operation_id=? FOR UPDATE", (operation_id,)).fetchone()
+            if (not row or row["lease_owner"] != owner or row["fence"] != fence
+                    or row["lease_expires_at"] <= now or row["deadline_at"] <= now or row["status"] != "running"):
+                raise PermissionError("Operation lease expired or was cancelled before submission")
+            approval = cursor.execute("SELECT * FROM fleet_approvals WHERE approval_id=? FOR UPDATE",
+                                      (row["approval_ref"],)).fetchone()
+            if (not approval or approval["expires_at"] <= now or approval["consumed_at"] is None
+                    or approval["contract_hash"] != row["contract_hash"]
+                    or approval["resource_version"] != row["resource_version"]):
+                raise PermissionError("Operation approval expired or changed before submission")
+            cursor.execute("UPDATE fleet_operations SET result_json=?, updated_at=? WHERE operation_id=?",
+                           (canonical_json(result), now, operation_id))
+            self._event(cursor, "fleet_operation_events", "operation_id", operation_id,
+                event_type="host_command_checkpoint", status="running", fence=fence,
+                payload={"phase": result["phase"]}, created_at=now)
+            connection.commit()
         except Exception:
             connection.rollback()
             raise

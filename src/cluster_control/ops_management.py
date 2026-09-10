@@ -14,15 +14,19 @@ from jsonschema import Draft202012Validator, ValidationError
 from .adapters.ops import OpsClient, OpsError
 from .execution_contracts import canonical_json, content_hash, new_handle
 from .execution_storage import ClusterExecutionStore
+from .host_operations import REBOOT_DEFINITION, execution_params, host_contract, parse_helpers
 
 
 class OpsManagementService:
     def __init__(self, client: OpsClient, store: ClusterExecutionStore, *,
-                 hosts: tuple[str, ...], actors: tuple[str, ...]) -> None:
+                 hosts: tuple[str, ...], actors: tuple[str, ...], host_helpers: dict[str, str] | None = None) -> None:
         self.client = client
         self.store = store
         self.hosts = frozenset(hosts)
         self.actors = frozenset(actors)
+        self.host_helpers = parse_helpers(canonical_json(host_helpers or {}))
+        if set(self.host_helpers) - self.hosts:
+            raise ValueError("Host helpers must be inside the management host grant")
         self.owner = uuid.uuid4().hex
         self.closed = False
         self.guardian_validator: Callable[[dict[str, Any]], Awaitable[None]] | None = None
@@ -47,6 +51,14 @@ class OpsManagementService:
             for d in definitions
         ):
             raise OpsError("invalid_catalog", "Invalid management operation catalog")
+        definitions = [dict(d) for d in definitions]
+        execute = next((d for d in definitions if d["name"] == "exec.run"), None)
+        if execute and self.host_helpers:
+            if execute["idempotency"] != "required" or execute["read_only"] or execute.get("kind") != "job_submission":
+                raise OpsError("incompatible_execution", "Checked host execution requires durable upstream jobs")
+            if any(d["name"] == "host.reboot" for d in definitions):
+                raise OpsError("conflicting_operation", "Upstream host.reboot conflicts with the configured target helper")
+            definitions.append({**REBOOT_DEFINITION, "execution_definition": execute})
         return definitions
 
     async def catalog(self, actor: str, operation: str = "") -> dict[str, Any]:
@@ -60,13 +72,16 @@ class OpsManagementService:
             definitions = [{k: d.get(k) for k in
                 ("name", "summary", "read_only", "kind", "idempotency")} for d in definitions]
         return {"version": 2, "hosts": sorted(self.hosts), "operations": definitions,
-                "writes_require_approval": True}
+                "writes_require_approval": True, "checked_execution_hosts": sorted(self.host_helpers)}
 
-    def binding_hash(self, definition: dict[str, Any]) -> str:
+    def binding_hash(self, definition: dict[str, Any], *, legacy: bool = False) -> str:
         # Credential rotation or a changed schema/scope invalidates an old approval.
-        return content_hash({"definition": definition, "hosts": sorted(self.hosts),
+        binding = {"definition": definition, "hosts": sorted(self.hosts),
             "actors": sorted(self.actors), "url": self.client.base_url,
-            "identity": hashlib.sha256(self.client._credential()).hexdigest()})
+            "identity": hashlib.sha256(self.client._credential()).hexdigest()}
+        if not legacy and definition["name"] in {"exec.run", "host.reboot"}:
+            binding["host_helpers"] = self.host_helpers
+        return content_hash(binding)
 
     async def call(self, operation: str, params: dict[str, Any], *, actor: str,
                    origin: str, idempotency_key: str = "", guardian_id: str = "",
@@ -93,6 +108,8 @@ class OpsManagementService:
         arguments = {"op": operation, "params": params,
                      "binding_hash": self.binding_hash(definition),
                      "upstream_idempotency": definition["idempotency"]}
+        if operation in {"exec.run", "host.reboot"}:
+            arguments["host_control"] = host_contract(operation, params, self.host_helpers)
         if guardian_id:
             arguments["guardian_id"] = guardian_id
         if deployment:
@@ -118,6 +135,8 @@ class OpsManagementService:
             "idempotency_key": idempotency_key, "verification": {}, "compensation": {},
             "contract_hash": intent_hash, "status": "awaiting_approval", "capability_status": "available",
             "created_at": now}
+        if "host_control" in arguments:
+            execution_params(record)
         saved = await asyncio.to_thread(self.store.prepare_operation, record)
         return self.proposal_result(saved)
 
@@ -151,8 +170,15 @@ class OpsManagementService:
         self.authorize(record["actor_id"])
         arguments = record["arguments"]
         definition = next((d for d in await self.definitions() if d["name"] == arguments["op"]), None)
-        if definition is None or self.binding_hash(definition) != arguments["binding_hash"]:
+        valid_hashes = {self.binding_hash(definition)} if definition else set()
+        # Already accepted legacy commands may still be observed, but cannot be
+        # submitted again without the new helper contract.
+        if definition and arguments["op"] == "exec.run" and "host_control" not in arguments and record.get("backend_operation_id"):
+            valid_hashes.add(self.binding_hash(definition, legacy=True))
+        if definition is None or arguments["binding_hash"] not in valid_hashes:
             raise PermissionError("Management scope or operation schema changed; prepare a new request")
+        if "host_control" in arguments and arguments["host_control"] != host_contract(arguments["op"], arguments["params"], self.host_helpers):
+            raise PermissionError("Target execution binding no longer matches the approved intent")
         return definition
 
     async def _validate_submission(self, record: dict[str, Any]) -> dict[str, Any]:
@@ -210,6 +236,10 @@ class OpsManagementService:
         record = await asyncio.to_thread(self.store.claim_managed_operation, self.owner)
         if record is None:
             return False
+        if "host_control" in record["arguments"]:
+            from .host_operation_runner import run_host_operation
+            await run_host_operation(self, record)
+            return True
         status, result, error, backend_id = "needs_attention", {}, "", record.get("backend_operation_id")
         submission_started = bool(backend_id)
         try:
@@ -231,6 +261,8 @@ class OpsManagementService:
                     status = "cancelling"
             else:
                 definition = await self._validate_submission(record)
+                if record["arguments"]["op"] == "exec.run":
+                    raise PermissionError("Legacy unchecked command must be prepared again with target-side checks")
                 # Persist the claim before any effect; lost submissions are never blindly replayed.
                 submission_started = True
                 response = await self.client._request("POST", "/v1/execute",

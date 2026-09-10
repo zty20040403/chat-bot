@@ -263,6 +263,12 @@ in {
       description = "Maximum age of a non-sensitive read-only query projection.";
     };
 
+    hostControlHelpers = lib.mkOption {
+      type = lib.types.attrsOf lib.types.str;
+      default = {};
+      description = "Target-installed gaoji-host-control paths, keyed by authorized host. Unconfigured hosts cannot run free commands or reboot.";
+    };
+
     diagnostics.targets = lib.mkOption {
       type = lib.types.listOf diagnosticTargetType;
       default = [];
@@ -453,6 +459,7 @@ in {
         KC_OPS_MANAGEMENT_TOKEN_FILE = if cfg.ops.management.enable then "%d/ops-management-token" else "";
         KC_OPS_MANAGEMENT_HOSTS = builtins.toJSON cfg.ops.management.hosts;
         KC_OPS_MANAGEMENT_ACTORS = builtins.toJSON cfg.ops.management.actors;
+        KC_HOST_CONTROL_HELPERS_JSON = builtins.toJSON cfg.hostControlHelpers;
         KC_OPS_TIMEOUT_SECONDS = toString cfg.ops.timeoutSeconds;
         KC_CACHE_SECONDS = toString cfg.cacheSeconds;
         KC_INVENTORY_JSON = builtins.toJSON cfg.inventory;

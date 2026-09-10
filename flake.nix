@@ -190,6 +190,7 @@
         default = mkPackage system;
         gaoji = mkPackage system;
         cluster-worker = import ./nix/cluster-worker-package.nix {inherit pkgs lib;};
+        host-control = import ./nix/host-control-package.nix {inherit pkgs lib;};
       }
       // lib.optionalAttrs pkgs.stdenv.isLinux {
         sandbox-image = mkSandboxImage system;
@@ -248,6 +249,7 @@
       gaoji = self.nixosModules.default;
       qwen-control = import ./nix/qwen-control.nix;
       cluster-control = import ./nix/cluster-control.nix {inherit self;};
+      host-control = import ./nix/host-control.nix {inherit self;};
       cluster-worker = import ./nix/cluster-worker.nix {inherit self;};
       cluster-deployer = import ./nix/cluster-deployer.nix {inherit self;};
     };

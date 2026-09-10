@@ -36,6 +36,8 @@ jobs:
       AI_POSTGRES_SCHEMA: qq_bot_test
       TEST_POSTGRES_DSN: postgresql://qq_bot:ci-password@127.0.0.1:5432/qq_bot
       TEST_POSTGRES_SCHEMA: qq_bot_test
+      TEST_OPS_POSTGRES_DSN: postgresql://qq_bot:ci-password@127.0.0.1:5432/qq_bot
+      TEST_SECURITY_POSTGRES_DSN: postgresql://qq_bot:ci-password@127.0.0.1:5432/qq_bot
       AI_ALLOW_LEGACY_SQLITE: "true"
     steps:
       - uses: actions/checkout@v4
@@ -47,6 +49,14 @@ jobs:
         run: python -m pip install --disable-pip-version-check -r requirements.txt
       - name: Compile all Python modules
         run: python -m compileall -q bot.py src migrations tests
+      - name: Install vector in the shared test namespace
+        run: |
+          python - <<'PY'
+          import os
+          import psycopg
+          with psycopg.connect(os.environ["TEST_POSTGRES_DSN"]) as connection:
+              connection.execute("CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public")
+          PY
       - name: Apply and verify Alembic schema
         run: |
           python -m src.bot_storage.cli upgrade
@@ -64,6 +74,7 @@ jobs:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
       - run: nix flake check --no-build --print-build-logs
       - run: nix build .#packages.x86_64-linux.default --no-link --print-build-logs
+      - run: nix build .#packages.x86_64-linux.host-control --no-link --print-build-logs
 
   secrets:
     name: Secret scan

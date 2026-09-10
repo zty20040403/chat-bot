@@ -6,6 +6,14 @@ import './ops-management.css'
 
 type Plane = ReturnType<typeof useControlPlane>
 
+const hostPhases: Record<string, string> = {
+  submitting: '正在提交', submitted: '已提交，等待目标机检查', checking: '检查程序与执行环境',
+  executing: '正在执行', recovering_receipt: '正在找回原任务回执', waiting_for_reboot: '等待主机重新上线',
+  verified: '已验收', preflight_failed: '执行前检查失败', reboot_command_failed: '重启命令失败',
+  outcome_unknown: '结果尚未确认', finished: '执行已结束', cancelled_before_submission: '提交前已取消',
+  submission_rejected: '提交被拒绝，未执行命令',
+}
+
 export function OpsManagementPanel({ plane }: { plane: Plane }) {
   const fleet = plane.data.fleet ?? {}
   const capability = fleet.execution_capabilities?.ops_management
@@ -74,7 +82,7 @@ export function OpsManagementPanel({ plane }: { plane: Plane }) {
       <tbody>{(all ? operations : operations.slice(0, 5)).map((item) => <tr key={item.operation_id}>
         <td>{fmtTime(item.updated_at)}</td><td><code>{item.arguments?.op || item.operation}</code><small className="cell-sub">{item.operation_id}</small></td>
         <td>{item.host_id}<small className="cell-sub">{item.arguments?.params?.unit || item.arguments?.params?.repository || item.resource_ref}</small></td>
-        <td>{item.actor_id}</td><td><StatusBadge value={item.status} /></td>
+        <td>{item.actor_id}</td><td><StatusBadge value={item.status} />{item.result?.phase && <small className="cell-sub">{hostPhases[item.result.phase] || item.result.phase}</small>}</td>
         <td><button type="button" className="icon-button" title="审阅参数与执行结果" aria-label={`审阅 ${item.operation_id}`} disabled={busy} onClick={() => void load(item.operation_id)}><Eye size={15} /></button></td>
       </tr>)}</tbody></DataTable>
     {!operations.length && <EmptyState>暂无远程操作请求</EmptyState>}
@@ -85,7 +93,7 @@ export function OpsManagementPanel({ plane }: { plane: Plane }) {
         <div className="ops-toolbar"><strong>{selected.host_id}</strong><span>{selected.actor_id}</span><StatusBadge value={selected.status} /></div>
         <p>请求参数 · 版本 {selected.resource_version}</p><pre>{JSON.stringify(selected.arguments?.params ?? selected.arguments, null, 2)}</pre>
         <small className="ops-hash">批准绑定：{selected.contract_hash}</small>
-        {selected.status === 'awaiting_approval' && <p>预检完成，等待执行。</p>}
+        {selected.status === 'awaiting_approval' && <p>等待本次操作授权。</p>}
         {stale && <p role="status">状态已更新，请重新读取后操作。</p>}
         {error && <p role="alert" className="ops-error">{error}</p>}
         <div className="ops-toolbar">
@@ -95,6 +103,19 @@ export function OpsManagementPanel({ plane }: { plane: Plane }) {
         </div>
         {selected.backend_operation_id && <p>远端任务：<code>{selected.backend_operation_id}</code></p>}
         {selected.error_code && <p className="ops-error">{selected.error_code}</p>}
+        {selected.result?.phase && <p><strong>{hostPhases[selected.result.phase] || selected.result.phase}</strong></p>}
+        {selected.result?.preflight?.evidence && <dl className="ops-evidence">
+          <dt>执行身份</dt><dd>UID {selected.result.preflight.evidence.uid} · GID {selected.result.preflight.evidence.gid}</dd>
+          <dt>工作目录</dt><dd><code>{selected.result.preflight.evidence.cwd?.resolved}</code></dd>
+          <dt>实际程序</dt><dd>{(selected.result.preflight.evidence.programs ?? []).map((program: any) => <code key={program.requested}>{program.resolved}</code>)}</dd>
+        </dl>}
+        {selected.result?.verification?.before_boot_id && <dl className="ops-evidence">
+          <dt>重启前开机编号</dt><dd><code>{selected.result.verification.before_boot_id}</code></dd>
+          <dt>当前开机编号</dt><dd><code>{selected.result.verification.after_boot_id}</code></dd>
+          <dt>验收时间</dt><dd>{fmtTime(selected.result.verification.observed_at)}</dd>
+          <dt>重启验收</dt><dd>{selected.result.verification.verified ? '开机编号已改变' : '尚未观察到新的开机编号'}</dd>
+        </dl>}
+        {selected.result?.preflight_error && <p className="ops-error">{selected.result.preflight_error.error || selected.result.preflight_error.code}{selected.result.preflight_error.suggested_program && <> · 候选路径：<code>{selected.result.preflight_error.suggested_program}</code></>}</p>}
         <details open={selected.status !== 'awaiting_approval'}><summary>执行结果</summary><pre>{JSON.stringify(selected.result ?? {}, null, 2)}</pre></details>
         <DataTable><thead><tr><th>时间</th><th>事件</th><th>状态</th></tr></thead><tbody>{(selected.events ?? []).slice().reverse().map((event: any) => <tr key={event.sequence}><td>{fmtTime(event.created_at)}</td><td>{event.event_type}</td><td><StatusBadge value={event.status} /></td></tr>)}</tbody></DataTable>
       </div>

@@ -14,6 +14,10 @@
 .ops-confirm { display: flex; align-items: flex-start; gap: 10px; margin: 18px 0; }
 .ops-confirm input { flex-shrink: 0; margin-top: 3px; }
 .ops-error { color: #b91c1c; overflow-wrap: anywhere; }
+.ops-evidence { display: grid; grid-template-columns: minmax(90px, 140px) minmax(0, 1fr); gap: 8px 16px; font-size: 13px; }
+.ops-evidence dt { color: #666; }
+.ops-evidence dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.ops-evidence dd code { display: block; overflow-wrap: anywhere; }
 .guardian-review { padding: 0; }
 .guardian-review::backdrop { background: #0006; }
 .guardian-review p { overflow-wrap: anywhere; }

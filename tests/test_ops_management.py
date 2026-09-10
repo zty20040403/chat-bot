@@ -70,7 +70,7 @@ class ManagementTests(unittest.IsolatedAsyncioTestCase):
                 'type': 'object', 'properties': {'host': {'type': 'string'}},
                 'required': ['host'], 'additionalProperties': False,
             },
-        } for name, readonly, kind in [('host.facts', True, 'observation'), ('exec.run', False, 'job_submission')]]
+        } for name, readonly, kind in [('host.facts', True, 'observation'), ('units.restart', False, 'job_submission')]]
         def handle(request):
             self.calls.append(request)
             if request.method == 'GET':
@@ -84,7 +84,7 @@ class ManagementTests(unittest.IsolatedAsyncioTestCase):
                 return httpx.Response(200, json={'handle': {'job_id': self.response_job_id, 'revision': 2, 'state': self.state}})
             if op == 'jobs.cancel':
                 return httpx.Response(200, json={'handle': {'job_id': 'job_test', 'revision': 3, 'state': 'running'}})
-            if op == 'exec.run':
+            if op == 'units.restart':
                 if self.fail_submission:
                     raise httpx.ReadTimeout('lost receipt', request=request)
                 return httpx.Response(200, json={'job_id': 'job_test', 'revision': 1, 'state': 'queued'})
@@ -98,7 +98,7 @@ class ManagementTests(unittest.IsolatedAsyncioTestCase):
         self.tmp.cleanup()
 
     async def propose(self, key='test-intent-0001', host='h610'):
-        return await self.manager.call('exec.run', {'host': host}, actor='qq:3526452465', origin='group:123', idempotency_key=key)
+        return await self.manager.call('units.restart', {'host': host}, actor='qq:3526452465', origin='group:123', idempotency_key=key)
 
     async def approve(self, proposal):
         r = proposal['operation']
@@ -113,7 +113,7 @@ class ManagementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.calls, [])
         catalog = await self.manager.catalog('admin:kenneth')
         self.assertNotIn('params_schema', catalog['operations'][0])
-        detail = await self.manager.catalog('admin:kenneth', 'exec.run')
+        detail = await self.manager.catalog('admin:kenneth', 'units.restart')
         self.assertIn('params_schema', detail['operations'][0])
 
     async def test_reads_direct_and_other_hosts_blocked(self):
@@ -122,14 +122,14 @@ class ManagementTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.store.records)
         with self.assertRaises(PermissionError):
             await self.propose(host='b650')
-        self.assertFalse(self.posts('exec.run'))
+        self.assertFalse(self.posts('units.restart'))
 
     async def test_schema_and_unknown_operation_rejected(self):
         with self.assertRaises(ValueError):
-            await self.manager.call('exec.run', {'host': 'h610', 'arbitrary': True}, actor='admin:kenneth', origin='admin-console')
+            await self.manager.call('units.restart', {'host': 'h610', 'arbitrary': True}, actor='admin:kenneth', origin='admin-console')
         with self.assertRaises(PermissionError):
             await self.manager.call('invented', {}, actor='admin:kenneth', origin='admin-console')
-        self.assertFalse(self.posts('exec.run'))
+        self.assertFalse(self.posts('units.restart'))
 
     async def test_deployment_target_uses_the_same_host_grant(self):
         self.definitions.append({
@@ -149,17 +149,17 @@ class ManagementTests(unittest.IsolatedAsyncioTestCase):
         proposal = await self.propose()
         self.assertTrue(proposal['approval_required'])
         self.assertFalse(await self.manager.run_once())
-        self.assertFalse(self.posts('exec.run'))
+        self.assertFalse(self.posts('units.restart'))
         await self.approve(proposal)
         await self.manager.run_once()
-        self.assertEqual(self.posts('exec.run')[0].headers['Idempotency-Key'], proposal['operation']['operation_id'])
+        self.assertEqual(self.posts('units.restart')[0].headers['Idempotency-Key'], proposal['operation']['operation_id'])
         await self.manager.run_once()
         self.state = 'succeeded'
         await self.manager.run_once()
         again = await self.propose()
         self.assertTrue(again['executed'])
         self.assertFalse(again['approval_required'])
-        self.assertEqual(len(self.posts('exec.run')), 1)
+        self.assertEqual(len(self.posts('units.restart')), 1)
 
     async def test_same_key_is_bound_to_same_parameters(self):
         first = await self.propose()
@@ -177,7 +177,7 @@ class ManagementTests(unittest.IsolatedAsyncioTestCase):
         self.definitions[1]['params_schema']['properties']['host']['minLength'] = 1
         with self.assertRaises(PermissionError):
             await self.approve(proposal)
-        self.assertFalse(self.posts('exec.run'))
+        self.assertFalse(self.posts('units.restart'))
 
     async def test_missing_receipt_never_replays(self):
         proposal = await self.propose()
@@ -187,7 +187,7 @@ class ManagementTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await self.manager.run_once())
         record = self.store.get_operation(proposal['operation']['operation_id'])
         self.assertEqual(record['status'], 'needs_attention')
-        self.assertEqual(len(self.posts('exec.run')), 1)
+        self.assertEqual(len(self.posts('units.restart')), 1)
         self.assertTrue(record['result']['submission_started'])
 
     async def test_read_only_validation_retries_before_one_submission(self):
@@ -200,7 +200,7 @@ class ManagementTests(unittest.IsolatedAsyncioTestCase):
         with patch('src.cluster_control.ops_management.asyncio.sleep', new_callable=AsyncMock):
             await self.manager.run_once()
         self.assertEqual(self.manager.deployment_validator.await_count, 2)
-        self.assertEqual(len(self.posts('exec.run')), 1)
+        self.assertEqual(len(self.posts('units.restart')), 1)
         self.assertEqual(self.store.get_operation(proposal['operation']['operation_id'])['status'], 'running')
 
     async def test_validation_outage_is_known_not_submitted(self):
@@ -212,7 +212,7 @@ class ManagementTests(unittest.IsolatedAsyncioTestCase):
             await self.manager.run_once()
         record = self.store.get_operation(proposal['operation']['operation_id'])
         self.assertEqual(self.manager.deployment_validator.await_count, 3)
-        self.assertFalse(self.posts('exec.run'))
+        self.assertFalse(self.posts('units.restart'))
         self.assertEqual(record['status'], 'failed')
         self.assertIs(record['result']['submission_started'], False)
 
@@ -225,7 +225,7 @@ class ManagementTests(unittest.IsolatedAsyncioTestCase):
             self.store.records[key]['status'] = 'cancelling'
         self.manager.deployment_validator = cancelled
         await self.manager.run_once()
-        self.assertFalse(self.posts('exec.run'))
+        self.assertFalse(self.posts('units.restart'))
         self.assertIs(self.store.get_operation(key)['result']['submission_started'], False)
 
     async def test_poll_outage_keeps_remote_job(self):
@@ -237,7 +237,7 @@ class ManagementTests(unittest.IsolatedAsyncioTestCase):
         record = self.store.get_operation(proposal['operation']['operation_id'])
         self.assertEqual(record['status'], 'reconciling')
         self.assertEqual(record['backend_operation_id'], 'job_test')
-        self.assertEqual(len(self.posts('exec.run')), 1)
+        self.assertEqual(len(self.posts('units.restart')), 1)
 
     async def test_cancel_waits_for_target_confirmation(self):
         proposal = await self.propose()
@@ -259,7 +259,7 @@ class ManagementTests(unittest.IsolatedAsyncioTestCase):
         with patch('src.cluster_control.ops_management.asyncio.sleep', new_callable=AsyncMock):
             await self.manager.run_once()
         self.assertEqual(self.store.get_operation(proposal['operation']['operation_id'])['status'], 'succeeded')
-        self.assertEqual(len(self.posts('exec.run')), 1)
+        self.assertEqual(len(self.posts('units.restart')), 1)
         self.assertEqual(len(self.posts('jobs.status')), 2)
         self.assertTrue(all(json.loads(r.content)['params'] == {'job_id': 'job_test'}
                             for r in self.posts('jobs.status')))
@@ -275,7 +275,7 @@ class ManagementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record['status'], 'needs_attention')
         self.assertEqual(record['backend_operation_id'], 'job_test')
         self.assertEqual(len(self.posts('jobs.status')), 3)
-        self.assertEqual(len(self.posts('exec.run')), 1)
+        self.assertEqual(len(self.posts('units.restart')), 1)
 
     async def test_http_409_observation_recovers_on_each_host_without_reexecution(self):
         for host in ('h310', 'h610', 'tank'):
@@ -290,7 +290,7 @@ class ManagementTests(unittest.IsolatedAsyncioTestCase):
                     await self.manager.run_once()
                 record = self.store.get_operation(proposal['operation']['operation_id'])
                 self.assertEqual(record['status'], 'succeeded')
-                self.assertEqual(len(self.posts('exec.run')), 1)
+                self.assertEqual(len(self.posts('units.restart')), 1)
                 self.assertEqual(len(self.posts('jobs.status')), 2)
                 self.assertTrue(all(json.loads(request.content)['params'] == {'job_id': 'job_test'}
                                     for request in self.posts('jobs.status')))
@@ -322,7 +322,7 @@ class ManagementTests(unittest.IsolatedAsyncioTestCase):
         with patch('src.cluster_control.ops_management.asyncio.sleep', new_callable=AsyncMock):
             await self.manager.run_once()
         self.assertEqual(self.store.get_operation(proposal['operation']['operation_id'])['status'], 'failed')
-        self.assertEqual(len(self.posts('exec.run')), 1)
+        self.assertEqual(len(self.posts('units.restart')), 1)
 
     async def test_expired_receipt_observation_does_not_poll_or_replay(self):
         proposal = await self.propose()
@@ -332,7 +332,7 @@ class ManagementTests(unittest.IsolatedAsyncioTestCase):
         self.store.records[key]['deadline_at'] = int(time.time()) - 1
         await self.manager.run_once()
         self.assertFalse(self.posts('jobs.status'))
-        self.assertEqual(len(self.posts('exec.run')), 1)
+        self.assertEqual(len(self.posts('units.restart')), 1)
         self.assertEqual(self.store.get_operation(key)['status'], 'needs_attention')
 
     async def test_admin_api_fails_closed_without_accounts_even_with_old_token(self):
@@ -371,9 +371,9 @@ class ManagementPostgresTests(unittest.TestCase):
                 fake = SimpleNamespace(base_url='http://test', _credential=lambda: b'test')
                 manager = OpsManagementService(fake, store, hosts=('h610',), actors=('qq:3526452465', 'admin:kenneth'))
                 async def definitions():
-                    return [{'name': 'exec.run', 'read_only': False, 'kind': 'job_submission', 'idempotency': 'required', 'params_schema': {'type': 'object'}}]
+                    return [{'name': 'units.restart', 'read_only': False, 'kind': 'job_submission', 'idempotency': 'required', 'params_schema': {'type': 'object'}}]
                 manager.definitions = definitions
-                result = __import__('asyncio').run(manager.call('exec.run', {'host': 'h610'}, actor='qq:3526452465', origin='test', idempotency_key='database-intent'))
+                result = __import__('asyncio').run(manager.call('units.restart', {'host': 'h610'}, actor='qq:3526452465', origin='test', idempotency_key='database-intent'))
                 r = result['operation']
                 self.assertIsNone(store.claim_managed_operation('worker'))
                 store.approve_operation(r['operation_id'], actor_id='admin:kenneth', expected_hash=r['contract_hash'], expected_version=1, expires_at=int(time.time()) + 300)

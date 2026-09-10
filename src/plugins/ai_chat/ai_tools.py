@@ -18,6 +18,8 @@ OPERATION_STATUS_TOOL_NAME = "operation_status"
 OPERATION_CANCEL_TOOL_NAME = "operation_cancel"
 OPS_CATALOG_TOOL_NAME = "ops_catalog"
 OPS_CALL_TOOL_NAME = "ops_call"
+SERVICE_CONTROL_TOOL_NAME = "service_control"
+HOST_REBOOT_TOOL_NAME = "host_reboot"
 CLUSTER_ARTIFACT_UPLOAD_TOOL_NAME = "cluster_artifact_upload"
 CLUSTER_JOB_SUBMIT_TOOL_NAME = "cluster_job_submit"
 CLUSTER_JOB_STATUS_TOOL_NAME = "cluster_job_status"
@@ -92,7 +94,7 @@ OPS_CALL_TOOL: ToolDefinition = {
     "type": "function",
     "function": {
         "name": OPS_CALL_TOOL_NAME,
-        "description": "仅管理员可用的 MaxOps 接口，参数必须来自 ops_catalog。只读直接返回；重要服务器写操作由宿主申请本任务统一授权，确认后自动提交，所有子任务共享且不再逐条确认。用 operation_status 查询最终结果；排队不等于成功。模型不能自行授权或用沙盒绕过服务器权限。",
+        "description": "仅管理员可用的 MaxOps 接口，参数必须来自 ops_catalog。服务启停优先 service_control，整机重启必须用 host_reboot，不拼 systemctl 路径。其他 exec.run 命令由目标机先检查程序、工作目录和环境再执行，检查失败不得自行替换路径执行。只读直接返回；重要服务器写操作申请本任务统一授权，子任务共享。用 operation_status 查询最终结果；排队、退出零和整机重启成功不是同一回事。结果未知时继续查原 operation，不能换 key 重复执行。",
         "parameters": {"type": "object", "properties": {
             "operation": {"type": "string"},
             "params": {"type": "object", "description": "严格符合目录 schema 的参数。"},
@@ -100,6 +102,47 @@ OPS_CALL_TOOL: ToolDefinition = {
         }, "required": ["operation", "params"], "additionalProperties": False},
     },
 }
+
+SERVICE_CONTROL_TOOL: ToolDefinition = {
+    "type": "function", "function": {
+        "name": SERVICE_CONTROL_TOOL_NAME,
+        "description": "管理员启动、停止、重启或重载 systemd 服务的专用工具。先用 service_inspect 确认目标服务；调用已授权的 units.* 接口，不生成 shell 命令。沿用本任务授权，用 operation_status 等最终验收；重启需确认运行实例变化。",
+        "parameters": {"type": "object", "properties": {
+            "host_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"},
+            "unit": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,119}\\.service$"},
+            "action": {"type": "string", "enum": ["start", "stop", "restart", "reload"]},
+            "expected_invocation_id": {"type": "string", "pattern": "^[a-fA-F0-9]{32}$",
+                                       "description": "可选，刚查询到的运行实例编号，用于拒绝过期操作。"},
+            "idempotency_key": {"type": "string", "minLength": 8, "maxLength": 160},
+        }, "required": ["host_id", "unit", "action", "idempotency_key"], "additionalProperties": False},
+    },
+}
+
+HOST_REBOOT_TOOL: ToolDefinition = {
+    "type": "function", "function": {
+        "name": HOST_REBOOT_TOOL_NAME,
+        "description": "管理员整机重启专用工具。只指定目标和原因，使用目标机固定重启程序；沿用本任务授权。持久记录开机编号并等待机器恢复，只有 boot ID 改变才算重启成功。断线或超时必须查原 operation_status，绝不能再发一次重启。",
+        "parameters": {"type": "object", "properties": {
+            "host_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"},
+            "reason": {"type": "string", "minLength": 1, "maxLength": 1000},
+            "idempotency_key": {"type": "string", "minLength": 8, "maxLength": 160},
+        }, "required": ["host_id", "reason", "idempotency_key"], "additionalProperties": False},
+    },
+}
+
+
+def host_operation_call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    if name == HOST_REBOOT_TOOL_NAME:
+        operation = "host.reboot"
+        params = {"host": arguments["host_id"], "reason": arguments["reason"]}
+    elif name == SERVICE_CONTROL_TOOL_NAME and arguments.get("action") in {"start", "stop", "restart", "reload"}:
+        operation = "units." + arguments["action"]
+        params = {"host": arguments["host_id"], "unit": arguments["unit"]}
+        if arguments.get("expected_invocation_id"):
+            params["expected_invocation_id"] = arguments["expected_invocation_id"]
+    else:
+        raise ValueError("Unsupported typed host operation")
+    return {"operation": operation, "params": params, "idempotency_key": arguments["idempotency_key"]}
 
 WEB_SEARCH_TOOL: ToolDefinition = {
     "type": "function",
@@ -1772,7 +1815,7 @@ def available_tools(
     if include_alert_tools:
         tools.append(QUERY_ALERTS_TOOL)
     if include_ops_management:
-        tools.extend([OPS_CATALOG_TOOL, OPS_CALL_TOOL])
+        tools.extend([OPS_CATALOG_TOOL, OPS_CALL_TOOL, SERVICE_CONTROL_TOOL, HOST_REBOOT_TOOL])
     if include_fleet_tools:
         tools.extend(
             [FLEET_OVERVIEW_TOOL, HOST_INSPECT_TOOL, SERVICE_INSPECT_TOOL, MODEL_STATUS_TOOL,

@@ -152,7 +152,7 @@ class FleetAuthorization:
             raise SecurityError("操作未提供完整批准信息", 502)
         if account.get("session_hash") and origin == "admin-console":
             return {"approval_required": True, "operation": record,
-                    "next_action": "预检已完成，在控制台执行即可，不需要手机口令。"}
+                    "next_action": "操作参数已准备，在控制台执行即可，不需要手机口令。尚未代表目标机检查或执行成功。"}
         scope = server_task.get() or account.get("server_task")
         if scope is not None:
             if self.tasks is None or scope["scope"] != origin:

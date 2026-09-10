@@ -61,14 +61,14 @@ def _final(text: str = "完成。"):
 
 
 class AgentKernelTests(unittest.IsolatedAsyncioTestCase):
-    async def test_dangerous_tool_requires_explicit_current_user_approval(self) -> None:
+    async def test_explicit_approval_policy_rejects_unapproved_tool(self) -> None:
         execute = AsyncMock(return_value='{"ok":true}')
         events = []
 
         async def sink(event):
             events.append(event)
 
-        with patch(
+        with patch.dict(TOOL_POLICIES, {"browser_clear": ToolPolicy(risk="critical", approval="explicit")}), patch(
             "src.plugins.ai_chat.deepseek._create_completion",
             new=AsyncMock(
                 side_effect=[

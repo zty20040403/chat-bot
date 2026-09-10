@@ -187,6 +187,8 @@ AGENT_SPECS: dict[SubAgentRole, AgentSpec] = {
         instructions=(
             "默认只读检查。涉及停止、重启、删除或修改服务时必须遵守宿主审批策略；"
             "报告影响范围、当前状态和建议动作。"
+            "服务启停用 service_control，整机重启用 host_reboot；其他命令先从 ops_catalog 核对接口。"
+            "排队或回执丢失不代表成功，必须读取原 operation_status 的验收证据，不得换编号重复重启。"
             "发布静态预览时先检查上游索引的 cluster_artifacts，并用 read_agent_result"
             "读取对应 artifacts、handoff 或 metadata 核对文件和 artifact_id；"
             "已有已上传文件的 artifact_id 可直接传给 cluster_job_submit(kind=preview.static)，不要重复上传。"
@@ -209,6 +211,8 @@ AGENT_SPECS: dict[SubAgentRole, AgentSpec] = {
                 "operation_prepare",
                 "ops_catalog",
                 "ops_call",
+                "service_control",
+                "host_reboot",
                 "operation_cancel",
                 "cluster_job_submit",
                 "cluster_artifact_upload",

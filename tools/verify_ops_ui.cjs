@@ -42,7 +42,8 @@ const server = http.createServer((req, res) => {
         res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(operation));
       }); return;
     }
-    const payload = resource === 'fleet' ? { configured: true, fleet: { inventory: [] },
+    const payload = resource === 'me' ? { account: { account_id: 'fixture', username: 'fixture', role: 'admin', enabled: true } }
+      : resource === 'fleet' ? { configured: true, fleet: { inventory: [] },
       execution_capabilities: { ops_management: { available: true, hosts: ['h310', 'h610', 'tank'] },
         guardians: { targets: [guardianTarget.target_id], target_details: [guardianTarget], remediation_available: true } }, operations: { items: [operation] } }
       : resource === 'fleet/operations/op_fixture' ? operation
@@ -67,7 +68,7 @@ const server = http.createServer((req, res) => {
     await page.getByRole('button', { name: '审阅 op_fixture' }).click();
     const dialog = page.getByRole('dialog', { name: '服务器操作审阅' });
     await dialog.waitFor();
-    assert.equal(await dialog.getByRole('button', { name: '批准执行' }).isEnabled(), false);
+    assert.equal(await dialog.getByRole('button', { name: '执行', exact: true }).isEnabled(), true);
     for (const width of [1440, 390]) {
       await page.setViewportSize({ width, height: 1000 });
       await page.screenshot({ path: `/tmp/gaoji-ops-${width}.png`, animations: 'disabled' });
@@ -75,13 +76,36 @@ const server = http.createServer((req, res) => {
       assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= width);
       assert.equal(await dialog.evaluate(el => el.scrollWidth > el.clientWidth + 1), false);
     }
-    await dialog.getByRole('checkbox').check();
+    let refreshed = page.waitForResponse(response => response.url().endsWith('/fleet'));
     for (const stream of streams) stream.write(`data: ${JSON.stringify({ type: 'resources.changed', sequence: 2, resources: ['fleet'], timestamp: Date.now() / 1000 })}\n\n`);
-    await page.waitForResponse(response => response.url().endsWith('/fleet'));
-    assert.equal(await dialog.getByRole('checkbox').isChecked(), true);
-    await dialog.getByRole('button', { name: '批准执行' }).click();
-    await page.waitForResponse(response => response.url().endsWith('/approve'));
+    await refreshed;
+    assert.equal(await dialog.isVisible(), true);
+    const approval = page.waitForResponse(response => response.url().endsWith('/approve'));
+    await dialog.getByRole('button', { name: '执行', exact: true }).click();
+    await approval;
     assert.equal(approved, 1);
+    operation.status = 'reconciling'; operation.updated_at++;
+    operation.result = { phase: 'waiting_for_reboot', preflight: { evidence: {
+      uid: 0, gid: 0, cwd: { resolved: '/' }, programs: [{ requested: 'systemctl', resolved: '/nix/store/' + 'checked-systemctl-'.repeat(8) + '/bin/systemctl' }] } },
+      verification: { verified: false, before_boot_id: '8d526a9e-ee0b-4ae2-ab51-1e5462c3f99d', after_boot_id: '8d526a9e-ee0b-4ae2-ab51-1e5462c3f99d', observed_at: '2026-09-10T06:15:00Z' } };
+    refreshed = page.waitForResponse(response => response.url().endsWith('/fleet/operations/op_fixture'));
+    for (const stream of streams) stream.write(`data: ${JSON.stringify({ type: 'resources.changed', sequence: 3, resources: ['fleet'], timestamp: Date.now() / 1000 })}\n\n`);
+    await refreshed;
+    await dialog.getByText('尚未观察到新的开机编号', { exact: true }).waitFor();
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: 1000 });
+      await page.screenshot({ path: `/tmp/gaoji-host-evidence-${width}.png`, animations: 'disabled' });
+      assert.equal(await dialog.evaluate(el => el.scrollWidth > el.clientWidth + 1), false);
+      assert.equal(await dialog.locator('.ops-evidence').evaluateAll(elements => elements.some(el => el.scrollWidth > el.clientWidth + 1)), false);
+    }
+    operation.status = 'succeeded'; operation.updated_at++;
+    operation.result.phase = 'verified';
+    operation.result.verification.verified = true;
+    operation.result.verification.after_boot_id = '9d526a9e-ee0b-4ae2-ab51-1e5462c3f99d';
+    refreshed = page.waitForResponse(response => response.url().endsWith('/fleet/operations/op_fixture'));
+    for (const stream of streams) stream.write(`data: ${JSON.stringify({ type: 'resources.changed', sequence: 4, resources: ['fleet'], timestamp: Date.now() / 1000 })}\n\n`);
+    await refreshed;
+    await dialog.getByText('开机编号已改变', { exact: true }).waitFor();
     await dialog.getByRole('button', { name: '关闭审阅' }).click();
     await page.getByLabel('守护目标', { exact: true }).selectOption('tank-worker');
     await page.getByLabel('守护模式', { exact: true }).selectOption('remediate');
@@ -98,14 +122,16 @@ const server = http.createServer((req, res) => {
       assert.equal(await guardianDialog.evaluate(el => el.scrollWidth > el.clientWidth + 1), false);
     }
     await guardianDialog.getByRole('checkbox').check();
-    for (const stream of streams) stream.write(`data: ${JSON.stringify({ type: 'resources.changed', sequence: 3, resources: ['fleet'], timestamp: Date.now() / 1000 })}\n\n`);
-    await page.waitForResponse(response => response.url().endsWith('/fleet'));
+    refreshed = page.waitForResponse(response => response.url().endsWith('/fleet'));
+    for (const stream of streams) stream.write(`data: ${JSON.stringify({ type: 'resources.changed', sequence: 5, resources: ['fleet'], timestamp: Date.now() / 1000 })}\n\n`);
+    await refreshed;
     assert.equal(await guardianDialog.getByRole('checkbox').isChecked(), true);
+    const guardianResponse = page.waitForResponse(response => response.url().endsWith('/guardians'));
     await guardianDialog.getByRole('button', { name: '确认授权' }).click();
-    await page.waitForResponse(response => response.url().endsWith('/guardians'));
+    await guardianResponse;
     assert.equal(guardianApproved, 1);
     assert.deepEqual(errors, []);
-    console.log('Desktop/mobile operation and guardian reviews, stable SSE state and exact approvals passed.');
+    console.log('Desktop/mobile host evidence, live reboot verification, operation/guardian reviews and exact approvals passed.');
   } finally {
     await browser.close();
     for (const stream of streams) stream.end();

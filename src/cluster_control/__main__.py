@@ -62,6 +62,7 @@ def main() -> None:
     management = (OpsManagementService(
         OpsClient(settings.ops_base_url, settings.ops_management_token_file, timeout_seconds=25),
         execution_store, hosts=settings.ops_management_hosts, actors=settings.ops_management_actors,
+        host_helpers=settings.host_control_helpers,
     ) if settings.ops_management_token_file else None)
     resource_policies = ResourcePolicyStore(database)
     reliability = ReliabilityStore(database)

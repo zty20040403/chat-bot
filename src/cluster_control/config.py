@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import urlsplit
+
+from .host_operations import parse_helpers
 
 
 def _int(name: str, default: int, minimum: int, maximum: int) -> int:
@@ -391,6 +393,7 @@ class ClusterControlSettings:
     ops_management_token_file: str = ""
     ops_management_hosts: tuple[str, ...] = ()
     ops_management_actors: tuple[str, ...] = ()
+    host_control_helpers: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_env(cls) -> "ClusterControlSettings":
@@ -416,6 +419,7 @@ class ClusterControlSettings:
             ops_management_token_file=os.getenv("KC_OPS_MANAGEMENT_TOKEN_FILE", "").strip(),
             ops_management_hosts=_identity_list("KC_OPS_MANAGEMENT_HOSTS"),
             ops_management_actors=_identity_list("KC_OPS_MANAGEMENT_ACTORS"),
+            host_control_helpers=parse_helpers(os.getenv("KC_HOST_CONTROL_HELPERS_JSON", "")),
             cache_seconds=_int("KC_CACHE_SECONDS", 20, 1, 300),
             inventory=_inventory(os.getenv("KC_INVENTORY_JSON", "")),
             diagnostic_targets=_diagnostic_targets(

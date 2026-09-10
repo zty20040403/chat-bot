@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -71,9 +70,9 @@ class WorkerSelectionTests(unittest.IsolatedAsyncioTestCase):
             names = {tool["function"]["name"] for tool in tools}
             self.assertIn("cluster_job_submit", names)
             result = json.loads(await execute_tool("cluster_job_submit", requested))
-            self.assertFalse(result["executed"], result)
-            self.assertIn("approval_id", result)
-            return "awaiting phone approval"
+            self.assertEqual(result["status"], "queued", result)
+            self.assertNotIn("approval_id", result)
+            return "worker job queued"
 
         event = GroupMessageEvent(time=1, self_id=int(BOT), post_type="message", sub_type="normal",
             user_id=int(QQ), message_type="group", message_id=654, message=Message("check worker"),
@@ -101,14 +100,8 @@ class WorkerSelectionTests(unittest.IsolatedAsyncioTestCase):
                     requested.pop("worker_id", None)
                 await ai_chat.handlers.tools._ask_ai(AsyncMock(), event, "check worker",
                     available_image_sources=[])
-                self.assertEqual(len(control.store.records), index)
-                challenge = next(text for text in reversed(sent) if "一次性口令：" in text)
-                identifier = re.search(r"AP-[A-F0-9]+", challenge)[0]
-                code = re.search(r"一次性口令：([0-9]{6})", challenge)[1]
-                reply = await mobile.handle_message(qq_id=QQ, bot_id=BOT, private=True,
-                    text=f"确认 {identifier} {code}")
-                self.assertIn("已确认", reply)
-                self.assertTrue(await mobile.run_once())
+                self.assertEqual(len(control.store.records), index + 1)
+                self.assertEqual(sent, [])
                 record = control.store.records[-1]
                 self.assertEqual(record["constraints"]["worker_id"], worker)
                 self.assertEqual(record["payload"]["target_id"], "h610-worker")

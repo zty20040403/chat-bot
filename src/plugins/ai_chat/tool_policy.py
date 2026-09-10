@@ -229,6 +229,8 @@ def _policy_registry() -> dict[str, ToolPolicy]:
         side_effects=("read:fleet", "write:operation-ledger"),
         timeout_seconds=60.0, max_identical_calls=2,
     )
+    policies["service_control"] = replace(policies["ops_call"])
+    policies["host_reboot"] = replace(policies["ops_call"], risk="critical")
     policies["operation_cancel"] = ToolPolicy(
         risk="high",
         idempotency="idempotent",
@@ -317,9 +319,9 @@ def _policy_registry() -> dict[str, ToolPolicy]:
             max_identical_calls=1,
         )
     # Leave time for one task-level QQ authorization before a server mutation.
-    for name in {"ops_call", "operation_prepare", "operation_cancel", "cluster_job_submit", "cluster_guardian_create"}:
+    for name in {"ops_call", "service_control", "host_reboot", "operation_prepare", "operation_cancel", "cluster_job_submit", "cluster_guardian_create"}:
         policies[name] = replace(policies.get(name, ToolPolicy()), timeout_seconds=250.0)
-    for name in {"ops_call", "operation_prepare", "operation_cancel"}:
+    for name in {"ops_call", "service_control", "host_reboot", "operation_prepare", "operation_cancel"}:
         policies[name] = replace(policies[name], approval="task")
     return policies
 

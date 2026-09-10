@@ -59,6 +59,24 @@ def fleet_payload(now: int) -> dict:
 
 
 class FleetProjectionTests(unittest.IsolatedAsyncioTestCase):
+    def test_typed_host_actions_never_generate_shell_commands(self) -> None:
+        from src.plugins.ai_chat.ai_tools import HOST_REBOOT_TOOL, SERVICE_CONTROL_TOOL, host_operation_call
+        from src.plugins.ai_chat.tool_policy import policy_for_tool
+        catalog = ToolCatalog([HOST_REBOOT_TOOL, SERVICE_CONTROL_TOOL])
+        for action in ("start", "stop", "restart", "reload"):
+            args = {"host_id": "h310", "unit": "example.service", "action": action, "idempotency_key": "service-test"}
+            self.assertTrue(catalog.validate("service_control", args).ok)
+            call = host_operation_call("service_control", args)
+            self.assertEqual(call["operation"], "units." + action)
+            self.assertEqual(call["params"], {"host": "h310", "unit": "example.service"})
+            self.assertNotIn("command", json.dumps(call))
+        args = {"host_id": "tank", "reason": "Maintenance", "idempotency_key": "host-reboot-test"}
+        self.assertTrue(catalog.validate("host_reboot", args).ok)
+        self.assertEqual(host_operation_call("host_reboot", args)["operation"], "host.reboot")
+        self.assertFalse(catalog.validate("host_reboot", {**args, "command": "reboot"}).ok)
+        for name in ("service_control", "host_reboot"):
+            self.assertEqual(policy_for_tool(name).approval, "task")
+
     def test_job_tool_accepts_exact_worker_selection(self) -> None:
         catalog = ToolCatalog([CLUSTER_JOB_SUBMIT_TOOL])
         args = {"kind": "probe.http", "target_id": "h610-worker", "idempotency_key": "worker-selection"}

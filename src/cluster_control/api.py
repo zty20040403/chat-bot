@@ -430,7 +430,7 @@ def create_app(
         actor, origin = principal
         try:
             if management is not None:
-                if body.operation not in {"service.start", "service.stop", "service.restart"} or any(
+                if body.operation not in {"service.start", "service.stop", "service.restart", "service.reload"} or any(
                     (body.arguments, body.expected_state, body.verification, body.compensation)
                 ):
                     raise ValueError("Use ops_catalog and ops_call for upstream service preconditions; custom checks cannot be silently dropped")
