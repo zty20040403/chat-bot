@@ -13,6 +13,7 @@ from src.plugins.ai_chat.agent.artifact_acceptance import (
     artifact_delivery_allowed,
     artifact_identity,
     artifact_verdicts,
+    separate_review_artifacts,
 )
 from src.plugins.ai_chat.agent.execution import EntryDecision
 from src.plugins.ai_chat.deepseek import DeepSeekTrace
@@ -57,6 +58,43 @@ def review_for(file, *, status="passed"):
 
 
 class ArtifactAcceptanceTests(unittest.TestCase):
+    def test_review_references_are_not_new_artifacts_or_acceptance_evidence(self):
+        file = artifact()
+        original = {"status": "success", "artifacts": [{"handle": file["handle"]}],
+                    "metadata": {"artifact_reviews": [review_for(file)]}}
+        result = separate_review_artifacts(original, {"build": {"artifacts": [file]}})
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["artifacts"], [])
+        self.assertEqual(original["artifacts"], [{"handle": file["handle"]}])
+        self.assertEqual(result["metadata"]["review_artifact_references"][0]["snapshot"], file["snapshot"])
+        self.assertEqual(artifact_verdicts([check_for(file)], result, executed=False)[0]["status"], "failed")
+
+    def test_review_rejects_unknown_modified_or_ambiguous_artifacts(self):
+        file = artifact()
+        for returned, sources in (
+            ({"handle": "sbbbbbb:/workspace/report.md"}, [file]),
+            ({**file, "snapshot": "b" * 64}, [file]),
+            ({**file, "size": 999}, [file]),
+            ({"handle": file["handle"]}, [file, {**file, "snapshot": "b" * 64}]),
+            (file, []),
+            (file, [{**file, "snapshot": "invalid"}]),
+        ):
+            with self.subTest(returned=returned, sources=sources):
+                result = separate_review_artifacts({"status": "success", "artifacts": [returned]},
+                    {"build": {"artifacts": sources}})
+                self.assertEqual(result["status"], "failed")
+                self.assertEqual(result["artifacts"], [])
+                self.assertTrue(result["unresolved"])
+
+    def test_review_reference_preserves_real_failure_and_removes_forged_references(self):
+        file = artifact()
+        original = {"status": "partial", "artifacts": [file], "unresolved": ["tests failed"],
+                    "metadata": {"review_artifact_references": [{"snapshot": "forged"}]}}
+        result = separate_review_artifacts(original, {"build": {"artifacts": [file]}})
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["unresolved"], ["tests failed"])
+        self.assertEqual(result["metadata"]["review_artifact_references"][0]["snapshot"], file["snapshot"])
+
     def test_identity_prefers_snapshot_and_only_falls_back_to_handle(self):
         file = artifact()
         self.assertEqual(artifact_identity(file), file["snapshot"])
@@ -223,6 +261,54 @@ class ArtifactAcceptanceRuntimeTests(unittest.IsolatedAsyncioTestCase):
             task, completed, execute_tool=self.execute, delivered_artifacts=set(),
             progress=None, hooks=self.hooks, validation=validation,
         )
+
+    async def test_real_review_step_does_not_recapture_author_artifact(self):
+        task = self.submit()
+        file = artifact()
+        completed = {"build": self.outcome(task, artifacts=[file])}
+        self.workspaces.capture = AsyncMock(side_effect=AssertionError("review must not export author sandbox"))
+
+        async def model(text, history, tools, execute, **kwargs):
+            self.assertIn("artifacts 必须为空数组", text)
+            run = next(item for item in self.store.runs(task.task_id) if item.step_key.startswith("acceptance_r"))
+            self.store.append_event(task.task_id, "agent.tool_finished", {
+                "tool_name": "sandbox_exec", "result": json.dumps({"returncode": 0}),
+            }, run_id=run.run_id)
+            return json.dumps({"status": "success", "summary": "Checked exact report bytes",
+                "artifacts": [{"handle": file["handle"], "name": file["name"]}],
+                "metadata": {"artifact_reviews": [review_for(file)]}})
+
+        with patch("src.plugins.ai_chat.subagents.ask_deepseek_with_tools", side_effect=model):
+            validated = await self.validate(task, completed)
+        self.assertEqual(validated["status"], "passed")
+        self.workspaces.capture.assert_not_awaited()
+        review = next(item for item in self.store.runs(task.task_id) if item.run_id == validated["run_id"])
+        self.assertEqual(review.status, "succeeded")
+        self.assertEqual(review.result["artifacts"], [])
+        self.assertEqual(review.result["metadata"]["review_artifact_references"][0]["snapshot"], file["snapshot"])
+        self.assertEqual(completed["build"].result["artifacts"], [file])
+        task, completed = self.reopen(task, completed)
+        with patch("src.plugins.ai_chat.subagents.ask_deepseek_with_tools") as model:
+            cached = await self.validate(task, completed)
+        model.assert_not_called()
+        self.assertEqual(cached, validated)
+
+    async def test_review_mode_does_not_accept_undeclared_upstream_reference(self):
+        task = self.submit()
+        file = artifact()
+        step = TaskStep("review", "coder", "review", "findings", ("build",))
+        run = self.store.create_run(task.task_id, step, allowed_tools=[], model_profile="qwen-local")
+        self.workspaces.capture = AsyncMock()
+        with patch("src.plugins.ai_chat.subagents.ask_deepseek_with_tools", new=AsyncMock(return_value=json.dumps({
+            "status": "success", "summary": "Checked", "artifacts": [file],
+        }))):
+            result = await self.coordinator._run_step_reliably(task, step, run, context=self.packet,
+                upstream={"previous_version": {"artifacts": [file]}},
+                selected_profile=self.catalog.default, tools_by_name={}, execute_tool=self.execute,
+                hooks=self.hooks, review_only=True)
+        self.assertEqual(result.state, "failed")
+        self.workspaces.capture.assert_not_awaited()
+        self.assertEqual(result.result["artifacts"], [])
 
     async def test_workflow_sends_exact_passed_file_despite_failed_preview_acceptance(self):
         task = self.submit()

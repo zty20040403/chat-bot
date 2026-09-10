@@ -86,10 +86,11 @@ def retain_execution_facts(original: dict, corrected: dict) -> dict:
     """A read-only edit cannot create/remove files or resolve unfinished execution."""
     corrected = deepcopy(corrected)
     corrected["artifacts"] = deepcopy(original.get("artifacts", []))
-    corrected.setdefault("metadata", {}).pop("cluster_artifact_refs", None)
-    external = original.get("metadata", {}).get("cluster_artifact_refs")
-    if external:
-        corrected["metadata"]["cluster_artifact_refs"] = deepcopy(external)
+    for field in ("cluster_artifact_refs", "review_artifact_references"):
+        corrected.setdefault("metadata", {}).pop(field, None)
+        references = original.get("metadata", {}).get(field)
+        if references:
+            corrected["metadata"][field] = deepcopy(references)
     for key in ("warnings", "unresolved", "handoff"):
         corrected[key] = list(dict.fromkeys([*original.get(key, []), *corrected.get(key, [])]))
     if original.get("status") in {"partial", "failed"}:

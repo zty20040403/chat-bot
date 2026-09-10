@@ -35,6 +35,7 @@ from .agent.outcomes import (acceptance_blocks_completion, evaluate_acceptance,
 from .agent.file_outbox import FileOutboxStoreMixin, attempt_file
 from .agent.artifact_acceptance import (
     ACCEPTANCE_VERSION, artifact_delivery_allowed, artifact_identity, artifact_verdicts,
+    separate_review_artifacts,
 )
 from .agent.model_routing import agent_profile_names, choose_agent_profile, scoped_agent_models, model_scope_for_role, validate_model_policy
 from .agent.scheduling import SpecialistScheduler
@@ -2249,6 +2250,8 @@ class SubAgentCoordinator:
                 "读取获准的上游结果；有文件必须 import_agent_artifact 到自己的隔离沙盒，"
                 "复制只读快照到工作目录后解包、运行实际检查/测试。不要仅复述作者的成功声明。"
                 "不得替作者改代码或生成新的交付物。研究结论检查来源与证据。"
+                "你的 artifacts 必须为空数组；原作者文件只在 metadata.artifact_reviews 中引用，"
+                "不要把原沙盒句柄或导入副本作为你的交付物。"
                 "中文 PDF 检查文本内容和字体；不能把机器格式检查说成人工视觉验收。"
                 "必须将整体任务验收与文件验收分开：预览发布、部署、远端服务失败不代表已完成的源码或文档不合格。"
                 "在 metadata.artifact_reviews 中逐个返回文件结论，格式为"
@@ -2277,7 +2280,7 @@ class SubAgentCoordinator:
         await self._notify_progress(progress, f"{task.handle} · 独立验收 Agent：正在检查交付物和任务要求。")
         outcome = await self._run_step_reliably(task, step, run, context=context,
             upstream={key: value.result for key, value in completed.items()}, selected_profile=selected_profile,
-            tools_by_name=tools_by_name, execute_tool=execute_tool, hooks=hooks)
+            tools_by_name=tools_by_name, execute_tool=execute_tool, hooks=hooks, review_only=True)
         if outcome.state == "waiting":
             raise ExternalPending()
         _merge_trace(parent_trace, outcome.trace)
@@ -2698,6 +2701,7 @@ class SubAgentCoordinator:
         tools_by_name: Mapping[str, ToolDefinition],
         execute_tool: ToolExecutor,
         hooks: AgentExecutionHooks | None = None,
+        review_only: bool = False,
     ) -> StepOutcome:
         profile = self._profile_for(step.role, selected_profile)
         spec = self.registry.worker(step.role)
@@ -2852,6 +2856,10 @@ class SubAgentCoordinator:
                         )
                     result = _normalize_worker_scope_result(_parse_worker_result(answer))
                     result = separate_cluster_artifacts(result, allowed_evidence())
+            if review_only and correction_checkpoint is None:
+                result = separate_review_artifacts(result, {
+                    key: upstream[key] for key in step.dependencies if key in upstream
+                })
             result = await self._correct_worker_report(
                 task, run, result, evidence=allowed_evidence(), spec=spec,
                 profile=profile, trace=trace, save_transcript=save_transcript,
@@ -3036,6 +3044,7 @@ class SubAgentCoordinator:
         tools_by_name: Mapping[str, ToolDefinition],
         execute_tool: ToolExecutor,
         hooks: AgentExecutionHooks | None = None,
+        review_only: bool = False,
     ) -> StepOutcome:
         spec = self.registry.worker(step.role)
         accumulated_trace: DeepSeekTrace | None = None
@@ -3050,6 +3059,7 @@ class SubAgentCoordinator:
                 tools_by_name=tools_by_name,
                 execute_tool=execute_tool,
                 hooks=hooks,
+                review_only=review_only,
             )
             if accumulated_trace is None:
                 accumulated_trace = outcome.trace

@@ -2,10 +2,48 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
+import re
 from typing import Any
 
 
-ACCEPTANCE_VERSION = 2
+ACCEPTANCE_VERSION = 3
+
+
+def separate_review_artifacts(
+    result: dict[str, Any], upstream: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    """A reviewer may cite an authorized snapshot, never produce or re-export it."""
+    result = deepcopy(result)
+    metadata = result.setdefault("metadata", {})
+    metadata.pop("review_artifact_references", None)
+    targets = {}
+    for source in upstream.values():
+        for artifact in source.get("artifacts", []):
+            if isinstance(artifact, Mapping) and re.fullmatch(r"[a-f0-9]{64}", str(artifact.get("snapshot", ""))):
+                targets[(artifact.get("handle"), artifact["snapshot"])] = artifact
+    references = []
+    invalid = []
+    for artifact in result.get("artifacts", []):
+        matches = [target for target in targets.values()
+                   if isinstance(artifact, Mapping)
+                   and artifact.get("handle") == target.get("handle")
+                   and (not artifact.get("snapshot") or artifact["snapshot"] == target["snapshot"])
+                   and ("size" not in artifact or artifact["size"] == target.get("size"))]
+        if len(matches) == 1:
+            target = matches[0]
+            references.append({"handle": target["handle"], "snapshot": target["snapshot"],
+                               "name": target.get("name"), "kind": "review_reference"})
+        else:
+            invalid.append(str(artifact.get("handle", "")) if isinstance(artifact, Mapping) else "invalid entry")
+    result["artifacts"] = []
+    if references:
+        metadata["review_artifact_references"] = references
+    if invalid:
+        result["status"] = "failed"
+        result.setdefault("unresolved", []).append(
+            "独立验收只能引用获准的上游快照，不能新增或替换交付物：" + ", ".join(invalid))
+    return result
 
 
 def artifact_identity(artifact: Mapping[str, Any]) -> str:

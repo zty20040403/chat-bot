@@ -264,3 +264,32 @@ alerts and five failed units. The follow-up keeps overview limits, explicitly
 marks truncation and returns the complete provided snapshot for a single host.
 The focused fleet/outcome suite passed 32 tests. This is not yet a new live h310
 inspection, a production browser acceptance, or authorized cleanup acceptance.
+
+2026-09-11 02:11 HKT: Bot `8ec164c`, nix-config `53b9815` deployed to h610 as
+`/nix/store/9ajikv772460xm3rq4rxf340w16lyk7m-nixos-system-h610-26.05.20260622.3426825`.
+The live projection returned all four h310 alerts with `alerts_truncated=false`.
+Only the two gaoji services restarted; Max PID 473603 and PostgreSQL PID 8264
+were unchanged. This confirms the projection fix, not a retroactive successful
+verdict for task 59 revision 4.
+
+## Reviewer Ownership Boundary
+
+Inspection of revision 4's persisted run 148 found a further integration defect:
+the reviewer correctly imported and checked the report, then listed the author's
+original sandbox handle in its own artifacts. The normal capture step correctly
+rejected access to that other isolated workspace, but consequently marked the
+reviewer failed despite its valid per-file checks.
+
+Independent acceptance now has an explicit host-selected review-only mode.
+Only exact references to immutable, declared upstream artifacts are separated
+from output artifacts; they are recorded as references, not new files or proof
+of verification. Unknown handles, changed hashes/sizes and ambiguous references
+fail without capture. The reviewer cannot produce a replacement delivery.
+Regular author steps still export from their own isolated sandbox. The normal
+checksum and actual independent-check gates remain necessary for file delivery.
+The acceptance cache version changed so old decisions are not silently reused.
+
+The focused artifact, report correction, runtime, file outbox and outcome suite
+passed 111 tests, including the real review-step path and persisted cache reuse.
+The production browser still shows an expired login; disposable cleanup remains
+unauthorized. Live acceptance of this reviewer change is still pending deployment.
