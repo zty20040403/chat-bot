@@ -2229,6 +2229,7 @@ class ToolExecutor(HandlerService):
                 return await _execute_tool_impl(name, arguments)
 
         subagent_hooks = AgentExecutionHooks(
+            operation_receipt=getattr(self.context.fleet_client, "operation_receipt", None),
             workspaces=(
                 StepWorkspaces(
                     self.context.state_dir,

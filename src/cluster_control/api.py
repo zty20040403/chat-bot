@@ -422,6 +422,18 @@ def create_app(
         except OpsError as exc:
             raise HTTPException(502, str(exc)) from None
 
+    @app.get("/v1/ops/intent-receipts/{digest}")
+    async def ops_receipt(digest: str,
+                          principal: tuple[str, str] = Depends(signed_principal)):
+        if re.fullmatch(r"[a-f0-9]{64}", digest) is None:
+            raise HTTPException(422, "Invalid task intent digest")
+        try:
+            return await management_service().receipt("subagent:" + digest, actor=principal[0], origin=principal[1])
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from None
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from None
+
     @app.get("/v1/operations", dependencies=auth)
     async def operations(limit: int = Query(default=50, ge=1, le=200)) -> dict[str, object]:
         return {"items": await asyncio.to_thread(execution_service().store.recent_operations, limit)}

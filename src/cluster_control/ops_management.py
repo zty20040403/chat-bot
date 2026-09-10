@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import time
 import uuid
 from typing import Any, Awaitable, Callable
@@ -74,6 +75,15 @@ class OpsManagementService:
                 ("name", "summary", "read_only", "kind", "idempotency")} for d in definitions]
         return {"version": 2, "hosts": sorted(self.hosts), "operations": definitions,
                 "writes_require_approval": True, "checked_execution_hosts": sorted(self.host_helpers)}
+
+    async def receipt(self, intent_key: str, *, actor: str, origin: str) -> dict[str, Any]:
+        self.authorize(actor)
+        if not isinstance(intent_key, str) or re.fullmatch(r"subagent:[a-f0-9]{64}", intent_key) is None:
+            raise ValueError("Invalid task intent key")
+        proof = await asyncio.to_thread(self.store.operation_provenance, actor, origin, intent_key)
+        if proof is None or proof["host_id"] not in self.hosts:
+            raise LookupError("No matching operation receipt in this identity and conversation")
+        return proof
 
     def binding_hash(self, definition: dict[str, Any], *, legacy: bool = False) -> str:
         # Credential rotation or a changed schema/scope invalidates an old approval.

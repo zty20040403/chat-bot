@@ -5,6 +5,7 @@ from typing import Any
 
 from .evidence import evidence_index, redact
 from .external import remote_record
+from .receipt_links import RECEIPT_TOOL
 
 
 def task_progress(task: Any, runs: list, evidence: list[dict], external: list[dict],
@@ -22,15 +23,13 @@ def task_progress(task: Any, runs: list, evidence: list[dict], external: list[di
                 target.append({"run_id": run.run_id, "step": run.step_key, "value": value})
     operations = []
     waiting_approval = False
-    approval_confirmed = False
-    approval_relevant = False
+    approval_checks = []
     for item in external:
         response = item.get("response") or {}
         record = remote_record(response)
         waiting_approval |= record.get("status") == "awaiting_approval"
-        approval_confirmed |= bool(record.get("approval_ref"))
-        approval_relevant |= bool(record.get("operation_id") or record.get("deployment_id")
-                                  or response.get("approval_required"))
+        if record.get("operation_id") or record.get("deployment_id") or response.get("approval_required"):
+            approval_checks.append(bool(record.get("approval_ref")))
         result = record.get("result") or {}
         request = item.get("request") or {}
         arguments = record.get("arguments") or request.get("tool_arguments") or {}
@@ -40,6 +39,27 @@ def task_progress(task: Any, runs: list, evidence: list[dict], external: list[di
             "updated_at": item["updated_at"], "arguments": redact(arguments),
             "summary": result.get("summary", ""), "verification": result.get("verification"),
             "error": record.get("error_code") or record.get("error") or ""})
+    historical = {}
+    for item in evidence:
+        if item["tool_name"] == RECEIPT_TOOL:
+            payload = item["payload"]
+            key = payload["source_request"]["request_hash"]
+            # A verified immutable dispatch proof supersedes an earlier incomplete lookup.
+            if key not in historical or payload.get("ok") is True:
+                historical[key] = item
+    for key, item in historical.items():
+        payload = item["payload"]
+        receipt = payload["receipt"]
+        verified = payload.get("ok") is True
+        approval_checks.append(verified)
+        operations.append({"run_id": item["run_id"], "call_id": "receipt:" + key,
+            "remote_path": "", "status": "passed" if verified else "unverified",
+            "host_id": receipt["host_id"], "updated_at": receipt.get("dispatched_at") or receipt["created_at"],
+            "historical": True, "arguments": item["arguments"], "verification": receipt,
+            "summary": "历史授权与派发已核实；不是当前健康或修复结果。" if verified else "历史授权证明不足。",
+            "error": ""})
+    approval_relevant = bool(approval_checks)
+    approval_confirmed = approval_relevant and all(approval_checks)
     terminal = task.status in {"completed", "partial", "failed", "cancelled"}
     active = task.status in {"running", "planning", "verifying", "waiting_external"}
     file_rows = [item for item in deliveries if item["revision"] == revision]
@@ -68,4 +88,5 @@ def task_progress(task: Any, runs: list, evidence: list[dict], external: list[di
         "evidence": evidence_index(evidence), "execution_status": task.status,
         "delivery_status": stages[-1]["status"], "files_confirmed": files_confirmed,
         "updated_at": max([task.updated_at, *(item["updated_at"] for item in external),
+                           *(item["recorded_at"] for item in evidence),
                            *(item["updated_at"] for item in file_rows), final.updated_at if final else 0])}

@@ -52,6 +52,13 @@ CREATE TABLE IF NOT EXISTS subagent_deliveries (
 
 
 class TaskControlStoreMixin:
+    def revision_checkpoints(self, task_id: int) -> list[dict]:
+        # Revision ancestry must not be truncated by the console's checkpoint page limit.
+        with self._lock:
+            rows = self._connection.execute("""SELECT sequence, state_json FROM subagent_checkpoints
+                WHERE task_id=? AND phase='revision_requested' ORDER BY sequence""", (task_id,)).fetchall()
+        return [{"sequence": int(row["sequence"]), "state": json.loads(row["state_json"])} for row in rows]
+
     def run_resume_safe(self, run_id: int) -> bool:
         with self._lock:
             revisions = self._connection.execute("""SELECT e.sequence, e.payload_json, r.step_key

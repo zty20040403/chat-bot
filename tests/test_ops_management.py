@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import copy
 from datetime import datetime, timezone
+import hashlib
+import hmac
 import json
 import os
 import tempfile
@@ -9,11 +11,12 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 
 from src.cluster_control.adapters.ops import OpsClient, OpsError
+from src.cluster_control.execution_contracts import canonical_json
 from src.cluster_control.ops_management import OpsManagementService
 
 
@@ -154,6 +157,52 @@ class ManagementTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(PermissionError):
             await self.propose(host='b650')
         self.assertFalse(self.posts('units.restart'))
+
+    async def test_intent_receipt_is_read_only_without_catalog_approval_or_replay(self):
+        key = 'subagent:' + 'a' * 64
+        proof = {'host_id': 'h610', 'historical': True, 'intent_key': key,
+                 'origin_scope': 'group:123', 'authorized_before_dispatch': False,
+                 'recorded_status': 'awaiting_approval'}
+        self.store.operation_provenance = Mock(return_value=proof)
+        with patch.object(self.manager, 'call', new_callable=AsyncMock) as submit, \
+             patch.object(self.manager, 'approve', new_callable=AsyncMock) as approve, \
+             patch.object(self.manager, 'definitions', new_callable=AsyncMock) as catalog, \
+             patch.object(self.manager.client, '_credential', side_effect=AssertionError('No upstream credential read')):
+            for _ in range(2):
+                self.assertEqual(await self.manager.receipt(key, actor='admin:kenneth', origin='group:123'), proof)
+            self.store.operation_provenance.assert_called_with('admin:kenneth', 'group:123', key)
+            submit.assert_not_awaited()
+            approve.assert_not_awaited()
+            catalog.assert_not_awaited()
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.store.records, {})
+
+    async def test_intent_receipt_has_exact_actor_origin_key_and_host_boundaries(self):
+        key = 'subagent:' + 'a' * 64
+        proof = {'host_id': 'h610', 'intent_key': key}
+        self.store.operation_provenance = Mock(side_effect=lambda actor, origin, intent:
+            proof if (actor, origin, intent) == ('qq:3526452465', 'group:123', key) else None)
+        for actor, origin, intent in (('admin:kenneth', 'group:123', key),
+                ('qq:3526452465', 'group:other', key), ('qq:3526452465', 'group:123', 'subagent:' + 'b' * 64)):
+            with self.subTest(actor=actor, origin=origin, key=intent):
+                with self.assertRaises(LookupError):
+                    await self.manager.receipt(intent, actor=actor, origin=origin)
+        self.store.operation_provenance.reset_mock()
+        with self.assertRaises(PermissionError):
+            await self.manager.receipt(key, actor='qq:other', origin='group:123')
+        self.store.operation_provenance.assert_not_called()
+        proof['host_id'] = 'outside-grant'
+        with self.assertRaises(LookupError):
+            await self.manager.receipt(key, actor='qq:3526452465', origin='group:123')
+        self.assertEqual(self.calls, [])
+
+    async def test_invalid_intent_keys_are_rejected_before_storage(self):
+        self.store.operation_provenance = Mock()
+        for key in ('', 'a' * 64, 'subagent:' + 'a' * 63, 'subagent:' + 'A' * 64,
+                    'subagent:' + 'a' * 64 + '\n', 'subagent:' + 'a' * 65, None):
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                await self.manager.receipt(key, actor='admin:kenneth', origin='group:123')
+        self.store.operation_provenance.assert_not_called()
 
     async def test_schema_and_unknown_operation_rejected(self):
         with self.assertRaises(ValueError):
@@ -383,6 +432,131 @@ class ManagementTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response.status_code, expected)
 
 
+class IntentReceiptApiTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        import nonebot
+        from prometheus_client import CollectorRegistry
+        from src.cluster_control.api import create_app
+        with patch('nonebot.config.DotEnvSettingsSource._read_env_files', return_value={}):
+            nonebot.init()
+        from src.plugins.ai_chat.fleet_client import FleetControlClient
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.credential = 'synthetic-control-token-' + 'c' * 40
+        token = Path(self.tmp.name) / 'token'
+        token.write_text(self.credential)
+        self.key = 'subagent:' + 'a' * 64
+        self.path = '/v1/ops/intent-receipts/' + 'a' * 64
+        self.proof = {'source': 'gaoji-control', 'historical': True, 'host_id': 'h610',
+            'actor_id': 'admin:kenneth', 'origin_scope': 'group:123', 'intent_key': self.key,
+            'operation': 'exec.run', 'params_hash': 'b' * 64, 'operation_id': 'op_' + 'd' * 32,
+            'authorized_before_dispatch': False, 'recorded_status': 'awaiting_approval'}
+        self.lookup = Mock(side_effect=lambda actor, origin, key:
+            copy.deepcopy(self.proof) if (actor, origin, key) == ('admin:kenneth', 'group:123', self.key) else None)
+        self.upstream = AsyncMock(side_effect=AssertionError('Receipt lookup must not contact upstream'))
+        manager = OpsManagementService(SimpleNamespace(_request=self.upstream),
+            SimpleNamespace(operation_provenance=self.lookup), hosts=('h610',), actors=('admin:kenneth', 'admin:other'))
+        app = create_app(SimpleNamespace(metrics_registry=CollectorRegistry()), api_token_file=token, management=manager)
+        self.client = FleetControlClient('http://control.test', token, transport=httpx.ASGITransport(app=app))
+        self.addAsyncCleanup(self.client.close)
+
+    def headers(self, path, *, actor='admin:kenneth', origin='group:123'):
+        timestamp = str(int(time.time()))
+        message = '\n'.join(('GET', path, actor, origin, timestamp, hashlib.sha256(b'').hexdigest())).encode()
+        return {'Authorization': 'Bearer ' + self.credential, 'X-KC-Actor': actor, 'X-KC-Origin': origin,
+                'X-KC-Time': timestamp,
+                'X-KC-Signature': hmac.new(self.credential.encode(), message, hashlib.sha256).hexdigest()}
+
+    async def get(self, path, **kwargs):
+        return await self.client._client.get('http://control.test' + path, **kwargs)
+
+    async def test_client_uses_signed_digest_path_and_bypasses_external_replay(self):
+        from src.plugins.ai_chat.agent.external import active_external
+        tracker = SimpleNamespace(request=AsyncMock(side_effect=AssertionError('No external replay')))
+        context_token = active_external.set(tracker)
+        try:
+            for _ in range(2):
+                result = await self.client.operation_receipt(self.key, actor='admin:kenneth', origin='group:123')
+                self.assertEqual(result, self.proof)
+        finally:
+            active_external.reset(context_token)
+        tracker.request.assert_not_awaited()
+        self.lookup.assert_called_with('admin:kenneth', 'group:123', self.key)
+        self.assertEqual(self.lookup.call_count, 2)
+        self.upstream.assert_not_awaited()
+
+    async def test_client_signs_mapped_admin_principal_without_new_approval(self):
+        from src.plugins.ai_chat.fleet_authorization import FleetAuthorization
+        account = Mock(return_value={'username': 'kenneth'})
+        mobile = SimpleNamespace(executors={}, pollers=[], store=SimpleNamespace(account_for_qq=account),
+                                 propose=AsyncMock(side_effect=AssertionError('No new approval')))
+        self.client.authorization = FleetAuthorization(self.client, mobile)
+        result = await self.client.operation_receipt(self.key, actor='qq:3526452465', origin='group:123')
+        self.assertEqual(result, self.proof)
+        account.assert_called_once_with('3526452465')
+        self.lookup.assert_called_once_with('admin:kenneth', 'group:123', self.key)
+        mobile.propose.assert_not_awaited()
+        self.upstream.assert_not_awaited()
+
+    async def test_signature_covers_digest_actor_and_origin(self):
+        headers = self.headers(self.path)
+        cases = [(self.path[:-1] + 'b', headers),
+                 (self.path, {**headers, 'X-KC-Origin': 'group:other'}),
+                 (self.path, {**headers, 'X-KC-Actor': 'admin:other'}),
+                 (self.path, {'Authorization': 'Bearer ' + self.credential})]
+        for path, signed in cases:
+            with self.subTest(path=path, headers=list(signed)):
+                self.assertEqual((await self.get(path, headers=signed)).status_code, 401)
+        self.lookup.assert_not_called()
+
+    async def test_exact_principal_key_and_read_only_route(self):
+        for actor, origin, path, expected in (
+            ('admin:other', 'group:123', self.path, 404),
+            ('admin:kenneth', 'group:other', self.path, 404),
+            ('admin:kenneth', 'group:123', self.path[:-1] + 'b', 404),
+            ('qq:unknown', 'group:123', self.path, 403),
+        ):
+            with self.subTest(actor=actor, origin=origin, path=path):
+                response = await self.get(path, headers=self.headers(path, actor=actor, origin=origin))
+                self.assertEqual(response.status_code, expected)
+                self.assertNotIn('params_hash', response.json())
+        self.assertEqual((await self.client._client.post('http://control.test' + self.path)).status_code, 405)
+        legacy = await self.get('/v1/ops/receipt', params={'intent_key': self.key})
+        self.assertEqual(legacy.status_code, 404)
+        self.upstream.assert_not_awaited()
+
+    async def test_api_rejects_malformed_digest_before_lookup(self):
+        for digest in ('a' * 63, 'a' * 65, 'A' * 64, 'g' * 64, self.key):
+            path = '/v1/ops/intent-receipts/' + digest
+            with self.subTest(digest=digest):
+                self.assertEqual((await self.get(path, headers=self.headers(path))).status_code, 422)
+        self.lookup.assert_not_called()
+
+    async def test_client_rejects_malformed_key_locally(self):
+        from src.plugins.ai_chat.fleet_client import FleetControlError
+        with patch.object(self.client, '_authorized_request', new_callable=AsyncMock) as request:
+            for key in ('', 'a' * 64, 'subagent:' + 'A' * 64, self.key + '\n', self.key + '/extra', None):
+                with self.subTest(key=key), self.assertRaises(FleetControlError) as caught:
+                    await self.client.operation_receipt(key, actor='admin:kenneth', origin='group:123')
+                self.assertEqual(caught.exception.code, 'invalid_request')
+            request.assert_not_awaited()
+
+    async def test_client_checks_response_origin_and_intent_but_not_qq_admin_mapping(self):
+        from src.plugins.ai_chat.fleet_client import FleetControlError
+        with patch.object(self.client, '_authorized_request', new_callable=AsyncMock) as request:
+            request.return_value = self.proof
+            self.assertEqual(await self.client.operation_receipt(self.key, actor='qq:3526452465', origin='group:123'), self.proof)
+            request.assert_awaited_with('GET', self.path, actor='qq:3526452465', origin='group:123')
+            for bad in ({}, {**self.proof, 'origin_scope': 'group:other'},
+                        {**self.proof, 'intent_key': 'subagent:' + 'b' * 64}):
+                with self.subTest(response=bad):
+                    request.return_value = bad
+                    with self.assertRaises(FleetControlError) as caught:
+                        await self.client.operation_receipt(self.key, actor='qq:3526452465', origin='group:123')
+                    self.assertEqual(caught.exception.code, 'invalid_response')
+
+
 @unittest.skipUnless(os.getenv('TEST_OPS_POSTGRES_DSN'), 'isolated PostgreSQL test not configured')
 class ManagementPostgresTests(unittest.TestCase):
     def test_migration_approval_and_fenced_recovery(self):
@@ -419,6 +593,90 @@ class ManagementPostgresTests(unittest.TestCase):
                     conn.execute(sql.SQL('UPDATE {}.fleet_operations SET lease_expires_at=0 WHERE operation_id=%s').format(sql.Identifier(schema)), (r['operation_id'],))
                 self.assertIsNone(store.claim_managed_operation('restarted'))
                 self.assertEqual(store.get_operation(r['operation_id'])['status'], 'needs_attention')
+                other_approval = store.get_operation(r['operation_id'])['approval_ref']
+                intent_key = 'subagent:' + 'a' * 64
+                params = {'host': 'h610', 'unit': 'test.service', 'env': {'TOKEN': 'synthetic-private-input'}}
+                base = int(time.time())
+                with patch('src.cluster_control.ops_management.time.time', return_value=base):
+                    result = __import__('asyncio').run(manager.call('units.restart', params,
+                        actor='qq:3526452465', origin='test', idempotency_key=intent_key))
+                r = result['operation']
+
+                def receipt():
+                    return store.operation_provenance('qq:3526452465', 'test', intent_key)
+
+                def snapshot():
+                    with psycopg.connect(dsn) as conn:
+                        return [conn.execute(sql.SQL('SELECT to_jsonb(t) FROM {}.{} t ORDER BY to_jsonb(t)::text')
+                            .format(sql.Identifier(schema), sql.Identifier(table))).fetchall()
+                            for table in ('fleet_operations', 'fleet_approvals', 'fleet_operation_events')]
+
+                before = snapshot()
+                proof = __import__('asyncio').run(manager.receipt(intent_key, actor='qq:3526452465', origin='test'))
+                self.assertFalse(proof['authorized_before_dispatch'])
+                self.assertEqual(proof['recorded_status'], 'awaiting_approval')
+                self.assertIsNone(proof['backend_job_id'])
+                self.assertEqual(proof['params_hash'], hashlib.sha256(canonical_json(params).encode()).hexdigest())
+                self.assertEqual(proof['operation'], 'units.restart')
+                self.assertEqual(proof['intent_key'], intent_key)
+                self.assertNotIn('synthetic-private-input', json.dumps(proof))
+                self.assertNotIn('params', proof)
+                self.assertEqual(snapshot(), before)
+
+                with patch('src.cluster_control.execution_storage.time.time', return_value=base + 10):
+                    store.approve_operation(r['operation_id'], actor_id='admin:kenneth', expected_hash=r['contract_hash'],
+                                            expected_version=1, expires_at=base + 300)
+                self.assertFalse(receipt()['authorized_before_dispatch'])
+                with patch('src.cluster_control.execution_storage.time.time', return_value=base + 11):
+                    claim = store.claim_managed_operation('worker')
+                with patch('src.cluster_control.execution_storage.time.time', return_value=base + 12):
+                    self.assertTrue(store.finish_managed_operation(r['operation_id'], owner='worker', fence=claim['fence'],
+                        status='failed', result={}, backend_id='job_provenance', error='timed_out'))
+                before = snapshot()
+                proof = receipt()
+                self.assertTrue(proof['authorized_before_dispatch'])
+                self.assertEqual(proof['recorded_status'], 'failed')
+                self.assertTrue(proof['historical'])
+                self.assertEqual(proof['created_at'], base)
+                self.assertEqual(proof['dispatched_at'], base + 11)
+                self.assertEqual(proof['status_recorded_at'], base + 12)
+                self.assertEqual(proof['backend_job_id'], 'job_provenance')
+                self.assertIsNone(store.operation_provenance('admin:kenneth', 'test', intent_key))
+                self.assertIsNone(store.operation_provenance('qq:3526452465', 'other', intent_key))
+                self.assertIsNone(store.operation_provenance('qq:3526452465', 'test', 'subagent:' + 'b' * 64))
+                with patch('src.cluster_control.execution_storage.time.time', return_value=base + 10000):
+                    self.assertEqual(receipt(), proof)
+                self.assertEqual(snapshot(), before)
+
+                def update(table, field, value):
+                    with psycopg.connect(dsn) as conn:
+                        conn.execute(sql.SQL('UPDATE {}.{} SET {}=%s WHERE operation_id=%s').format(
+                            sql.Identifier(schema), sql.Identifier(table), sql.Identifier(field)), (value, r['operation_id']))
+
+                for field, value in (('contract_hash', 'mismatch'), ('resource_version', 99),
+                                     ('consumed_at', None), ('approved_at', base - 1),
+                                     ('consumed_at', base + 12), ('expires_at', base + 11)):
+                    with self.subTest(approval_field=field, value=value):
+                        update('fleet_approvals', field, value)
+                        self.assertFalse(receipt()['authorized_before_dispatch'])
+                        update('fleet_approvals', field, proof['approval'][field])
+                for reference in (None, other_approval):
+                    update('fleet_operations', 'approval_ref', reference)
+                    self.assertFalse(receipt()['authorized_before_dispatch'])
+                    self.assertEqual(receipt()['approval'], {})
+                update('fleet_operations', 'approval_ref', proof['approval']['approval_id'])
+                tampered = {**r['arguments'], 'params': {**params, 'host': 'another-host'}}
+                update('fleet_operations', 'arguments_json', canonical_json(tampered))
+                self.assertFalse(receipt()['authorized_before_dispatch'])
+                update('fleet_operations', 'arguments_json', canonical_json(r['arguments']))
+                for field, value in (('backend_ref', 'other-backend'), ('operation', 'service.restart')):
+                    update('fleet_operations', field, value)
+                    self.assertIsNone(receipt())
+                    update('fleet_operations', field, r[field])
+                with psycopg.connect(dsn) as conn:
+                    conn.execute(sql.SQL("UPDATE {}.fleet_operation_events SET event_type='not_dispatched' WHERE operation_id=%s AND event_type='dispatching'")
+                                 .format(sql.Identifier(schema)), (r['operation_id'],))
+                self.assertFalse(receipt()['authorized_before_dispatch'])
             finally:
                 if db:
                     db.close()

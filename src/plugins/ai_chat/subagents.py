@@ -41,6 +41,7 @@ from .agent.scheduling import SpecialistScheduler
 from .agent.workspaces import ArtifactCaptureError, IMPORT_AGENT_ARTIFACT
 from .agent.sessions import AgentSessionStoreMixin, READ_AGENT_RESULT, read_upstream_result, upstream_index
 from .agent.external import ExternalCalls, ExternalPending, ExternalStoreMixin, EXTERNAL_SQL, active_external
+from .agent.receipt_links import evidence_fingerprint, link_operation_receipts
 from .agent.control import (CONTROL_SQL, TaskControlStoreMixin, LeaseLost,
                             active_job_fence, active_task_id, active_model_policy, assert_job_owned)
 from .deepseek import (
@@ -1170,6 +1171,7 @@ class AgentExecutionHooks:
     compensate_tool: Callable[
         [str, dict[str, Any], str], Awaitable[str | None]
     ] | None = None
+    operation_receipt: Callable[..., Awaitable[dict[str, Any]]] | None = None
 
 
 @dataclass(frozen=True)
@@ -2216,7 +2218,12 @@ class SubAgentCoordinator:
                                "artifact_key": artifact_identity(artifact), **check})
         self.store.append_checkpoint(task.task_id, "artifact_validation", {"checks": checks})
         revision = self.store.control(task.task_id)["revision"]
+        evidence_runs = {item.run.run_id for item in completed.values()}
+        if hooks and hooks.operation_receipt:
+            await link_operation_receipts(self.store, task, evidence_runs, hooks.operation_receipt)
+        source_evidence = self.store.task_evidence(task.task_id, run_ids=evidence_runs)
         fingerprint = hashlib.sha256(json.dumps({"acceptance_version": ACCEPTANCE_VERSION,
+            "evidence": evidence_fingerprint(source_evidence),
             "contract": contract, "results": {k: v.result for k, v in completed.items()}}, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:8]
         key = f"acceptance_r{revision}_{fingerprint}"
         def attach_matrix(value, reviewer):
@@ -2258,6 +2265,8 @@ class SubAgentCoordinator:
                 "证据必须来自 read_task_evidence 或工具返回的宿主编号；缺少证据标 unverified。"
                 "编号使用下面 acceptance_all 的原始序号，不能改序或遗漏。"
                 "按 outcome_checks 核实具体主机、服务动作或处理前后空间；不要把查询成功说成修复成功。\n"
+                "historical_operation_receipt 是宿主按本任务原始请求找回的历史批准/派发记录，"
+                "可核实旧命令当时是否获准，但不是当前健康检查、任务完成证明或新的操作授权。\n"
                 + json.dumps({"objective": task.objective, "pre_delivery_acceptance": [
                     item for item in contract.get("acceptance", [])
                     if not _DELIVERY_REQUEST_PATTERN.search(str(item))
@@ -2694,8 +2703,8 @@ class SubAgentCoordinator:
     ) -> StepOutcome:
         profile = self._profile_for(step.role, selected_profile)
         spec = self.registry.worker(step.role)
-        revision = next((c["state"] for c in reversed(self.store.checkpoints(task.task_id))
-            if c.get("phase") == "revision_requested"), None)
+        revisions = self.store.revision_checkpoints(task.task_id)
+        revision = revisions[-1]["state"] if revisions else None
         if revision:
             previous = next((r["result"] for r in revision.get("previous_runs", []) if r["run_id"] == run.run_id), None)
             if previous:

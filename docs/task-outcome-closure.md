@@ -17,7 +17,8 @@ force.
       receipts without blind retransmission. Test each crash boundary.
 - [ ] Show inspection, findings, authorization, execution, verification and
       delivery in one live task detail view, with commands and evidence.
-- [ ] Run an actual read-only h610/h310/tank inspection and confirm final delivery.
+- [x] Run an actual read-only h610/h310/tank inspection and confirm final delivery
+      (task 59; unresolved acceptance is recorded below, not silently promoted).
 - [ ] Exercise authorized cleanup only on explicitly scoped disposable test data;
       compare before/after and verify unrelated services/files are untouched.
 - [ ] Commit, deploy and verify the complete flow on h610.
@@ -146,3 +147,57 @@ metric reads as missing administrator approval. The targeted outcome,
 continuation and receipt tests passed (45 tests). Browser interaction still
 requires the user's authenticated session; testing this backend projection
 does not substitute for a real browser acceptance.
+
+## Historical Authorization Evidence
+
+2026-09-11: task 59 revision 2 delivered its 7,363-byte revised report once;
+the QQ file receipt and final text delivery 3076 were confirmed. Acceptance
+remained 7/8: the older directory scan had been approved, but the reviewer could
+not associate its logs with that historical approval. Repeating the command or
+changing the task to "completed" would not repair that missing evidence.
+
+The follow-up adds a fixed read-only controller receipt endpoint. The host looks
+up only intents already persisted for the same task, requester, conversation and
+permitted upstream run. Old revisions require an explicit revision checkpoint
+for that same run. The original host-generated idempotency key is recomputed,
+and operation, target, parameter hash and any known native job ID must match.
+No model-provided job lookup, new approval or command resubmission is involved.
+
+The controller checks the original contract hash, resource version, consumed
+approval and dispatch ordering. Historical expiry does not erase an approval
+that was valid at dispatch. It returns parameter hashes, not raw command bodies.
+The task keeps a separate historical evidence envelope with source revision,
+request hash, original timestamps and local retrieval time. This proof can
+establish past authorization; it cannot satisfy current health, service effect,
+reboot or disk-change checks. Missing or mismatched receipts stay unverified.
+
+Acceptance caching now incorporates permitted upstream evidence and excludes
+the reviewer's own generated evidence. A newly recovered proof causes a new
+review; simply rereading the same proof does not. The console labels historical
+proofs separately and no longer presents one approved operation as proof that
+all operations have approval.
+
+Targeted tests cover legacy resolved/error receipt recovery, cross-task/run/user/
+scope rejection, parameter and native job mismatches, non-replay, revision races,
+idempotent linking, acceptance cache invalidation and historical/current-state
+separation. These are local verification, not proof that the follow-up is deployed
+or that all remaining crash and cleanup gates are complete.
+
+Five file-outbox boundaries were additionally exercised using real SIGKILL of
+separate Python processes and isolated PostgreSQL schemas: queued, prepared,
+claimed, uploaded-before-ack-save, and acknowledged. The QQ transport in these
+tests is simulated with a durable receipt file; it is not a production QQ test.
+Queued/prepared deliveries recovered and sent once. Uploaded receipts were
+reconciled without retransmission, and already acknowledged files were not sent
+again. A process killed after the send claim but before any observable upload
+remained explicitly unknown: absence of a receipt cannot prove no remote upload
+happened. This is an honest remaining delivery ambiguity, not guaranteed delivery.
+
+Revision ancestry is now read separately from the console's 200-checkpoint page,
+including a regression case where more than 200 ordinary checkpoints precede the
+revision. Long tasks must not silently lose their authorized historical context.
+
+The integrated targeted suite passed 157 tests, including real PostgreSQL
+authorization receipts. The separate process-loss test passed all five SIGKILL
+subcases. Production browser acceptance and explicitly authorized disposable
+cleanup are still outstanding.

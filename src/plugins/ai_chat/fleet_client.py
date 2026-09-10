@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -310,6 +311,16 @@ class FleetControlClient:
 
     async def ops_call(self, payload: dict[str, Any], *, actor: str, origin: str) -> dict[str, Any]:
         return await self._signed_post("/v1/ops/call", payload, actor=actor, origin=origin)
+
+    async def operation_receipt(self, intent_key: str, *, actor: str, origin: str) -> dict[str, Any]:
+        if not isinstance(intent_key, str) or re.fullmatch(r"subagent:[a-f0-9]{64}", intent_key) is None:
+            raise FleetControlError("invalid_request", "Invalid task intent key")
+        # Receipt lookup must never enter the external submission/replay path.
+        result = await self._authorized_request("GET", f"/v1/ops/intent-receipts/{intent_key[9:]}",
+                                                actor=actor, origin=origin)
+        if result.get("origin_scope") != origin or result.get("intent_key") != intent_key:
+            raise FleetControlError("invalid_response", "Fleet intent receipt does not match the requested scope or key")
+        return result
 
     async def operations(self, *, limit: int = 50) -> dict[str, Any]:
         return await self._get(f"/v1/operations?limit={min(max(limit, 1), 200)}")

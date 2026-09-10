@@ -12,7 +12,7 @@ from typing import Any, Callable
 
 from src.bot_storage import PostgresDatabase
 
-from .execution_contracts import canonical_json, new_handle, safe_artifact_name
+from .execution_contracts import canonical_json, content_hash, new_handle, safe_artifact_name
 from .scheduling import ResourceRequest, eligibility_reason, settle_reported_cost
 
 
@@ -270,6 +270,43 @@ class ClusterExecutionStore:
             row = cursor.execute("""SELECT * FROM fleet_operations
                 WHERE actor_id=? AND origin_scope=? AND idempotency_key=?""", (actor, origin, key)).fetchone()
             return self._operation(dict(row), cursor) if row else None
+        finally:
+            cursor.close()
+            connection.close()
+
+    def operation_provenance(self, actor: str, origin: str, intent_key: str) -> dict[str, Any] | None:
+        """Read historical authorization, without reauthorizing or asserting current health."""
+        connection = self.database.store_connection()
+        cursor = connection.cursor()
+        try:
+            # Approval and dispatch must come from the same read-only snapshot.
+            cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            rows = cursor.execute("""SELECT * FROM fleet_operations WHERE backend_ref='ops-management-v2'
+                AND operation='maxops.execute' AND idempotency_key=? AND actor_id=? AND origin_scope=? LIMIT 2""",
+                (intent_key, actor, origin)).fetchall()
+            if len(rows) != 1:
+                return None
+            item = self._operation(dict(rows[0]), cursor)
+            approval = cursor.execute("""SELECT approval_id, operation_id, actor_id, contract_hash,
+                resource_version, approved_at, consumed_at, expires_at FROM fleet_approvals
+                WHERE approval_id=? AND operation_id=?""", (item["approval_ref"], item["operation_id"])).fetchone()
+            approval = dict(approval) if approval else {}
+            dispatch = next((event["created_at"] for event in item["events"] if event["event_type"] == "dispatching"), None)
+            consumed = approval.get("consumed_at")
+            verified = (content_hash({"actor": actor, "origin": origin, "arguments": item["arguments"]})
+                == item["contract_hash"] == approval.get("contract_hash")
+                and approval.get("resource_version") == item["resource_version"]
+                and consumed is not None and dispatch is not None
+                and item["created_at"] <= approval["approved_at"] <= consumed <= dispatch < approval["expires_at"])
+            return {"source": "gaoji-control", "historical": True, "level": "authorized_dispatch",
+                "authorized_before_dispatch": verified, "operation_id": item["operation_id"],
+                "backend_job_id": item["backend_operation_id"], "actor_id": actor, "origin_scope": origin,
+                "host_id": item["host_id"], "operation": item["arguments"].get("op"),
+                "params_hash": hashlib.sha256(canonical_json(item["arguments"].get("params", {})).encode()).hexdigest(),
+                "intent_key": intent_key, "contract_hash": item["contract_hash"],
+                "approval": approval, "created_at": item["created_at"], "dispatched_at": dispatch,
+                "recorded_status": item["status"], "status_recorded_at": item["updated_at"],
+                "instruction": "Historical approval and dispatch only; not a new grant, current health check or proof of task completion."}
         finally:
             cursor.close()
             connection.close()
