@@ -45,8 +45,8 @@ authorized Ops executor profile. It cannot grant a caller additional privilege.
 - [x] Helper Nix package build and standalone module evaluation for all three hosts.
 - [x] Full Linux configuration evaluation for all three hosts and Bot package build.
 - [x] Packaged target helper preflight checks on Linux without executing commands.
-- [ ] Installed helper smoke checks in the actual authorized executor profiles.
-- [ ] Pin the verified Bot commit and deploy; verify the installed helper on each host.
+- [x] Installed helper smoke checks in the actual authorized executor profiles.
+- [x] Pin the verified Bot commit and deploy; verify the installed helper on each host.
 
 Tests must cover missing paths, hostile arguments, absent working directories,
 syntax errors, changed binaries/environment/boot IDs, duplicate submissions,
@@ -124,10 +124,10 @@ This deliberately sacrifices automatic retry rather than risk repeating a reboot
   wrong host, missing cwd, invalid shell syntax and forbidden reboot arguments.
   Every result reported `command_started=false`. No requested command or reboot
   was executed by these wrapper checks.
-- No system was switched and no online service restarted. The configured helper
-  is not installed yet. Packaged preflight checks run as the SSH user do not
-  replace installed-helper checks in the actual diagnostic/operator profiles;
-  those remain part of the separately authorized deployment acceptance.
+- The initial build-only verification did not switch any system or restart an
+  online service. Packaged preflight checks as the SSH user did not replace
+  diagnostic/operator profile checks. The subsequently authorized deployment
+  and actual executor acceptance are recorded below.
 
 ### Live Follow-Up
 
@@ -143,4 +143,22 @@ absolute-path error had no suggestion. The helper now also searches the trusted
 host-configured PATH for advice only. It still rejects the original request and
 never substitutes that suggested program for execution. A restricted-PATH
 regression test covers this distinction; the full 843-test suite passed again.
-The corrected helper still requires the final live recheck before acceptance.
+The corrected helper was deployed as Bot `ba60ba5`, pinned by nix-config
+`bdc32b6`, on h310, h610 and tank. The final live round passed all 11 execution
+cases: six diagnostic/operator commands, three rejected absolute paths with
+correct suggestions, one typed start of an already-active owned Worker, and one
+task spanning the h610 control-service update. The recovery retained its original
+upstream job handle; a job-list check found exactly one matching job and its
+stdout contained exactly one start marker and one completion marker.
+
+Three unapproved reboot proposals were again cancelled without dispatch, and
+an out-of-scope host was rejected. Shared hosts were not rebooted and no database
+or user file was deleted. Max retained its original PID and activation time.
+Expected negative-test unit failures were cleared only for those test job IDs;
+the three hosts had no failed units at the end. The Bot reconnected to OneBot.
+
+For future deployments, build tank's closure on tank: its desktop/GPU dependencies
+are already cached there. The initial cross-build on h610 was stopped; 5.87 GiB
+of newly registered, unreferenced outputs from that exact build were removed via
+Nix's native deletion checks. Existing system generations and other data were not
+garbage-collected. h610 had approximately 155 GiB available after cleanup.
