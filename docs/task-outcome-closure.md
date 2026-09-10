@@ -117,3 +117,32 @@ The integrated follow-up passed 903 tests against the isolated PostgreSQL
 database. Production console inspection remains pending an authenticated
 session. Live process-loss recovery and explicitly authorized disposable
 cleanup remain open gates; neither is implied by passing unit tests.
+
+## Follow-up Deployment and Recovery
+
+2026-09-10 23:19 HKT: Bot `0b7b837`, nix-config `eb8056a`, h610 generation
+`/nix/store/a3sdvsyacycv13ml3d3avdcndnzp67a0-nixos-system-h610-26.05.20260622.3426825`.
+Only gaoji, its control service and the MaxOps hub were changed by the switch;
+the existing ollama model-loader oneshot also ran during activation. The sandbox
+image was reused. All three host metric endpoints returned fresh data after the
+read-only permission correction. Max PID 3710160 and PostgreSQL node PID 8264
+retained their original activation times.
+
+Task 59 revision 2 reuses the first scan's stored partial output and performs
+bounded, separately timed read-only checks. At 23:23 HKT, a controlled restart of
+only `gaoji.service` changed its PID from 309563 to 313025. The task, completed
+h310/tank runs, and pending external operation
+`op_9cc20d3b522a447d8677fd3edb1b6526` survived unchanged. After that exact read-only
+operation was authorized and completed, the same h610 run resumed automatically;
+the operation was not submitted twice. This verifies live continuation recovery
+at the external-wait boundary, not every possible upload/crash boundary.
+
+Reading the production console projection for task 59 exposed another real
+integration error: native read receipts use `operation` for a string name,
+whereas managed-operation receipts put an object there. The lifecycle view
+incorrectly assumed the latter and raised `AttributeError`. It now uses the
+same envelope decoder as durable continuations and does not label ordinary
+metric reads as missing administrator approval. The targeted outcome,
+continuation and receipt tests passed (45 tests). Browser interaction still
+requires the user's authenticated session; testing this backend projection
+does not substitute for a real browser acceptance.

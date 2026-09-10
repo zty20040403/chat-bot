@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from .evidence import evidence_index, redact
+from .external import remote_record
 
 
 def task_progress(task: Any, runs: list, evidence: list[dict], external: list[dict],
@@ -22,17 +23,21 @@ def task_progress(task: Any, runs: list, evidence: list[dict], external: list[di
     operations = []
     waiting_approval = False
     approval_confirmed = False
+    approval_relevant = False
     for item in external:
         response = item.get("response") or {}
-        record = response.get("operation", response)
+        record = remote_record(response)
         waiting_approval |= record.get("status") == "awaiting_approval"
         approval_confirmed |= bool(record.get("approval_ref"))
+        approval_relevant |= bool(record.get("operation_id") or record.get("deployment_id")
+                                  or response.get("approval_required"))
         result = record.get("result") or {}
         request = item.get("request") or {}
+        arguments = record.get("arguments") or request.get("tool_arguments") or {}
         operations.append({"run_id": item["run_id"], "call_id": item["call_id"],
             "remote_path": item.get("remote_path"), "status": record.get("status", item["status"]),
-            "host_id": record.get("host_id"), "updated_at": item["updated_at"],
-            "arguments": redact(record.get("arguments") or request.get("tool_arguments") or {}),
+            "host_id": record.get("host_id") or result.get("host") or arguments.get("params", {}).get("host"),
+            "updated_at": item["updated_at"], "arguments": redact(arguments),
             "summary": result.get("summary", ""), "verification": result.get("verification"),
             "error": record.get("error_code") or record.get("error") or ""})
     terminal = task.status in {"completed", "partial", "failed", "cancelled"}
@@ -48,8 +53,8 @@ def task_progress(task: Any, runs: list, evidence: list[dict], external: list[di
          "detail": f"{len(evidence)} 条宿主工具证据"},
         {"key": "findings", "label": "发现问题", "status": "completed" if terminal or findings else "running" if active else "pending",
          "detail": f"{len(findings)} 条发现，{len(next_verification)} 项待补查"},
-        {"key": "authorization", "label": "授权", "status": "waiting" if waiting_approval else "completed" if approval_confirmed else "unverified" if operations else "not_required",
-         "detail": "等待本任务授权" if waiting_approval else "已记录批准凭据" if approval_confirmed else "操作记录未提供批准凭据" if operations else "未发生需授权的服务器操作"},
+        {"key": "authorization", "label": "授权", "status": "waiting" if waiting_approval else "completed" if approval_confirmed else "unverified" if approval_relevant else "not_required",
+         "detail": "等待本任务授权" if waiting_approval else "已记录批准凭据" if approval_confirmed else "操作记录未提供批准凭据" if approval_relevant else "未发生需授权的服务器操作"},
         {"key": "execution", "label": "执行", "status": task.result.get("execution_state") or ("completed" if task.status == "completed" else task.status),
          "detail": f"{len(finished)} 项已记录的完成工作"},
         {"key": "verification", "label": "复查", "status": matrix.get("status") or ("running" if task.status == "verifying" else "unverified" if terminal else "pending"),

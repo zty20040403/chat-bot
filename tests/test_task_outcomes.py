@@ -233,6 +233,30 @@ class TaskEvidenceTests(unittest.TestCase):
         final.status = "ambiguous"
         self.assertEqual(task_progress(task, [], [], [], rows, final, revision=1)["delivery_status"], "ambiguous")
 
+    def test_timeline_accepts_native_read_receipts_without_requiring_approval(self):
+        self.store.set_task_state(self.task.task_id, "running")
+        task = self.store.get(self.task.task_id)
+        external = [{"run_id": self.run.run_id, "call_id": "metrics", "status": "resolved",
+            "updated_at": 1010, "response": metrics_receipt(1010), "remote_path": "",
+            "request": {"tool_arguments": {"operation": "host.metrics", "params": {"host": "h610"}}}}]
+        result = task_progress(task, [], [], external, [], None, revision=1)
+        self.assertEqual(result["stages"][2]["status"], "not_required")
+        self.assertEqual(result["operations"][0]["host_id"], "h610")
+        self.assertEqual(result["operations"][0]["arguments"]["operation"], "host.metrics")
+
+    def test_timeline_preserves_managed_operation_approval_and_verification(self):
+        task = self.store.get(self.task.task_id)
+        record = {"operation_id": "op_test", "host_id": "h610", "status": "awaiting_approval"}
+        external = [{"run_id": self.run.run_id, "call_id": "restart", "status": "pending",
+            "updated_at": 1010, "response": {"operation": record}}]
+        self.assertEqual(task_progress(task, [], [], external, [], None, revision=1)["stages"][2]["status"], "waiting")
+        record.update(status="succeeded", approval_ref="approval_test",
+            result={"verification": {"level": "service_state", "verified": True}})
+        external[0]["response"] = record
+        result = task_progress(task, [], [], external, [], None, revision=1)
+        self.assertEqual(result["stages"][2]["status"], "completed")
+        self.assertTrue(result["operations"][0]["verification"]["verified"])
+
 
 class OutcomeContractTests(unittest.TestCase):
     def test_entry_persists_typed_requirements(self):
