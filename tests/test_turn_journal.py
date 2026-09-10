@@ -541,7 +541,7 @@ class TurnJournalTests(unittest.TestCase):
         self.assertIn("legacy work", digest)
         self.assertIn("sandbox_list", digest)
 
-    def test_reopening_marks_inflight_turn_as_crashed(self) -> None:
+    def test_explicit_startup_recovery_marks_inflight_turn_as_crashed(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         path = Path(temporary.name) / "turns.sqlite3"
@@ -557,12 +557,14 @@ class TurnJournalTests(unittest.TestCase):
 
         reopened = TurnJournal(path)
         self.addCleanup(reopened.close)
+        self.assertEqual(reopened.get_turn_by_id(turn.turn_id).status, "running")
+        reopened.recover_interrupted()
         recovered = reopened.get_turn_by_id(turn.turn_id)
 
         self.assertEqual(reopened.recovered_crashed_turns, 1)
         self.assertEqual(recovered.status, "crashed")  # type: ignore[union-attr]
 
-    def test_reopening_marks_unfinished_tool_effect_outcome_unknown(self) -> None:
+    def test_explicit_recovery_marks_unfinished_tool_effect_outcome_unknown(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         path = Path(temporary.name) / "turns.sqlite3"
@@ -585,6 +587,8 @@ class TurnJournalTests(unittest.TestCase):
 
         reopened = TurnJournal(path)
         self.addCleanup(reopened.close)
+        self.assertEqual([event.state for event in reopened.events_for_turn(turn.turn_id)], ["started"])
+        reopened.recover_interrupted()
         events = reopened.events_for_turn(turn.turn_id)
 
         self.assertEqual(reopened.recovered_unknown_effects, 1)
@@ -608,6 +612,7 @@ class TurnJournalTests(unittest.TestCase):
 
         reopened = TurnJournal(path)
         self.addCleanup(reopened.close)
+        reopened.recover_interrupted()
         send_events = [
             event
             for event in reopened.events_for_turn(turn.turn_id)

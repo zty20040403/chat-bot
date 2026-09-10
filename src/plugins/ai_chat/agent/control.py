@@ -59,6 +59,25 @@ class TaskControlStoreMixin:
                 WHERE task_id=? AND phase='revision_requested' ORDER BY sequence""", (task_id,)).fetchall()
         return [{"sequence": int(row["sequence"]), "state": json.loads(row["state_json"])} for row in rows]
 
+    def current_revision_adaptive_repair_count(self, task_id: int) -> int:
+        # Revision changes and their checkpoint boundary are persisted atomically.
+        with self._lock:
+            row = self._connection.execute("""SELECT COUNT(*) AS repair_count
+                FROM subagent_checkpoints WHERE task_id=? AND phase='adaptive_repair_planned'
+                AND sequence > COALESCE((SELECT MAX(sequence) FROM subagent_checkpoints
+                    WHERE task_id=? AND phase='revision_requested'), 0)""", (task_id, task_id)).fetchone()
+        return int(row["repair_count"])
+
+    def latest_run_checkpoint(self, task_id: int, run_id: int, phase: str) -> dict[str, Any] | None:
+        """Return the latest checkpoint state for this run/phase in the current revision."""
+        with self._lock:
+            row = self._connection.execute("""SELECT state_json FROM subagent_checkpoints
+                WHERE task_id=? AND run_id=? AND phase=?
+                AND sequence > COALESCE((SELECT MAX(sequence) FROM subagent_checkpoints
+                    WHERE task_id=? AND phase='revision_requested'), 0)
+                ORDER BY sequence DESC LIMIT 1""", (task_id, run_id, phase, task_id)).fetchone()
+        return json.loads(row["state_json"]) if row is not None else None
+
     def run_resume_safe(self, run_id: int) -> bool:
         with self._lock:
             revisions = self._connection.execute("""SELECT e.sequence, e.payload_json, r.step_key

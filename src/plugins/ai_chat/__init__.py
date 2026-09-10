@@ -303,6 +303,13 @@ handlers.ingest_adapter = onebot_ingest_adapter
 
 @driver.on_startup
 async def start_background_tasks() -> None:
+    if turn_journal is not None:
+        await asyncio.to_thread(turn_journal.recover_interrupted)
+        if turn_journal.recovered_unknown_effects or turn_journal.recovered_crashed_turns:
+            logger.warning(
+                f"Recovered {turn_journal.recovered_crashed_turns} interrupted turns and "
+                f"{turn_journal.recovered_unknown_effects} unknown effects at service startup."
+            )
     if app_context.mobile_authorization is not None:
         background_tasks.start("mobile-authorization", app_context.mobile_authorization.run_forever)
     if subagent_coordinator is not None and subagent_coordinator.dispatcher is not None:

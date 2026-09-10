@@ -201,3 +201,47 @@ The integrated targeted suite passed 157 tests, including real PostgreSQL
 authorization receipts. The separate process-loss test passed all five SIGKILL
 subcases. Production browser acceptance and explicitly authorized disposable
 cleanup are still outstanding.
+
+## Live Revision 3 and Report Correction
+
+2026-09-11 00:46 HKT: Bot `b03ad34`, nix-config `085d8c1` deployed to h610.
+The two historical task-59 authorization receipts were recovered without command
+replay. Max and the PostgreSQL node retained their prior activation times.
+
+Task 59 revision 3 still failed acceptance (5/8). Final text was acknowledged
+with native QQ message ID 509073170, but this revision did not deliver a file.
+The specialist reused an older evidence ID, the compiler returned both a real
+sandbox file and an incompatible cluster artifact ID, and the report copied
+incorrect h310 observation timestamps. These are actual report-production defects,
+not proof of a network upload failure or permission to loosen acceptance.
+
+The follow-up adds one durable, bounded read-only report-correction pass. It can
+read current scoped evidence but cannot execute commands, request authorization,
+create/change files or send messages. Original files and unfinished execution
+remain intact. A completed correction is revalidated on resume; an interrupted
+or failed correction cannot spawn an unlimited new loop. Correction transcripts
+are appended to the specialist's independent history, with separate checkpoints.
+Uncorrectable content remains partial for the existing independent reviewer.
+
+Cluster artifact references are separated from QQ attachments only when matched
+to an actual successful, scoped upload receipt. Unrecognized handles still fail
+capture; an upload reference is not a QQ receipt. Repair reservations and step
+checkpoints are read using current-revision SQL, not the console's 200-row page.
+
+The diagnostic harness also exposed an import-time recovery side effect: opening
+the plugin marked live turn 1360 crashed at 00:59:56, although its final archive
+and QQ deliveries 3080/3081/3082 completed afterward. At 01:25 it was corrected
+from those exact receipts and archive, with a transactional audit note; no task
+or message was replayed. TurnJournal construction no longer performs recovery.
+Only the real service startup does, before background workers begin.
+
+The integrated targeted tests passed 210 cases, including file capture after
+report correction, invalid cached corrections, read-only tool restrictions,
+revision/cancellation fencing, evidence isolation, historical authorization,
+artifact acceptance, durable outbox and interrupted external continuations.
+The full step-resume path restores correction checkpoints before opening any
+execution tools. A corrected evidence reference must have a recorded complete,
+in-order read through the restricted evidence reader; copying an ID from the
+index is not sufficient, including after recovery from a cached correction.
+These checks are not yet a successful production re-run of revision 3, a browser
+acceptance, or an authorized cleanup acceptance.

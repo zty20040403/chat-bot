@@ -598,18 +598,6 @@ def build_app_context(
                 archive_max_bytes=settings.turn_archive_max_bytes,
                 event_max_chars=settings.turn_event_max_chars,
             )
-            if turn_journal.recovered_unknown_effects:
-                logger.warning(
-                    "Marked "
-                    f"{turn_journal.recovered_unknown_effects} interrupted tool "
-                    "effect(s) as outcome-unknown."
-                )
-            if turn_journal.recovered_crashed_turns:
-                logger.warning(
-                    "Marked "
-                    f"{turn_journal.recovered_crashed_turns} interrupted turn(s) "
-                    "as crashed."
-                )
         except (OSError, RuntimeError, sqlite3.Error, DatabaseError) as exc:
             logger.error(f"Turn journal could not be opened: {exc}")
 

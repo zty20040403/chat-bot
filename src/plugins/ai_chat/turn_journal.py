@@ -112,6 +112,11 @@ class TurnJournal:
         if self._legacy_sqlite:
             self._configure()
             self._migrate()
+        self.recovered_unknown_effects = 0
+        self.recovered_crashed_turns = 0
+
+    def recover_interrupted(self) -> None:
+        """Only the owning service startup may recover interrupted execution."""
         self.recovered_unknown_effects = self.mark_started_effects_unknown()
         self.recovered_crashed_turns = self.mark_running_turns_crashed()
 

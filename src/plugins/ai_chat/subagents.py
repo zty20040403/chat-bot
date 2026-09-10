@@ -42,6 +42,8 @@ from .agent.workspaces import ArtifactCaptureError, IMPORT_AGENT_ARTIFACT
 from .agent.sessions import AgentSessionStoreMixin, READ_AGENT_RESULT, read_upstream_result, upstream_index
 from .agent.external import ExternalCalls, ExternalPending, ExternalStoreMixin, EXTERNAL_SQL, active_external
 from .agent.receipt_links import evidence_fingerprint, link_operation_receipts
+from .agent.worker_report import (checked_report, checked_correction, correction_input, retain_execution_facts,
+                                  separate_cluster_artifacts)
 from .agent.control import (CONTROL_SQL, TaskControlStoreMixin, LeaseLost,
                             active_job_fence, active_task_id, active_model_policy, assert_job_owned)
 from .deepseek import (
@@ -2049,11 +2051,7 @@ class SubAgentCoordinator:
         delivered_artifacts = _delivered_artifact_keys(
             self.store.checkpoints(task.task_id)
         )
-        checkpoints = self.store.checkpoints(task.task_id)
-        revision_start = max((index + 1 for index, item in enumerate(checkpoints)
-            if item.get("phase") == "revision_requested"), default=0)
-        adaptive_repairs_used = sum(item.get("phase") == "adaptive_repair_planned"
-            for item in checkpoints[revision_start:])
+        adaptive_repairs_used = self.store.current_revision_adaptive_repair_count(task.task_id)
         repair_sequence = max((int(match.group(1)) for run in self.store.runs(task.task_id)
             if (match := re.search(r"__repair_([1-9][0-9]*)$", run.step_key))), default=0)
 
@@ -2823,30 +2821,42 @@ class SubAgentCoordinator:
             worker_input = _worker_input(task.objective, step, agent_context)
         worker_input += f"\n[本步骤工作目录]\n/workspace/tasks/{task.task_id}/steps/{step.key}\n"
         worker_input += "\n[宿主证据索引，必要时用 read_task_evidence 读取]\n" + json.dumps(evidence_index(allowed_evidence()), ensure_ascii=False)
+        worker_input += "\n报告中每个 evidence# 必须使用本轮工具返回或当前索引中的完整编号；不要复制上一修订的编号。来源观测时间以证据原文为准，不把收取时间当作采样时间。"
         try:
+            correction_checkpoint = self.store.latest_run_checkpoint(task.task_id, run.run_id, "report_correction")
             async with self.scheduler.slot(task.scope_key, profile.name), asyncio.timeout(min(self.timeout_seconds, spec.timeout_seconds)):
                 self.store.start_run(run.run_id, continuation=run.result.get("status") == "waiting")
                 if session["messages"] and hooks and hooks.workspaces:
                     await hooks.workspaces.restore_step()
-                with model_scope_for_role(step.role, profile, self.model_catalog, self.profile_overrides):
-                    answer = await ask_deepseek_with_tools(
-                        worker_input,
-                        session["messages"],
-                        allowed_tools,
-                        worker_execute_tool,
-                        profile=profile,
-                        max_tool_rounds=min(self.max_tool_rounds, spec.max_turns),
-                        tool_context=_worker_prompt(spec),
-                        trace=trace,
-                        event_sink=record_agent_event,
-                        approval_checker=(hooks.approval_checker if hooks else None),
-                        handoff_tool=(hooks.handoff_tool if hooks else None),
-                        compensate_tool=(hooks.compensate_tool if hooks else None),
-                        transcript_sink=save_transcript,
-                        after_tool_round=external.pause if external else None,
-                    )
-            result = _normalize_worker_scope_result(_parse_worker_result(answer))
-            result = validate_report(result, allowed_evidence(), required=((self.store.get(task.task_id) or task).plan.get("contract", {}).get("version", 1) >= 2))
+                if correction_checkpoint is not None:
+                    # The execution pass already ended before this durable checkpoint.
+                    # Never reopen server/sandbox command tools just to recover its report.
+                    result = dict(correction_checkpoint["original"])
+                else:
+                    with model_scope_for_role(step.role, profile, self.model_catalog, self.profile_overrides):
+                        answer = await ask_deepseek_with_tools(
+                            worker_input,
+                            session["messages"],
+                            allowed_tools,
+                            worker_execute_tool,
+                            profile=profile,
+                            max_tool_rounds=min(self.max_tool_rounds, spec.max_turns),
+                            tool_context=_worker_prompt(spec),
+                            trace=trace,
+                            event_sink=record_agent_event,
+                            approval_checker=(hooks.approval_checker if hooks else None),
+                            handoff_tool=(hooks.handoff_tool if hooks else None),
+                            compensate_tool=(hooks.compensate_tool if hooks else None),
+                            transcript_sink=save_transcript,
+                            after_tool_round=external.pause if external else None,
+                        )
+                    result = _normalize_worker_scope_result(_parse_worker_result(answer))
+                    result = separate_cluster_artifacts(result, allowed_evidence())
+            result = await self._correct_worker_report(
+                task, run, result, evidence=allowed_evidence(), spec=spec,
+                profile=profile, trace=trace, save_transcript=save_transcript,
+                event_sink=record_agent_event,
+            )
             result["evidence_index"] = evidence_index(allowed_evidence())
             if hooks and hooks.workspaces and result.get("artifacts"):
                 try:
@@ -2931,6 +2941,88 @@ class SubAgentCoordinator:
                 "input_tokens": trace.input_tokens, "output_tokens": trace.output_tokens,
                 "session_version": session_version,
             }, run_id=run.run_id)
+
+    async def _correct_worker_report(
+        self, task: TaskRecord, run: RunRecord, original: dict, *, evidence: list[dict],
+        spec: AgentSpec, profile: ModelProfile, trace: DeepSeekTrace,
+        save_transcript, event_sink,
+    ) -> dict:
+        required = (self.store.get(task.task_id) or task).plan.get("contract", {}).get("version", 1) >= 2
+        validated = checked_report(original, evidence, required=required)
+        errors = validated["report_validation"]["errors"]
+        if not required or not errors:
+            return validated
+        revision = self.store.control(task.task_id)["revision"]
+        fingerprint = hashlib.sha256(_json_dump([original, evidence_fingerprint(evidence)]).encode()).hexdigest()
+        previous = self.store.latest_run_checkpoint(task.task_id, run.run_id, "report_correction")
+        if previous is not None:
+            if previous.get("fingerprint") == fingerprint and previous.get("status") == "completed":
+                return checked_correction(previous["result"], evidence, set(previous["read_refs"]), required=required)
+            # A process loss or failed correction does not grant an unbounded new loop.
+            return validated
+
+        def check_owned():
+            assert_job_owned()
+            if self.store.control(task.task_id)["revision"] != revision:
+                raise LeaseLost("Task revision changed during report correction")
+            if self.store.cancellation_requested(task.task_id):
+                raise asyncio.CancelledError
+
+        read_refs: set[str] = set()
+        next_offsets: dict[str, int] = {}
+
+        async def readonly_tool(name: str, arguments: dict) -> str:
+            check_owned()
+            if name == "read_task_evidence" and tool_enabled(name):
+                raw = read_evidence(evidence, arguments)
+                reply = json.loads(raw)
+                ref = reply.get("ref")
+                if (reply.get("ok") and reply.get("complete") and reply.get("content")
+                        and arguments.get("offset", 0) == next_offsets.get(ref, 0)):
+                    if reply.get("next_offset") is None:
+                        read_refs.add(ref)
+                    else:
+                        next_offsets[ref] = reply["next_offset"]
+                return raw
+            return json.dumps({"ok": False, "error": "Report correction permits only read_task_evidence"})
+
+        check_owned()
+        self.store.append_checkpoint(task.task_id, "report_correction", {
+            "revision": revision, "fingerprint": fingerprint, "status": "started",
+            "errors": errors, "original": original,
+        }, run_id=run.run_id)
+        history = self.store.agent_session(task.task_id, run.run_id,
+            scope_key=task.scope_key, requester_user_id=task.requester_user_id)["messages"]
+
+        def save_correction_transcript(messages):
+            check_owned()
+            save_transcript([*history, *messages])
+
+        try:
+            async with self.scheduler.slot(task.scope_key, profile.name), asyncio.timeout(min(90, self.timeout_seconds, spec.timeout_seconds)):
+                with model_scope_for_role(spec.role, profile, self.model_catalog, self.profile_overrides):
+                    answer = await ask_deepseek_with_tools(
+                        correction_input(original, evidence, errors), [], [READ_TASK_EVIDENCE], readonly_tool,
+                        profile=profile, max_tool_rounds=3, tool_context=_worker_prompt(spec),
+                        trace=trace, event_sink=event_sink,
+                        transcript_sink=save_correction_transcript,
+                    )
+            check_owned()
+            candidate = retain_execution_facts(original, _parse_worker_result(answer))
+            result = checked_correction(candidate, evidence, read_refs, required=required)
+            self.store.append_checkpoint(task.task_id, "report_correction", {
+                "revision": revision, "fingerprint": fingerprint, "status": "completed",
+                "original": original, "result": candidate, "read_refs": sorted(read_refs),
+            }, run_id=run.run_id)
+            return result
+        except Exception as exc:
+            check_owned()
+            self.store.append_checkpoint(task.task_id, "report_correction", {
+                "revision": revision, "fingerprint": fingerprint, "status": "failed",
+                "original": original, "error": str(exc)[:1000],
+            }, run_id=run.run_id)
+            validated.setdefault("warnings", []).append("交付纠错未完成，保留原始结果和待核实项。")
+            return validated
 
     async def _run_step_reliably(
         self,
