@@ -78,6 +78,22 @@ class HostControlTests(unittest.TestCase):
             with self.subTest(argv=argv):
                 self.assertCheck(code, lambda: hc.preflight(self.intent(argv), self.config))
 
+    def test_restricted_executor_path_uses_host_path_for_advice_only(self):
+        marker = self.root / "unexpected-effect"
+        program = self.script("systemctl", f"touch '{marker}'\n")
+        restricted = self.root / "restricted-bin"
+        restricted.mkdir()
+        intent = self.intent(["/definitely-absent/systemctl", "reboot"], env={"PATH": str(restricted)})
+        error = self.assertCheck("program_unavailable", lambda: hc.preflight(intent, self.config))
+        self.assertEqual(error.details["suggested_program"], str(program))
+        self.assertFalse(error.details["command_started"])
+        self.assertEqual(intent["command"]["argv"][0], "/definitely-absent/systemctl")
+        self.assertFalse(marker.exists())
+        self.assertFalse((self.root / "receipts").exists())
+        self.assertCheck("program_unavailable", lambda: hc.preflight(
+            self.intent(["systemctl", "reboot"], env={"PATH": str(restricted)}), self.config))
+        self.assertFalse(marker.exists())
+
     def test_non_regular_executable_does_not_block(self):
         path = self.bin / "pipe"
         os.mkfifo(path, 0o700)

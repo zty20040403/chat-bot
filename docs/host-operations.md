@@ -91,7 +91,7 @@ This deliberately sacrifices automatic retry rather than risk repeating a reboot
 
 ## Verification Record (2026-09-10)
 
-- Full Python suite: 842 tests passed, none skipped, including real PostgreSQL
+- Full Python suite: 843 tests passed, none skipped, including real PostgreSQL
   integration, authorization, concurrency, fencing and interrupted-job recovery.
   Each DB fixture uses an isolated schema in a disposable local PostgreSQL 17
   instance. Install `vector` in `public` before migrations so test schemas share
@@ -128,3 +128,19 @@ This deliberately sacrifices automatic retry rather than risk repeating a reboot
   is not installed yet. Packaged preflight checks run as the SSH user do not
   replace installed-helper checks in the actual diagnostic/operator profiles;
   those remain part of the separately authorized deployment acceptance.
+
+### Live Follow-Up
+
+The first authorized deployment installed the helpers on all three targets.
+Six real `exec.run` checks passed across diagnostic and operator profiles, with
+the expected non-root/root identities. The typed `units.start` check passed for
+an already-active owned Worker. Three unapproved reboot proposals were cancelled
+without submission, and an out-of-scope host was rejected.
+
+The negative path tests correctly prevented execution but exposed a reporting
+gap: the executor's minimal PATH does not contain `systemctl`, so the missing
+absolute-path error had no suggestion. The helper now also searches the trusted
+host-configured PATH for advice only. It still rejects the original request and
+never substitutes that suggested program for execution. A restricted-PATH
+regression test covers this distinction; the full 843-test suite passed again.
+The corrected helper still requires the final live recheck before acceptance.

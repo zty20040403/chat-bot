@@ -62,13 +62,18 @@ def effective_environment(intent: dict[str, Any], config: dict[str, Any]) -> dic
     return {**base, **extra}
 
 
-def fingerprint(program: str, path: str, *, suggest: bool = True) -> dict[str, Any]:
+def fingerprint(program: str, path: str, *, suggest: bool = True,
+                suggestion_path: str | None = None) -> dict[str, Any]:
     require(bool(program) and "\0" not in program, "invalid_program", "Invalid command program")
     require("/" not in program or Path(program).is_absolute(),
         "relative_program", "Use a program name or an explicit absolute path")
     found = shutil.which(program, path=path)
     if found is None:
         candidate = shutil.which(Path(program).name, path=path) if suggest and "/" in program else None
+        # Executor profiles have a minimal PATH. The host's configured PATH may
+        # supply advice, but must never change which program actually executes.
+        if candidate is None and suggest and "/" in program and suggestion_path:
+            candidate = shutil.which(Path(program).name, path=suggestion_path)
         raise CheckError("program_unavailable", f"Program does not exist or is not executable: {program}",
             requested_program=program, suggested_program=candidate, command_started=False)
     resolved = Path(found).resolve(strict=True)
@@ -139,7 +144,7 @@ def preflight(intent: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
     directory_stat = directory.stat()
     programs = []
     if "argv" in command:
-        programs.append(fingerprint(command["argv"][0], environment["PATH"]))
+        programs.append(fingerprint(command["argv"][0], environment["PATH"], suggestion_path=config["path"]))
         # An existing script can still fail ENOENT because its shebang interpreter is absent.
         with Path(programs[0]["resolved"]).open("rb") as stream:
             header = stream.readline(4096)
