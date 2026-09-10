@@ -347,4 +347,26 @@ The targeted evidence, report correction, policy, outcome, reviewer, runtime and
 tool-loop suite passed 114 tests. The actual tool loop was exercised with mocked
 model responses, eight paginated references and a smaller transport limit; the
 model received parseable, complete pages and reconstructed the original evidence.
-This batch change has not yet passed a production model run or been deployed.
+2026-09-11 03:04 HKT: Bot `08def6a`, nix-config `e9dbdaa` deployed to h610 as
+`/nix/store/0fw8w024vkhib7qpcbnk7wr6ihiwyk2j-nixos-system-h610-26.05.20260622.3426825`.
+Only gaoji and its control service restarted; Max PID 473603 and PostgreSQL PID
+8264 retained their activation times. The sandbox image was reused.
+
+Task 59 revision 6 performed fresh read-only inspection of all three hosts. Each
+inspection step succeeded with scoped evidence. The real report correction read
+12 references completely, but still cited two unread `ops_call` observations
+(`evidence#3512f1e41dbabf8cfb89fa416f9a0aab` and
+`evidence#d4a6f01442ad565c9afd566420088302`). They occur in findings and completed
+claims, not only file metadata. The full-read gate correctly kept the report
+incomplete. The model's separate warning about file-tool evidence initially
+misled diagnosis; the persisted reference paths establish the actual gap.
+
+The original compiler result also claimed it was only correcting a prior report,
+not generating a new file. Correction transcripts currently append host-generated
+read-only instructions to the normal execution session, and revisions reuse that
+session. This is a phase-contamination risk to address, not a confirmed fixed
+behavior. The independent reviewer triggered repair run 151; reviewer 152 was
+still running at the last observation. No final revision-6 file receipt has yet
+been confirmed. The browser remains at expired login and the Mac is locked;
+authorized disposable cleanup and real production upload-loss boundaries remain
+unaccepted. The overall checklist is intentionally not complete.
