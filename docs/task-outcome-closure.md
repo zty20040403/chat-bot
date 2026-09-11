@@ -15,7 +15,7 @@ force.
 - [x] Bind supervisor conclusions to the acceptance matrix, including partial work.
 - [ ] Recover final messages and files across process loss; resolve ambiguous
       receipts without blind retransmission. Test each crash boundary.
-- [ ] Show inspection, findings, authorization, execution, verification and
+- [x] Show inspection, findings, authorization, execution, verification and
       delivery in one live task detail view, with commands and evidence.
 - [x] Run an actual read-only h610/h310/tank inspection and confirm final delivery
       (task 59; unresolved acceptance is recorded below, not silently promoted).
@@ -536,3 +536,36 @@ suite passed 34 tests, including mixed old/current requests and missing current
 approval. Full browser evidence-panel acceptance, fresh protected directory
 measurements, live upload process-loss boundaries and approved disposable
 cleanup remain open; this change does not close those gates.
+
+## Authenticated Console Acceptance and Deployment
+
+The build and deployment of code revision `77379c0` completed successfully.
+The sandbox image was reused. Unrelated services retained their activation
+times. An open HTTP stream was cancelled at the old process's graceful-shutdown
+deadline; the process exited successfully and the live feed reconnected.
+
+The authenticated production console distinguishes current authorization from
+historical unapproved requests. Correcting that display leaves incomplete
+acceptance, execution status and acknowledged delivery unchanged. Returned read
+calls say returned, not waiting, and explicitly do not imply that a business
+outcome was verified. The focused 34-test suite and TypeScript/production build
+passed.
+
+The actual browser was used to open the lifecycle dialog, inspect the real
+execution arguments, and select raw host evidence. The evidence endpoint returned
+the full receipt and its hash. The open evidence selector survived live updates.
+The dialog, selected evidence and hash remained present across the service
+switch; authorization changed through the reconnected live feed without closing
+the dialog. Reloading the frontend then verified the new revision labels and
+returned-call wording. The desktop dialog and raw evidence were visually checked
+without text overlapping the controls. No frontend errors were recorded.
+Earlier isolated desktop/mobile checks remain distinct from this production
+browser check. No old report was resent.
+
+The lifecycle-console checklist item is now accepted. Fresh protected-directory
+measurements, real QQ process-loss boundaries, and disposable cleanup still are
+not accepted. Further live tests need explicit approval for their exact paths,
+data limits and destination, and must interrupt only an isolated test process.
+Internal process identifiers, deployment paths and message receipts are omitted
+from this public acceptance entry. This documentation-only update does not
+require another service restart.
