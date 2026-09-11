@@ -13,7 +13,7 @@ force.
 - [x] Require structured findings, completed/unresolved work, authorization needs
       and next verification from specialists; validate their evidence references.
 - [x] Bind supervisor conclusions to the acceptance matrix, including partial work.
-- [ ] Recover final messages and files across process loss; resolve ambiguous
+- [x] Recover final messages and files across process loss; resolve ambiguous
       receipts without blind retransmission. Test each crash boundary.
 - [x] Show inspection, findings, authorization, execution, verification and
       delivery in one live task detail view, with commands and evidence.
@@ -682,3 +682,22 @@ The focused suite passed 124 tests covering parser rejection, bounded repair,
 legacy recovery, worker reports and external continuations. The replacement
 live inspection and user-authorized cleanup remain outstanding; local test
 results do not establish those gates as complete.
+
+## Independent Inspection Receipt Times
+
+A live parallel inspection returned fresh fleet observations, but a slower
+system-facts request delayed their assembly until the fleet cache TTL elapsed.
+The compact view then discarded valid disk observations and marked the host
+stale even though the exporter samples were still recent. This affected more
+than one host; it was not evidence of a failed disk or server.
+
+Host facts, fleet observations and resource metrics are now requested together.
+Fleet cache validity is evaluated at the actual receipt time, while exporter
+and resource sample ages are still checked at assembly. The snapshot itself also
+has a bounded age. Already-expired responses, stale sources, future receipt
+times and genuinely old samples remain invalid. Receipt and assembly timestamps
+are retained for diagnosis. No expiry or observation timestamp is rewritten.
+
+Forty focused tests passed, including a deliberately slow facts query, expired
+receipts, stale samples, target isolation and typed acceptance checks. Deployment
+and fresh live verification of this correction remain pending.

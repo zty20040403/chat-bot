@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import nonebot
 
@@ -171,6 +172,45 @@ class FleetProjectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary["hosts"][-1]["status"], "stale")
         self.assertIsNone(summary["hosts"][-1]["root_disk"])
         self.assertIsNone(summary["hosts"][-1]["failed_service_count"])
+
+    def test_receipt_time_does_not_revalidate_expired_or_aged_samples(self) -> None:
+        payload = fleet_payload(1000)
+        for captured, assembled, disk_available in ((1005, 1025, True),
+                (1021, 1025, False), (1005, 1096, False), (1030, 1025, False)):
+            with self.subTest(captured=captured, assembled=assembled):
+                host = summarize_fleet(payload, host_id="tank", now=assembled,
+                    acquired_at=captured)["hosts"][0]
+                self.assertEqual(host["root_disk"] is not None, disk_available)
+        payload["status"] = "stale"
+        self.assertFalse(summarize_fleet(payload, now=1025, acquired_at=1005)["ok"])
+
+    async def test_slow_system_facts_do_not_expire_a_received_fleet_snapshot(self) -> None:
+        clock = [1005]
+        metrics_started = asyncio.Event()
+        fleet_returned = asyncio.Event()
+
+        async def facts(_host):
+            await metrics_started.wait()
+            await fleet_returned.wait()
+            await asyncio.sleep(0)
+            clock[0] = 1025
+            return {"status": "fresh", "data": {"host": "tank", "facts": {}}}
+
+        async def fleet():
+            fleet_returned.set()
+            return fleet_payload(1000)
+
+        async def metrics(_host):
+            metrics_started.set()
+            return {"status": "unavailable"}
+
+        client = SimpleNamespace(host=facts, fleet=fleet, host_metrics=metrics)
+        with patch("src.plugins.ai_chat.fleet_tools.time.time", side_effect=lambda: clock[0]):
+            result = await asyncio.wait_for(inspect_host(client, "tank"), timeout=1)
+        self.assertEqual(result["acquired_at"], 1005)
+        self.assertEqual(result["assembled_at"], 1025)
+        self.assertEqual(result["hosts"][0]["root_disk"]["available_gib"], 76)
+        self.assertEqual(result["hosts"][0]["status"], "online")
 
     def test_unavailable_alerts_are_not_zero_alerts(self) -> None:
         payload = fleet_payload(1000)

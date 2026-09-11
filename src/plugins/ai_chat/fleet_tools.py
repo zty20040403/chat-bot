@@ -87,9 +87,12 @@ def _root_disk(host: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def summarize_fleet(
-    payload: dict[str, Any], *, host_id: str = "", now: int | None = None
+    payload: dict[str, Any], *, host_id: str = "", now: int | None = None,
+    acquired_at: int | None = None,
 ) -> dict[str, Any]:
     timestamp = int(time.time()) if now is None else now
+    captured_at = timestamp if acquired_at is None else acquired_at
+    snapshot_current = 0 <= timestamp - captured_at <= 90
     observations = {
         str(item.get("host")): item
         for item in _items(_object(payload.get("data")).get("hosts"))
@@ -117,7 +120,8 @@ def summarize_fleet(
         exporter = _object(host.get("exporter"))
         sample_at = exporter.get("sample_at_unix_seconds")
         exporter_fresh = _sample_fresh(sample_at, timestamp)
-        current = _fresh(payload, timestamp) and bool(host)
+        # Cache validity belongs to receipt time; sample age is checked at assembly.
+        current = snapshot_current and _fresh(payload, captured_at) and bool(host)
         agent_up = agent.get("state") == "reachable"
         exporter_up = exporter.get("state") == "up" and exporter_fresh
         online = current and (agent_up or exporter_up)
@@ -125,7 +129,7 @@ def summarize_fleet(
         units = _items(failed.get("units"))
         failure_count = (
             len(units)
-            if _fresh(failures, timestamp)
+            if snapshot_current and _fresh(failures, captured_at)
             and failed.get("state") == "available"
             and isinstance(failed.get("units"), list)
             else None
@@ -142,7 +146,7 @@ def summarize_fleet(
             for item in alerts
             if _object(item.get("labels")).get("instance") == name
         ]
-        alert_count = len(host_alerts) if _fresh(alerts_result, timestamp) else None
+        alert_count = len(host_alerts) if snapshot_current and _fresh(alerts_result, captured_at) else None
         shown_alerts = host_alerts if host_id else host_alerts[:3]
         shown_units = units if host_id else units[:5]
         status = "online" if online else "stale" if host and not current else "unknown"
@@ -198,6 +202,8 @@ def summarize_fleet(
         "status": payload.get("status", "unavailable"),
         "observed_at": payload.get("observed_at"),
         "received_at": payload.get("received_at"),
+        "acquired_at": captured_at,
+        "assembled_at": timestamp,
         "hosts": summaries,
         "error": _error(payload),
         "scope": "服务与告警只覆盖已授权项；在线不代表所有业务均已验证。",
@@ -282,21 +288,24 @@ def summarize_resources(payload: dict[str, Any], host_id: str, *, now: int) -> d
 
 
 async def inspect_host(client: Any, host_id: str) -> dict[str, Any]:
-    async def read(call: Any) -> dict[str, Any]:
+    async def read(call: Any) -> tuple[dict[str, Any], int]:
         try:
-            return await call
+            payload = await call
         except FleetControlError as exc:
-            return {
+            payload = {
                 "status": "unavailable",
                 "error": {"code": exc.code, "message": str(exc)},
             }
+        return payload, int(time.time())
 
-    facts_result, fleet_result = await asyncio.gather(
-        read(client.host(host_id)), read(client.fleet())
+    async def read_metrics() -> dict[str, Any]:
+        call = getattr(client, "host_metrics", None)
+        return await call(host_id) if callable(call) else {"status": "unavailable"}
+
+    (facts_result, _), (fleet_result, fleet_at), (metrics, _) = await asyncio.gather(
+        read(client.host(host_id)), read(client.fleet()), read(read_metrics())
     )
-    summary = summarize_fleet(fleet_result, host_id=host_id)
-    metrics_call = getattr(client, "host_metrics", None)
-    metrics = await read(metrics_call(host_id)) if callable(metrics_call) else {"status": "unavailable"}
+    summary = summarize_fleet(fleet_result, host_id=host_id, acquired_at=fleet_at)
     for host in summary["hosts"]:
         host["resources"] = summarize_resources(metrics, host_id, now=int(time.time()))
     facts = _object(_object(facts_result.get("data")).get("facts"))
