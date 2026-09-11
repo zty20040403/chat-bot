@@ -272,6 +272,14 @@ class AgentRegistry:
     def manifest(self) -> list[dict[str, object]]:
         return [spec.manifest() for spec in self._specs.values()]
 
+    def planning_tools(self, enabled: set[str] | None = None) -> dict[str, object]:
+        roles = {role: set(self.worker(role).allowed_tools) for role in self.worker_roles}
+        if enabled is not None:
+            roles = {role: names & enabled for role, names in roles.items()}
+        common = set.intersection(*roles.values()) if roles else set()
+        return {"shared_tools": sorted(common), "role_tools": {
+            role: sorted(names - common) for role, names in roles.items()}}
+
 
 DEFAULT_AGENT_REGISTRY = AgentRegistry(AGENT_SPECS)
 WORKER_ROLES = DEFAULT_AGENT_REGISTRY.worker_roles

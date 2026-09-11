@@ -411,6 +411,7 @@ class FleetControlService:
             binding.cacheable
             and cached is not None
             and time.monotonic() - cached.stored_at < self.cache_seconds
+            and (cached.result.expires_at is None or cached.result.expires_at > int(time.time()))
         ):
             result = replace(cached.result, cached=True, duration_ms=0)
             self._record_metrics(capability, result, source="cache")
@@ -423,6 +424,7 @@ class FleetControlService:
                 binding.cacheable
                 and cached is not None
                 and time.monotonic() - cached.stored_at < self.cache_seconds
+                and (cached.result.expires_at is None or cached.result.expires_at > int(time.time()))
             ):
                 result = replace(cached.result, cached=True, duration_ms=0)
                 self._record_metrics(capability, result, source="cache")
@@ -489,7 +491,9 @@ class FleetControlService:
                 )
             response = await self.ops.execute(operation, params)
             response_data = self._validated_payload(operation, params, response.data)
+            received_at = int(time.time())
         except OpsError as exc:
+            received_at = int(time.time())
             if cached is not None and exc.retryable:
                 return FleetQueryResult(
                     operation=operation,

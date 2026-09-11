@@ -4,7 +4,7 @@ import json
 import os
 import time
 import unittest
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -482,6 +482,36 @@ class FleetControlServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(denied.status.value, "forbidden")
         self.assertIsNone(denied.data)
         self.assertNotIn(key, service._cache)
+        await service.close()
+
+    async def test_cache_ttl_begins_at_response_not_before_slow_request(self) -> None:
+        clock = [1000]
+
+        class SlowOps(FakeOps):
+            async def execute(self, *args, **kwargs):
+                clock[0] += 25
+                return await super().execute(*args, **kwargs)
+
+        service = FleetControlService(SlowOps(), store=FakeStore(), inventory=self.inventory,
+                                      cache_seconds=20)
+        with patch('src.cluster_control.service.time.time', side_effect=lambda: clock[0]):
+            result = await service.query_capability('fleet.read', {})
+        self.assertEqual(result.received_at, 1025)
+        self.assertEqual(result.expires_at, 1045)
+        await service.close()
+
+    async def test_expired_payload_is_not_reused_with_recent_cache_insertion(self) -> None:
+        ops = FakeOps()
+        service = FleetControlService(ops, store=FakeStore(), inventory=self.inventory,
+                                      cache_seconds=20)
+        await service.query_capability('fleet.read', {})
+        key = service._cache_key('fleet.overview', {})
+        entry = service._cache[key]
+        service._cache[key] = replace(entry, result=replace(entry.result, expires_at=int(time.time()) - 1))
+        result = await service.query_capability('fleet.read', {})
+        self.assertEqual(ops.execute_calls, 2)
+        self.assertFalse(result.cached)
+        self.assertGreater(result.expires_at, int(time.time()))
         await service.close()
 
     async def test_sensitive_log_is_marked_before_persistence(self) -> None:

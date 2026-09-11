@@ -1440,6 +1440,8 @@ class SubAgentCoordinator:
         mode = "delegate" if role else "workflow"
         prompt = (
             ENTRY_PROMPT + f"\n这是用户已明确提交的执行任务，mode 必须为 {mode}。"
+            + "\n子 Agent 的工具范围（shared_tools 与各角色 role_tools 的并集）："
+            + json.dumps(self.registry.planning_tools(), ensure_ascii=False)
             + (f"恰好一个步骤，agent 必须为 {role}。" if role else "")
             + f"步骤最多 {self.max_steps} 个。answer 必须是空字符串，不能遗漏或写 null。"
             + "直接返回 decide_execution 的参数 JSON，不再调用工具。完整结构如下：\n"
@@ -1454,7 +1456,8 @@ class SubAgentCoordinator:
             finally:
                 _merge_trace(parent_trace, trace)
             try:
-                decision = EntryDecision.parse(payload, max_steps=self.max_steps)
+                decision = EntryDecision.parse(payload, max_steps=self.max_steps,
+                    worker_tools={name: self.registry.worker(name).allowed_tools for name in self.registry.worker_roles})
                 if decision.mode != mode or role and decision.steps[0]["agent"] != role:
                     raise ValueError("Explicit task planner returned a different execution mode or role")
             except ValueError as exc:
@@ -3350,6 +3353,7 @@ def _worker_prompt(spec: AgentSpec) -> str:
 status 只评价你被分配的步骤和本步骤交付标准，不评价整个任务是否已经完成。
 本步骤完整交付时必须返回 success，即使后续 Agent 尚未工作或文件尚未发送。
 unresolved 只填写本步骤交付标准中仍未完成的缺口；需要后续步骤继续做的事项写入 handoff。
+只读巡检查到了告警就完成了该项检查，不要求把告警修好；未获准检查的范围和范围外风险写入 warnings，不能因此把已完成的检查标为 partial。要求检查但确实未取得的数据仍属于 unresolved。
 需要完整上游数据时根据结果索引调用 read_agent_result 分页读取，不猜测被省略的内容。
 索引含 previous_evidence 时，读取补查前的观测以保留其他维度的数据；冲突以新观测为准，旧状态不能当成当前状态，旧产物不能当成当前交付物。
 文件分别放在此步骤指定的工作目录。每个步骤有独立容器；通过 import_agent_artifact 导入上游快照，复制到自己的工作目录再修改。

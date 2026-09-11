@@ -12,7 +12,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from functools import wraps
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Mapping, Optional
 
 from .ai_tools import ToolChoice, ToolDefinition
 if TYPE_CHECKING:
@@ -569,9 +569,13 @@ async def ask_deepseek_with_tools(
         trace.messages.append({"role": "user", "content": user_text})
     if entry_handler is not None:
         from .agent.execution import ENTRY_PROMPT, ExecutionEntryError
+        from .agent.registry import DEFAULT_AGENT_REGISTRY
 
-        main_tools = ", ".join(tool["function"]["name"] for tool in enabled_tool_definitions(tools))
-        messages.insert(1, {"role": "system", "content": ENTRY_PROMPT + f"\n最多 {entry_max_steps} 个步骤。\n本轮提供的工具：" + main_tools})
+        enabled_names = {tool["function"]["name"] for tool in enabled_tool_definitions(tools)}
+        main_tools = ", ".join(sorted(enabled_names))
+        role_tools = DEFAULT_AGENT_REGISTRY.planning_tools(enabled_names)
+        messages.insert(1, {"role": "system", "content": ENTRY_PROMPT + f"\n最多 {entry_max_steps} 个步骤。\n本轮提供的工具：" + main_tools
+            + "\n子 Agent 的工具范围（shared_tools 与各角色 role_tools 的并集）：" + json.dumps(role_tools, ensure_ascii=False)})
         try:
             decision, decision_message = await _execution_entry(
                 messages,
@@ -579,6 +583,8 @@ async def ask_deepseek_with_tools(
                 trace=trace,
                 max_steps=entry_max_steps,
                 allowed_profiles=entry_allowed_profiles,
+                worker_tools={role: DEFAULT_AGENT_REGISTRY.worker(role).allowed_tools & enabled_names
+                              for role in DEFAULT_AGENT_REGISTRY.worker_roles},
             )
         except ExecutionEntryError as exc:
             _logger.warning(
@@ -1049,6 +1055,7 @@ async def _execution_entry(
     messages: list[ChatMessage], profile: ModelProfile, *,
     trace: DeepSeekTrace | None, max_steps: int,
     allowed_profiles: frozenset[str] | None = None,
+    worker_tools: Mapping[str, frozenset[str]] | None = None,
 ) -> tuple[EntryDecision, ChatMessage]:
     from .agent.execution import (
         DECISION_TOOL,
@@ -1079,12 +1086,12 @@ async def _execution_entry(
             if error:
                 raise ValueError(error)
             try:
-                decision = EntryDecision.parse(arguments, max_steps=max_steps)
+                decision = EntryDecision.parse(arguments, max_steps=max_steps, worker_tools=worker_tools)
             except ValueError:
                 normalized = normalize_direct_entry_payload(arguments)
                 if normalized is None:
                     raise
-                decision = EntryDecision.parse(normalized, max_steps=max_steps)
+                decision = EntryDecision.parse(normalized, max_steps=max_steps, worker_tools=worker_tools)
         except (ValueError, AttributeError, TypeError) as exc:
             if attempt:
                 raise ExecutionEntryError(

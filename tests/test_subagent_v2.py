@@ -83,6 +83,30 @@ class EntryContractTests(unittest.TestCase):
             with self.subTest(raw=raw), self.assertRaises(ValueError):
                 EntryDecision.parse(raw)
 
+    def test_declared_tools_must_belong_to_selected_worker(self):
+        raw = decision("delegate")
+        step = raw["steps"][0]
+        step.update(agent="analyst", required_tools=["ops_call"])
+        with self.assertRaisesRegex(ValueError, "analyst cannot use ops_call"):
+            EntryDecision.parse(raw)
+        step["agent"] = "operator"
+        parsed = EntryDecision.parse(raw)
+        self.assertEqual(EntryDecision.from_payload(parsed.as_payload()).steps[0]["required_tools"], ["ops_call"])
+        with self.assertRaisesRegex(ValueError, "operator cannot use ops_call"):
+            EntryDecision.parse(raw, worker_tools={"operator": frozenset()})
+        for invalid in ("ops_call", [None], [""]):
+            step["required_tools"] = invalid
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "required_tools"):
+                EntryDecision.parse(raw)
+
+    def test_planning_tool_guide_preserves_role_permissions_and_enabled_filter(self):
+        guide = DEFAULT_AGENT_REGISTRY.planning_tools({"ops_call", "web_search"})
+        for role in DEFAULT_AGENT_REGISTRY.worker_roles:
+            names = set(guide["shared_tools"]) | set(guide["role_tools"][role])
+            self.assertEqual(names, DEFAULT_AGENT_REGISTRY.worker(role).allowed_tools & {"ops_call", "web_search"})
+        self.assertIn("ops_call", guide["role_tools"]["operator"])
+        self.assertNotIn("ops_call", guide["role_tools"]["analyst"])
+
     def test_new_entry_cannot_omit_checks_but_legacy_checkpoint_can_resume(self):
         raw = decision("workflow")
         del raw["outcome_checks"]
@@ -230,6 +254,20 @@ class EntryLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "入口失败，未执行项目")
         self.assertEqual(model.await_count, 3)
         handler.assert_not_awaited(); execute.assert_not_awaited()
+
+    async def test_entry_rejects_worker_tool_disabled_in_current_turn(self):
+        payload = decision("workflow")
+        payload["steps"][0].update(agent="operator", required_tools=["ops_call"])
+        handler, execute = AsyncMock(), AsyncMock()
+        model = AsyncMock(side_effect=[completion(payload), completion(payload), completion(content="工具未开启，未执行")])
+        with patch("src.plugins.ai_chat.deepseek._completion_with_optional_stream", new=model):
+            result = await ask_deepseek_with_tools("检查服务器", [], [TOOL], execute,
+                profile=profile(), entry_handler=handler)
+        self.assertEqual(result, "工具未开启，未执行")
+        self.assertEqual(model.await_count, 3)
+        self.assertIn("operator cannot use ops_call", model.call_args_list[1].kwargs["messages"][-1]["content"])
+        handler.assert_not_awaited()
+        execute.assert_not_awaited()
 
     async def test_delegate_returns_control_to_parent(self):
         with patch("src.plugins.ai_chat.deepseek._completion_with_optional_stream", new=AsyncMock(side_effect=[

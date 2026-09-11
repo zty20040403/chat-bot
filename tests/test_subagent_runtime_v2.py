@@ -115,6 +115,24 @@ class RuntimeV2Tests(unittest.IsolatedAsyncioTestCase):
                 await self.coordinator.prepare_entry(self.packet, self.catalog.default)
         planner.assert_awaited_once()
 
+    async def test_entry_repairs_incapable_worker_before_task_submission(self):
+        invalid = decision("workflow")
+        invalid["steps"][0].update(agent="analyst", required_tools=["ops_call"])
+        valid = json.loads(json.dumps(invalid))
+        valid["steps"][0]["agent"] = "operator"
+        with patch.object(self.coordinator, "_supervisor_json", new=AsyncMock(side_effect=[invalid, valid])) as planner:
+            entry = await self.coordinator.prepare_entry(self.packet, self.catalog.default)
+        self.assertEqual(entry.steps[0]["agent"], "operator")
+        self.assertEqual(planner.await_count, 2)
+        self.assertIn("role_tools", planner.call_args.args[0])
+        self.assertIn("analyst cannot use ops_call", planner.call_args.args[0])
+        self.assertEqual(self.store.recent(), [])
+        with patch.object(self.coordinator, "_supervisor_json", new=AsyncMock(return_value=invalid)) as planner:
+            with self.assertRaises(ExecutionEntryError):
+                await self.coordinator.prepare_entry(self.packet, self.catalog.default)
+        self.assertEqual(planner.await_count, 2)
+        self.assertEqual(self.store.recent(), [])
+
 
     async def test_queued_plan_reuses_entry_and_can_survive_reopen(self):
         task = self.submit()

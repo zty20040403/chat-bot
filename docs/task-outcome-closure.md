@@ -19,7 +19,7 @@ force.
       delivery in one live task detail view, with commands and evidence.
 - [x] Run an actual read-only h610/h310/tank inspection and confirm final delivery
       (task 59; unresolved acceptance is recorded below, not silently promoted).
-- [ ] Exercise authorized cleanup only on explicitly scoped disposable test data;
+- [x] Exercise authorized cleanup only on explicitly scoped disposable test data;
       compare before/after and verify unrelated services/files are untouched.
 - [ ] Commit, deploy and verify the complete flow on h610.
 
@@ -701,3 +701,42 @@ are retained for diagnosis. No expiry or observation timestamp is rewritten.
 Forty focused tests passed, including a deliberately slow facts query, expired
 receipts, stale samples, target isolation and typed acceptance checks. Deployment
 and fresh live verification of this correction remain pending.
+
+## Delegated Bounded Cleanup and Follow-up Findings
+
+The receipt-time correction above was deployed. A separately authorized test
+operation then removed exactly one 16 MiB fixture and its empty directory through
+the ordinary controller approval and execution API. Size, allocation, file
+identity and hash were checked before deletion. The recorded root-disk free-space
+delta was about 15.43 MiB, not precisely 16 MiB because other processes were
+writing concurrently. Service process identities were unchanged across cleanup.
+No database, user file, image, volume or backup was removed.
+
+The user explicitly delegated approval of this bounded test to the administrator
+client. The operation used its normal signed approval endpoint and pinned
+contract/version checks. This is not a successful phone-OTP test, a bypass of
+approval enforcement, or a grant of permanent unattended administration.
+
+The full cleanup task still timed out during final synthesis. Its failure notice
+was delivered. A subsequent read-only verification also delivered its partial
+report, exposing two remaining defects rather than silently claiming completion:
+
+- The controller started cache expiry before awaiting upstream, but cache insertion
+  happened afterwards. A slow upstream could produce a recently inserted cache
+  entry whose payload had already expired. TTL now starts when the reply arrives;
+  cache reads also check the payload expiry. Observation timestamps remain intact.
+- The planner assigned native job-log retrieval to an analyst without that tool.
+  Planning now includes a compact per-role tool manifest and declared required
+  tools. The parser rejects a declared capability missing from that role; the
+  automatic entry also checks the tools enabled for this turn. One bounded
+  planning repair is allowed before creating a task. No role gains new powers.
+
+Inspection prompts now distinguish missing required evidence from warnings
+outside the requested scope. Discovering an alert during a read-only inspection
+does not require repairing it to complete that inspection; missing requested
+data still remains unverified. This does not force a successful result.
+
+The focused 131-test suite passed. Deployment and a fresh real task remain to be
+verified; neither a model's success statement nor these unit tests close the
+remaining end-to-end acceptance gates. Private receipts and operation identifiers
+are retained outside this repository.

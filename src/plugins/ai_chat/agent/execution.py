@@ -35,6 +35,8 @@ execution 需要动手执行，不能 direct；project 或 research_delivery 需
 持久文件写入、项目实现、构建和交付必须由子任务执行。主控保留解释、检索及最终回复。
 任务需要 objective、deliverables、constraints、acceptance。
 outcome_checks 必填，按 acceptance 的从零开始序号逐条声明验收方式，不得遗漏或用空数组跳过。
+每个步骤声明 required_tools，只选择拥有这些工具的角色；主控的工具不能自动传给子 Agent。
+服务器原生 host.metrics、jobs.logs 等接口经 ops_catalog / ops_call 读取，不能只凭“分析”职责名派给缺少接口的角色。
 每条服务器验收必须在文字中明确写出该条 host_id，且只对应一个主机；多台巡检分别列条款。
 criterion_index 必须指向同一主机的那一条，不能把主机巡检检查配到容量报告、授权核对等其他条款；后者另列 evidence。
 服务器巡检用 host_inspection，并为每台目标主机单列条款；空间清理用 disk_delta，指定 host_id、mountpoint 和最低预期变化字节。
@@ -80,8 +82,9 @@ DECISION_TOOL = {
                             "deliverable": {"type": "string"},
                             "depends_on": _STRINGS,
                             "optional": {"type": "boolean"},
+                            "required_tools": _STRINGS,
                         },
-                        "required": ["id", "agent", "objective", "deliverable", "depends_on"],
+                        "required": ["id", "agent", "objective", "deliverable", "depends_on", "required_tools"],
                     },
                 },
             },
@@ -120,8 +123,10 @@ class EntryDecision:
     step_ids: tuple[str, ...] = ()
 
     @classmethod
-    def parse(cls, raw: Mapping[str, Any], *, max_steps: int = 8, contract_version: int = 3) -> "EntryDecision":
+    def parse(cls, raw: Mapping[str, Any], *, max_steps: int = 8, contract_version: int = 3,
+              worker_tools: Mapping[str, frozenset[str]] | None = None) -> "EntryDecision":
         import re
+        from .registry import DEFAULT_AGENT_REGISTRY
 
         def string(key: str, limit: int) -> str:
             value = raw.get(key)
@@ -186,6 +191,15 @@ class EntryDecision:
                 raise ValueError("step IDs must be valid and unique")
             if step.get("agent") not in WORKERS:
                 raise ValueError("unknown worker role")
+            needed = step.get("required_tools", [])
+            if (not isinstance(needed, list) or len(needed) > 16
+                    or any(not isinstance(name, str) or not name for name in needed)):
+                raise ValueError("required_tools must be a list of at most 16 tool names")
+            allowed = (worker_tools.get(step["agent"], frozenset()) if worker_tools is not None
+                       else DEFAULT_AGENT_REGISTRY.worker(step["agent"]).allowed_tools)
+            missing = set(needed) - allowed
+            if missing:
+                raise ValueError(f"worker {step['agent']} cannot use {', '.join(sorted(missing))}; choose a capable role")
             for field in ("objective", "deliverable"):
                 if not isinstance(step.get(field), str) or not step[field].strip() or len(step[field]) > 4000:
                     raise ValueError(f"invalid step {field}")
