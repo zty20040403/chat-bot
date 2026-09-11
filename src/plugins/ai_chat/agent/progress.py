@@ -13,9 +13,11 @@ def task_progress(task: Any, runs: list, evidence: list[dict], external: list[di
     contract = task.plan.get("contract", {})
     validation = task.result.get("validation", {}).get("acceptance", {})
     matrix = validation.get("task_outcome", {}) if isinstance(validation, dict) else {}
+    terminal = task.status in {"completed", "partial", "failed", "cancelled"}
     findings, finished, next_verification, authorization = [], [], [], []
     for run in runs:
-        if run.step_key.startswith("acceptance_r"):
+        if (run.step_key.startswith("acceptance_r")
+                or run.result.get("metadata", {}).get("superseded_by_revision")):
             continue
         for key, target in (("findings", findings), ("completed", finished),
                             ("authorization", authorization), ("next_verification", next_verification)):
@@ -33,11 +35,16 @@ def task_progress(task: Any, runs: list, evidence: list[dict], external: list[di
         result = record.get("result") or {}
         request = item.get("request") or {}
         arguments = record.get("arguments") or request.get("tool_arguments") or {}
+        observed_status = record.get("status", item["status"])
+        ended_approval = terminal and observed_status == "awaiting_approval"
         operations.append({"run_id": item["run_id"], "call_id": item["call_id"],
-            "remote_path": item.get("remote_path"), "status": record.get("status", item["status"]),
+            "remote_path": item.get("remote_path"), "status": "unverified" if ended_approval else observed_status,
+            "last_observed_status": observed_status,
             "host_id": record.get("host_id") or result.get("host") or arguments.get("params", {}).get("host"),
             "updated_at": item["updated_at"], "arguments": redact(arguments),
-            "summary": result.get("summary", ""), "verification": result.get("verification"),
+            "summary": ("本轮任务已结束；这是最后一次授权观测，不代表现在仍可批准或已经执行。"
+                        if ended_approval else result.get("summary", "")),
+            "verification": result.get("verification"),
             "error": record.get("error_code") or record.get("error") or ""})
     historical = {}
     for item in evidence:
@@ -60,7 +67,6 @@ def task_progress(task: Any, runs: list, evidence: list[dict], external: list[di
             "error": ""})
     approval_relevant = bool(approval_checks)
     approval_confirmed = approval_relevant and all(approval_checks)
-    terminal = task.status in {"completed", "partial", "failed", "cancelled"}
     active = task.status in {"running", "planning", "verifying", "waiting_external"}
     file_rows = [item for item in deliveries if item["revision"] == revision]
     files_confirmed = not contract.get("delivery_required") or bool(file_rows) and all(item["state"] == "acknowledged" for item in file_rows)
@@ -73,8 +79,8 @@ def task_progress(task: Any, runs: list, evidence: list[dict], external: list[di
          "detail": f"{len(evidence)} 条宿主工具证据"},
         {"key": "findings", "label": "发现问题", "status": "completed" if terminal or findings else "running" if active else "pending",
          "detail": f"{len(findings)} 条发现，{len(next_verification)} 项待补查"},
-        {"key": "authorization", "label": "授权", "status": "waiting" if waiting_approval else "completed" if approval_confirmed else "unverified" if approval_relevant else "not_required",
-         "detail": "等待本任务授权" if waiting_approval else "已记录批准凭据" if approval_confirmed else "操作记录未提供批准凭据" if approval_relevant else "未发生需授权的服务器操作"},
+        {"key": "authorization", "label": "授权", "status": "unverified" if terminal and waiting_approval else "waiting" if waiting_approval else "completed" if approval_confirmed else "unverified" if approval_relevant else "not_required",
+         "detail": "本轮已结束，未取得有效授权；旧请求不能继续本轮任务" if terminal and waiting_approval else "等待本任务授权" if waiting_approval else "已记录批准凭据" if approval_confirmed else "操作记录未提供批准凭据" if approval_relevant else "未发生需授权的服务器操作"},
         {"key": "execution", "label": "执行", "status": task.result.get("execution_state") or ("completed" if task.status == "completed" else task.status),
          "detail": f"{len(finished)} 项已记录的完成工作"},
         {"key": "verification", "label": "复查", "status": matrix.get("status") or ("running" if task.status == "verifying" else "unverified" if terminal else "pending"),

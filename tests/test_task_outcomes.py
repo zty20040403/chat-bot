@@ -257,6 +257,34 @@ class TaskEvidenceTests(unittest.TestCase):
         self.assertEqual(result["stages"][2]["status"], "completed")
         self.assertTrue(result["operations"][0]["verification"]["verified"])
 
+    def test_terminal_timeline_does_not_offer_stale_approval_as_waiting(self):
+        record = {"operation_id": "op_test", "host_id": "h610", "status": "awaiting_approval"}
+        external = [{"run_id": self.run.run_id, "call_id": "scan", "status": "pending",
+            "updated_at": 1010, "response": {"operation": record}}]
+        for status in ("completed", "partial", "failed", "cancelled"):
+            with self.subTest(status=status):
+                self.store.set_task_state(self.task.task_id, status)
+                result = task_progress(self.store.get(self.task.task_id), [], [], external, [], None, revision=1)
+                self.assertEqual(result["stages"][2]["status"], "unverified")
+                self.assertIn("本轮已结束", result["stages"][2]["detail"])
+                self.assertEqual(result["operations"][0]["status"], "unverified")
+                self.assertEqual(result["operations"][0]["last_observed_status"], "awaiting_approval")
+                self.assertIn("不代表现在仍可批准或已经执行", result["operations"][0]["summary"])
+        self.assertEqual(record["status"], "awaiting_approval")
+        self.assertNotIn("approval_ref", record)
+
+    def test_timeline_excludes_superseded_repair_findings(self):
+        old = SimpleNamespace(run_id=10, step_key="report__repair_1", result={
+            "metadata": {"superseded_by_revision": 2}, "findings": ["旧结论"],
+            "completed": ["旧工作"], "authorization": ["旧授权"], "next_verification": ["旧计划"]})
+        current = SimpleNamespace(run_id=11, step_key="inspect-tank", result={
+            "findings": ["本轮结论"], "completed": [], "authorization": [], "next_verification": []})
+        result = task_progress(self.store.get(self.task.task_id), [old, current], [], [], [], None, revision=2)
+        self.assertEqual([item["value"] for item in result["findings"]], ["本轮结论"])
+        self.assertEqual(result["completed"], [])
+        self.assertEqual(result["authorization"], [])
+        self.assertEqual(result["next_verification"], [])
+
 
 class OutcomeContractTests(unittest.TestCase):
     def test_entry_persists_typed_requirements(self):
