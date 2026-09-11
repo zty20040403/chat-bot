@@ -311,7 +311,31 @@ class OutcomeContractTests(unittest.TestCase):
         parsed = EntryDecision.parse(raw)
         restored = EntryDecision.from_payload(parsed.as_payload())
         self.assertEqual(restored.contract, parsed.contract)
-        self.assertEqual(parsed.contract.as_payload()["version"], 2)
+        self.assertEqual(parsed.contract.as_payload()["version"], 3)
+
+    def test_new_entry_rejects_crossed_and_grouped_target_checks(self):
+        raw = decision("delegate")
+        raw["acceptance"] = ["检查 node-a", "检查 node-b"]
+        raw["outcome_checks"] = [
+            {"criterion_index": 0, "kind": "host_inspection", "host_id": "node-a"},
+            {"criterion_index": 1, "kind": "host_inspection", "host_id": "node-b"}]
+        for criteria in (["检查 node-a、node-b", "检查 node-b"],
+                         ["检查 node-b", "检查 node-a"],
+                         ["检查 node-a2", "检查 node-b"],
+                         ["检查 node-a", "node-a 的授权是否批准"]):
+            with self.subTest(criteria=criteria), self.assertRaisesRegex(ValueError, "must name only target host"):
+                EntryDecision.parse({**raw, "acceptance": criteria})
+        EntryDecision.parse({**raw, "acceptance": ["NODE-A（磁盘/服务）", "node-b 的资源状态"]})
+
+    def test_old_contract_keeps_its_version_and_binding_compatibility(self):
+        raw = decision("delegate")
+        raw["acceptance"] = ["验证目标"]
+        raw["outcome_checks"] = [{"criterion_index": 0, "kind": "host_inspection", "host_id": "node-a"}]
+        old = EntryDecision.from_payload({**raw, "contract": {"version": 2}})
+        self.assertEqual(old.contract.as_payload()["version"], 2)
+        self.assertEqual(EntryDecision.from_payload(old.as_payload()).contract, old.contract)
+        with self.assertRaisesRegex(ValueError, "must name only target host"):
+            EntryDecision.from_payload({**raw, "contract": {"version": 3}})
 
     def test_invalid_checks_are_rejected_and_omissions_still_need_review(self):
         self.assertEqual(normalize_checks([], ["prove it"])[0]["kind"], "evidence")

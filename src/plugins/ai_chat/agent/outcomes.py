@@ -51,6 +51,21 @@ def normalize_checks(raw: Any, criteria: tuple[str, ...] | list[str]) -> tuple[d
                  for index in range(len(criteria)))
 
 
+def validate_check_targets(checks: tuple[dict, ...], criteria: tuple[str, ...] | list[str]) -> None:
+    """Catch crossed target/index bindings before a new contract can execute."""
+    hosts = {check["host_id"] for check in checks if check["kind"] != "evidence"}
+    for check in checks:
+        if check["kind"] == "evidence":
+            continue
+        index, target = check["criterion_index"], check["host_id"]
+        mentioned = {host for host in hosts if re.search(
+            rf"(?<![A-Za-z0-9_-]){re.escape(host)}(?![A-Za-z0-9_-])", criteria[index], re.IGNORECASE)}
+        if mentioned != {target}:
+            raise ValueError(
+                f"acceptance[{index}] must name only target host {target} for its {check['kind']} check; "
+                "split multi-host criteria and keep outcome_checks aligned with their criterion_index")
+
+
 def timestamp(value: Any) -> float | None:
     if type(value) in (int, float):
         return float(value) if math.isfinite(value) else None
@@ -294,6 +309,8 @@ def evaluate_acceptance(contract: Mapping[str, Any], evidence: list[dict], revie
                         *, task_created_at: int) -> dict:
     criteria = contract.get("acceptance", [])
     checks = normalize_checks(contract.get("outcome_checks"), criteria)
+    if contract.get("version", 1) >= 3:
+        validate_check_targets(checks, criteria)
     reviews = reviewer.get("metadata", {}).get("criterion_reviews", [])
     reviews = reviews if isinstance(reviews, list) else []
     by_ref = {item["evidence_id"]: item for item in evidence}

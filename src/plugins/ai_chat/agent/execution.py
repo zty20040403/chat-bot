@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from contextvars import ContextVar
 from typing import Any, Mapping
-from .outcomes import CHECK_SCHEMA, normalize_checks
+from .outcomes import CHECK_SCHEMA, normalize_checks, validate_check_targets
 
 
 WORKERS = ("researcher", "coder", "document", "media", "analyst", "operator")
@@ -35,6 +35,8 @@ execution 需要动手执行，不能 direct；project 或 research_delivery 需
 持久文件写入、项目实现、构建和交付必须由子任务执行。主控保留解释、检索及最终回复。
 任务需要 objective、deliverables、constraints、acceptance。
 outcome_checks 必填，按 acceptance 的从零开始序号逐条声明验收方式，不得遗漏或用空数组跳过。
+每条服务器验收必须在文字中明确写出该条 host_id，且只对应一个主机；多台巡检分别列条款。
+criterion_index 必须指向同一主机的那一条，不能把主机巡检检查配到容量报告、授权核对等其他条款；后者另列 evidence。
 服务器巡检用 host_inspection，并为每台目标主机单列条款；空间清理用 disk_delta，指定 host_id、mountpoint 和最低预期变化字节。
 服务启停重启用 service_effect，指定 host_id、完整 unit 和 action；整机重启用 host_reboot。
 其他内容用 evidence，由独立验收人逐项引用宿主证据。不能以“命令退出零”替代这些目标检查。
@@ -97,9 +99,10 @@ class TaskContract:
     acceptance: tuple[str, ...]
     delivery_required: bool = False
     outcome_checks: tuple[dict[str, Any], ...] = ()
+    version: int = 3
 
     def as_payload(self) -> dict[str, Any]:
-        return {"version": 2, "objective": self.objective,
+        return {"version": self.version, "objective": self.objective,
                 "deliverables": list(self.deliverables), "constraints": list(self.constraints),
                 "acceptance": list(self.acceptance), "delivery_required": self.delivery_required,
                 "outcome_checks": list(normalize_checks(list(self.outcome_checks), self.acceptance))}
@@ -117,7 +120,7 @@ class EntryDecision:
     step_ids: tuple[str, ...] = ()
 
     @classmethod
-    def parse(cls, raw: Mapping[str, Any], *, max_steps: int = 8) -> "EntryDecision":
+    def parse(cls, raw: Mapping[str, Any], *, max_steps: int = 8, contract_version: int = 3) -> "EntryDecision":
         import re
 
         def string(key: str, limit: int) -> str:
@@ -148,8 +151,13 @@ class EntryDecision:
         raw_checks = raw.get("outcome_checks")
         if not isinstance(raw_checks, list) or len(raw_checks) != len(acceptance):
             raise ValueError("outcome_checks must explicitly cover every acceptance criterion")
+        if type(contract_version) is not int or contract_version not in {1, 2, 3}:
+            raise ValueError("Unsupported task contract version")
+        checks = normalize_checks(raw_checks, acceptance)
+        if contract_version >= 3:
+            validate_check_targets(checks, acceptance)
         contract = TaskContract(objective, strings("deliverables"), strings("constraints"), acceptance,
-                                delivery_required, normalize_checks(raw_checks, acceptance))
+                                delivery_required, checks, contract_version)
         steps = raw.get("steps")
         if mode not in {"direct", "delegate", "workflow", "revise"} or not reason or not isinstance(steps, list):
             raise ValueError("mode, reason and steps are required")
@@ -206,9 +214,12 @@ class EntryDecision:
     def from_payload(cls, payload: Mapping[str, Any], *, max_steps: int = 8) -> "EntryDecision":
         contract = payload.get("contract", {})
         raw = {**payload, **contract, "answer": payload.get("answer", "")}
-        if contract.get("version", 1) < 2:
+        version = contract.get("version", 1)
+        if type(version) is not int or version not in {1, 2, 3}:
+            raise ValueError("Unsupported task contract version")
+        if version < 2:
             raw["outcome_checks"] = list(normalize_checks(raw.get("outcome_checks"), raw.get("acceptance", [])))
-        return cls.parse(raw, max_steps=max_steps)
+        return cls.parse(raw, max_steps=max_steps, contract_version=version)
 
 
 def normalize_direct_entry_payload(raw: Mapping[str, Any]) -> dict[str, Any] | None:

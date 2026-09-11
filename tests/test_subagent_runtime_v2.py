@@ -61,7 +61,7 @@ class RuntimeV2Tests(unittest.IsolatedAsyncioTestCase):
     async def test_explicit_task_entry_gets_the_same_acceptance_contract(self):
         with patch.object(self.coordinator, "_supervisor_json", new=AsyncMock(return_value=decision("workflow"))) as planner:
             entry = await self.coordinator.prepare_entry(self.packet, self.catalog.default)
-        self.assertEqual(entry.contract.as_payload()["version"], 2)
+        self.assertEqual(entry.contract.as_payload()["version"], 3)
         self.assertTrue(entry.contract.acceptance)
         planner.assert_awaited_once()
         self.assertIn(json.dumps(DECISION_TOOL["function"]["parameters"], ensure_ascii=False), planner.call_args.args[0])
@@ -80,6 +80,25 @@ class RuntimeV2Tests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("answer must be a string", planner.call_args.args[0])
         self.assertEqual(self.store.recent(), [])
         with patch.object(self.coordinator, "_supervisor_json", new=AsyncMock(return_value=incomplete)) as planner:
+            with self.assertRaises(ExecutionEntryError):
+                await self.coordinator.prepare_entry(self.packet, self.catalog.default)
+        self.assertEqual(planner.await_count, 2)
+        self.assertEqual(self.store.recent(), [])
+
+    async def test_explicit_entry_repairs_crossed_host_bindings_before_submit(self):
+        valid = decision("workflow")
+        valid["acceptance"] = ["检查 node-a", "检查 node-b"]
+        valid["outcome_checks"] = [
+            {"criterion_index": 0, "kind": "host_inspection", "host_id": "node-a"},
+            {"criterion_index": 1, "kind": "host_inspection", "host_id": "node-b"}]
+        invalid = {**valid, "acceptance": ["检查 node-a、node-b", "node-a 容量报告"]}
+        with patch.object(self.coordinator, "_supervisor_json", new=AsyncMock(side_effect=[invalid, valid])) as planner:
+            entry = await self.coordinator.prepare_entry(self.packet, self.catalog.default)
+        self.assertEqual(planner.await_count, 2)
+        self.assertIn("must name only target host", planner.call_args.args[0])
+        self.assertEqual(entry.contract.acceptance, tuple(valid["acceptance"]))
+        self.assertEqual(self.store.recent(), [])
+        with patch.object(self.coordinator, "_supervisor_json", new=AsyncMock(return_value=invalid)) as planner:
             with self.assertRaises(ExecutionEntryError):
                 await self.coordinator.prepare_entry(self.packet, self.catalog.default)
         self.assertEqual(planner.await_count, 2)

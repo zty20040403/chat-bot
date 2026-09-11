@@ -660,3 +660,25 @@ including all five simulated process-loss boundaries with zero timestamps, passe
 These observations cover file transport recovery, not the outstanding
 Bot-controller cleanup authorization and fresh inspection-coverage gates. Private
 receipt records are kept outside this repository.
+
+## Per-Host Acceptance Binding
+
+A fresh live inspection plan exposed crossed acceptance bindings: one clause
+grouped several machines, while individual host checks referenced clauses about
+another machine. Checking array lengths and unique criterion indexes had not
+caught this mismatch. The task was cancelled before cleanup; its pending native
+operations had no execution attempts. Cancelled task authorization is invalid and
+must not be reused by a replacement task.
+
+New version-three contracts require each machine-checked clause to name its
+target host, without naming another checked host. Multi-host inspections must
+use separate clauses. The existing bounded planner repair runs before submission;
+an unrepaired contract does not create a task. Acceptance evaluation repeats the
+binding check. Persisted version-one and version-two contracts retain their
+version and resume compatibility. This is a target/index consistency guard, not
+proof that every natural-language requirement has been verified.
+
+The focused suite passed 124 tests covering parser rejection, bounded repair,
+legacy recovery, worker reports and external continuations. The replacement
+live inspection and user-authorized cleanup remain outstanding; local test
+results do not establish those gates as complete.
