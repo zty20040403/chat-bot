@@ -627,3 +627,9 @@ The focused suite passed 93 tests, including a real local PostgreSQL offline-wai
 reopen test, simulated QQ uploads and actual SIGKILL of owned test children.
 The live production crash-boundary and Bot-controller cleanup gates remain open.
 Restoring QQ login requires the user's own scan and confirmation.
+
+For deployment acceptance, compare the running package with the intended pin,
+check relevant service identities before and after activation, and inspect
+existing file receipts without requeueing acknowledged deliveries. Local tests
+do not establish live account or transport availability. Keep actual server,
+account and deployment records in private audit storage, not public documentation.
