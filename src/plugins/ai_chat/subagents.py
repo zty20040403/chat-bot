@@ -2615,7 +2615,8 @@ class SubAgentCoordinator:
                     queued = self.store.queue_file(task.task_id, raw_artifact, filename)
                     payload = await attempt_file(self.store, task.task_id, queued,
                         prepare=lambda item: hooks.workspaces.prepare_delivery(task.task_id, item),
-                        send=hooks.workspaces.executor.send_file_content)
+                        send=hooks.workspaces.executor.send_file_content,
+                        readiness=hooks.workspaces.executor.file_delivery_blocker)
                     raw_artifact["delivery"] = payload
                     deliveries.append(payload)
                     self.store.append_checkpoint(task.task_id, "artifact_delivery", {"run_id": outcome.run.run_id,

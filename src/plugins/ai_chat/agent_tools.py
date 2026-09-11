@@ -62,6 +62,7 @@ from .onebot_codec import (
     render_api_attachments,
 )
 from .onebot_model_output import OneBotModelOutputResolver
+from .onebot_availability import file_delivery_blocker
 from .sandbox import DockerSandboxManager, SandboxError
 from .storage.jobs import DurableJobStore
 from .turn_journal import TurnJournal
@@ -981,6 +982,10 @@ class AgentToolExecutor:
             pdf_validation=pdf_validation,
         )
 
+    async def file_delivery_blocker(self) -> str | None:
+        """A connected adapter can still belong to a logged-out QQ account."""
+        return await file_delivery_blocker(self.bot)
+
     async def send_file_content(
         self,
         content: bytes,
@@ -1003,6 +1008,10 @@ class AgentToolExecutor:
                     f"{self.max_file_bytes} 字节。"
                 ),
             )
+        blocker = await self.file_delivery_blocker()
+        if blocker is not None:
+            return _json_result(ok=False, not_sent=True, retryable=True, error=blocker,
+                                state="not_sent", blocked_reason="transport_unavailable")
         safe_filename = self._safe_filename(filename)
         upload_started_at = int(time.time())
         response = await self.bot.call_api(

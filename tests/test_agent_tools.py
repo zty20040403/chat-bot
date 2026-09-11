@@ -26,6 +26,7 @@ class FakeBot:
         self.sent_messages: list[Any] = []
         self.uploads: list[dict[str, Any]] = []
         self.confirm_uploads = True
+        self.online = True
         self.group_files: list[dict[str, Any]] = [
             {
                 "file_id": "file-1",
@@ -65,6 +66,8 @@ class FakeBot:
         }
 
     async def call_api(self, api: str, **data: Any) -> Any:
+        if api == "get_status":
+            return {"online": self.online, "good": True}
         if api == "get_group_msg_history":
             return {
                 "messages": [
@@ -282,6 +285,25 @@ class AgentToolExecutorTests(unittest.IsolatedAsyncioTestCase):
             ledger=self.ledger,
             scope=self.scope,
         )
+
+    async def test_offline_file_is_not_uploaded(self) -> None:
+        self.bot.online = False
+        result = json.loads(await self.executor.send_file_content(b"test", "test.txt"))
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["not_sent"])
+        self.assertTrue(result["retryable"])
+        self.assertEqual(result["state"], "not_sent")
+        self.assertFalse(self.bot.uploads)
+
+    async def test_file_status_failure_does_not_attempt_upload(self) -> None:
+        for response in (None, {"online": "true"}, {"online": True, "good": False}):
+            with self.subTest(response=response), patch.object(self.bot, "call_api", return_value=response) as api:
+                self.assertIsNotNone(await self.executor.file_delivery_blocker())
+                api.assert_awaited_once_with("get_status")
+        with patch.object(self.bot, "call_api", side_effect=TimeoutError()) as api:
+            result = json.loads(await self.executor.send_file_content(b"test", "test.txt"))
+            self.assertTrue(result["not_sent"])
+            api.assert_awaited_once_with("get_status")
 
     async def test_search_messages_filters_current_history(self) -> None:
         result = json.loads(

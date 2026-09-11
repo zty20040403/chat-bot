@@ -11,6 +11,7 @@ from .control import JobFence, LeaseLost, active_job_fence
 from .workspaces import StepWorkspaces, prune_acknowledged_artifacts
 from .workspace_cleanup import prune_task_workspaces
 from ..onebot_codec import scope_from_event, decode_onebot_message
+from ..onebot_availability import file_delivery_blocker
 from ..deepseek import DeepSeekTrace
 from ..workers.durable_jobs import DurableJobWorker, JobDeferred
 from .external import poll_external
@@ -241,7 +242,8 @@ class SubAgentDispatcher:
                 continue
             async with asyncio.timeout(120):
                 await attempt_file(self.store, task_id, delivery,
-                    prepare=lambda item: workspaces.prepare_delivery(task_id, item), send=executor.send_file_content)
+                    prepare=lambda item: workspaces.prepare_delivery(task_id, item), send=executor.send_file_content,
+                    readiness=executor.file_delivery_blocker)
 
     async def prune_workspaces(self):
         root = self.context.state_dir / "subagent_artifacts"
@@ -271,6 +273,9 @@ class SubAgentDispatcher:
         bot = get_bot(str(dispatch["bot_id"]))
         if not isinstance(event, GroupMessageEvent):
             return {"matched": 0}
+        blocker = await file_delivery_blocker(bot)
+        if blocker is not None:
+            return {"matched": 0, "state": "deferred", "error": blocker}
         response = await bot.call_api("get_group_root_files", group_id=event.group_id)
         files = response.get("files", []) if isinstance(response, dict) else []
         matched = 0

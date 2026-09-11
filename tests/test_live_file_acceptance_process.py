@@ -34,6 +34,8 @@ class AcceptanceHarnessProcessTests(unittest.TestCase):
                     action, params = body["action"], body["params"]
                     if action == "get_login_info":
                         data = {"user_id": 123}
+                    elif action == "get_status" and not params:
+                        data = {"online": True, "good": True}
                     elif action == "get_group_root_files" and params == {"group_id": 456, "file_count": 50}:
                         data = {"files": files}
                     elif action == "upload_group_file" and params["group_id"] == 456:

@@ -117,7 +117,7 @@ class NapCatTransport:
             raise AcceptanceError("The logged-in QQ account does not match the approved account")
 
     async def call_api(self, action: str, **params):
-        if action == "get_login_info":
+        if action in {"get_login_info", "get_status"}:
             allowed = not params
         elif action == "get_group_root_files":
             allowed = params == {"group_id": self.group_id}
@@ -355,6 +355,11 @@ async def run_live(args):
         token_data = read_token(args.token_file)
         transport = NapCatTransport(config["url"], "", args.bot_id, args.group_id, directory)
         await transport.login(token_data)
+        report["phase"] = "preflight_online"
+        save()
+        status = await transport.call_api("get_status")
+        if not isinstance(status, dict) or status.get("online") is not True or status.get("good") is False:
+            raise AcceptanceError("QQ account is offline or its online state is unconfirmed; no upload attempted")
         report["phase"] = "preflight_group_files"
         save()
         await transport.call_api("get_group_root_files", group_id=args.group_id)

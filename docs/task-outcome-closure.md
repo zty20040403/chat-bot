@@ -602,3 +602,28 @@ complete directory total. No existing images, volumes, databases or user files
 were removed. All internal receipts, operational identifiers and private raw
 reports remain outside the public repository. The harness is opt-in and does
 not require a production restart merely to publish it.
+
+## Offline QQ Is Not a Connected Transport
+
+Follow-up live read-only inspection established the missing distinction:
+OneBot reported `online=false`, and the separate WebUI login status reported
+`isLogin=false`. Cached account and group metadata still returned successfully.
+Those responses and a connected WebSocket do not prove the QQ account is online.
+The real upload gate is blocked on user login, not accepted and not a reason to
+replay previously delivered reports.
+
+File delivery now checks account availability before preparing or claiming a
+durable upload. Offline, malformed or unavailable status leaves the manifest
+queued with a persisted reason and retry time, without spending upload or
+artifact-preparation retry budgets. Reopening storage retains that state.
+Current-revision, cancellation, job-ownership and concurrent-claim fences still
+apply. A direct tool call reports not sent, not a fabricated queued delivery.
+Already ambiguous uploads remain ambiguous while offline; reconciliation waits
+for availability rather than repeatedly timing out or blindly sending again.
+Old unambiguous receipts are not rewritten. The live acceptance harness now
+checks online status before its group-file preflight.
+
+The focused suite passed 93 tests, including a real local PostgreSQL offline-wait
+reopen test, simulated QQ uploads and actual SIGKILL of owned test children.
+The live production crash-boundary and Bot-controller cleanup gates remain open.
+Restoring QQ login requires the user's own scan and confirmation.

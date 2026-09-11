@@ -67,7 +67,9 @@ class FileOutboxStoreMixin:
             payload = json.loads(row["payload_json"])
             if payload.get("next_attempt_at", 0) > now:
                 return None
-            payload.update(attempts=payload.get("attempts", 0) + 1, upload_started_at=now, state="sending")
+            payload.pop("blocked_reason", None)
+            payload.update(attempts=payload.get("attempts", 0) + 1, upload_started_at=now, state="sending",
+                           not_sent=False, retryable=False, error="")
             cursor.execute("""UPDATE subagent_deliveries SET state='sending', payload_json=?, updated_at=?
                 WHERE task_id=? AND revision=? AND delivery_key=? AND state='queued'""",
                 (json.dumps(payload, ensure_ascii=False), now, task_id, delivery["revision"], delivery["key"]))
@@ -83,6 +85,33 @@ class FileOutboxStoreMixin:
             cursor.execute("""UPDATE subagent_deliveries SET state=?, payload_json=?, updated_at=?
                 WHERE task_id=? AND revision=? AND delivery_key=? AND state='queued'""",
                 (state, json.dumps(payload, ensure_ascii=False), int(time.time()), task_id, delivery["revision"], delivery["key"]))
+        self._notify_changed(task_id)
+        return payload
+
+    def defer_file_availability(self, task_id: int, delivery: dict, error: str) -> dict:
+        """An offline transport has not attempted upload or damaged the artifact."""
+        assert_job_owned()
+        now = int(time.time())
+        with self._transaction() as cursor:
+            lock = "" if self._legacy_sqlite else " FOR UPDATE"
+            control = cursor.execute("SELECT revision FROM subagent_controls WHERE task_id=?" + lock, (task_id,)).fetchone()
+            task = cursor.execute("SELECT cancel_requested FROM subagent_tasks WHERE task_id=?", (task_id,)).fetchone()
+            row = cursor.execute("""SELECT state, payload_json FROM subagent_deliveries
+                WHERE task_id=? AND revision=? AND delivery_key=?""" + lock,
+                (task_id, delivery["revision"], delivery["key"])).fetchone()
+            if row is None:
+                raise ValueError("File delivery manifest disappeared")
+            payload = json.loads(row["payload_json"])
+            current_revision = int(control["revision"]) if control else 1
+            if (row["state"] != "queued" or payload != delivery["payload"]
+                    or current_revision != delivery["revision"] or not task or task["cancel_requested"]):
+                return {**payload, "state": row["state"], "ok": row["state"] == "acknowledged"}
+            payload.update(state="queued", ok=False, not_sent=True, retryable=True,
+                           availability_checks=int(payload.get("availability_checks", 0)) + 1,
+                           blocked_reason="transport_unavailable", error=error, next_attempt_at=now + 30)
+            cursor.execute("""UPDATE subagent_deliveries SET payload_json=?, updated_at=?
+                WHERE task_id=? AND revision=? AND delivery_key=? AND state='queued'""",
+                (json.dumps(payload, ensure_ascii=False), now, task_id, delivery["revision"], delivery["key"]))
         self._notify_changed(task_id)
         return payload
 
@@ -118,11 +147,15 @@ class FileOutboxStoreMixin:
         return payload
 
 
-async def attempt_file(store: Any, task_id: int, delivery: dict, *, prepare, send) -> dict:
+async def attempt_file(store: Any, task_id: int, delivery: dict, *, prepare, send, readiness=None) -> dict:
     if delivery["state"] != "queued":
         return {**delivery["payload"], "state": delivery["state"], "ok": delivery["state"] == "acknowledged"}
     if delivery["payload"].get("next_attempt_at", 0) > time.time():
         return delivery["payload"]
+    if readiness is not None:
+        blocker = await readiness()
+        if blocker is not None:
+            return store.defer_file_availability(task_id, delivery, blocker)
     # Read and verify bytes before marking an upload as possibly sent.
     try:
         content = await prepare(delivery["payload"]["artifact"])

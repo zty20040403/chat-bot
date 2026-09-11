@@ -148,6 +148,58 @@ class TaskFileOutboxTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["state"], "rejected")
         self.send.assert_not_awaited()
 
+    async def test_offline_wait_survives_restart_without_spending_retry_budget(self):
+        self.queue()
+        readiness = AsyncMock(return_value="QQ offline")
+        for _ in range(8):
+            row = self.store.deliveries(self.task.task_id)[0]
+            with patch("src.plugins.ai_chat.agent.file_outbox.time.time", return_value=row["payload"]["next_attempt_at"] + 1):
+                result = await attempt_file(self.store, self.task.task_id, row,
+                    prepare=self.prepare, send=self.send, readiness=readiness)
+            self.assertEqual(result["state"], "queued")
+            self.assertEqual(result["attempts"], 0)
+            self.assertEqual(result["artifact"], self.artifact)
+            self.store.close()
+            self.store = SubAgentStore(self.path)
+        self.prepare.assert_not_awaited()
+        self.send.assert_not_awaited()
+        self.assertEqual(result["availability_checks"], 8)
+        readiness.return_value = None
+        with patch("src.plugins.ai_chat.agent.file_outbox.time.time", return_value=result["next_attempt_at"] + 1):
+            result = await attempt_file(self.store, self.task.task_id, self.store.deliveries(self.task.task_id)[0],
+                prepare=self.prepare, send=self.send, readiness=readiness)
+        self.assertTrue(result["ok"])
+        self.assertNotIn("blocked_reason", result)
+        self.assertFalse(result["not_sent"])
+        self.assertEqual(result["attempts"], 1)
+        self.send.assert_awaited_once()
+
+    async def test_readiness_backoff_and_stale_wait_cannot_clobber_claim(self):
+        row = self.queue()
+        blocked = self.store.defer_file_availability(self.task.task_id, row, "offline")
+        ready = AsyncMock(return_value=None)
+        await attempt_file(self.store, self.task.task_id, self.store.deliveries(self.task.task_id)[0],
+            prepare=self.prepare, send=self.send, readiness=ready)
+        ready.assert_not_awaited()
+        stale = self.store.deliveries(self.task.task_id)[0]
+        with patch("src.plugins.ai_chat.agent.file_outbox.time.time", return_value=blocked["next_attempt_at"] + 1):
+            claim = self.store.claim_file(self.task.task_id, stale)
+        result = self.store.defer_file_availability(self.task.task_id, stale, "late offline reply")
+        self.assertEqual(result["state"], "sending")
+        self.assertEqual(result["attempts"], claim["attempts"])
+        self.assertNotIn("blocked_reason", result)
+
+    async def test_offline_wait_respects_revision_and_cancellation_fences(self):
+        old = self.queue()
+        self.store.update_control(self.task.task_id, expected_version=0, revision=2)
+        self.store.defer_file_availability(self.task.task_id, old, "offline")
+        self.assertEqual(self.store.deliveries(self.task.task_id)[0]["payload"], old["payload"])
+        row = self.queue()
+        self.store.request_cancel(self.task.task_id)
+        self.store.defer_file_availability(self.task.task_id, row, "offline")
+        current = next(item for item in self.store.deliveries(self.task.task_id) if item["revision"] == 2)
+        self.assertEqual(current["payload"], row["payload"])
+
     async def test_revision_and_cancellation_fence_stale_dispatch(self):
         row = self.queue()
         self.store.update_control(self.task.task_id, expected_version=0, revision=2)

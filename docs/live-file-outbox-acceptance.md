@@ -54,8 +54,10 @@ The WebUI URL must be an already available loopback HTTP(S) endpoint, with no
 credentials, path, query or fragment in the URL. Requests do not use system
 proxies or follow redirects. The client reuses NapCat's authenticated
 `/api/Debug/call` interface; it does not open a separate OneBot server. Only login
-identity, the approved group's root file list and exact generated uploads are
-allowed. Second-factor requirements and account mismatches stop the run.
+identity, online status, the approved group's root file list and exact generated
+uploads are allowed. Second-factor requirements, account mismatches, offline or
+unconfirmed online status stop the run. Cached account identity is not evidence
+that QQ is online.
 
 Credentials remain in memory. The private `result.json` contains the current
 phase, case states, hashes and receipts but no tokens or DSN. Preflight failures

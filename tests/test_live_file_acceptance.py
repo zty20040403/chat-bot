@@ -9,7 +9,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, patch
 
 import httpx
 
@@ -153,12 +153,12 @@ class LiveFileAcceptanceTests(unittest.IsolatedAsyncioTestCase):
             requester_id=789, output_dir=self.root / "output", token_file=token)
         with patch.dict("os.environ", TEST_POSTGRES_DSN="dbname=gaoji_acceptance", AI_POSTGRES_DSN=""), \
                 patch.object(NapCatTransport, "login", new_callable=AsyncMock), \
-                patch.object(NapCatTransport, "call_api", side_effect=AcceptanceError("QQ unavailable")) as api, \
+                patch.object(NapCatTransport, "call_api", side_effect=[{"online": True}, AcceptanceError("QQ unavailable")]) as api, \
                 patch("psycopg.connect") as connect:
             with self.assertRaises(AcceptanceError):
                 await run_live(args)
         connect.assert_not_called()
-        api.assert_awaited_once_with("get_group_root_files", group_id=456)
+        self.assertEqual(api.await_args_list, [call("get_status"), call("get_group_root_files", group_id=456)])
         raw = (args.output_dir / "result.json").read_text()
         report = json.loads(raw)
         self.assertEqual(report["phase"], "preflight_group_files")
@@ -166,6 +166,23 @@ class LiveFileAcceptanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report["schema_cleanup"], "not_created")
         self.assertFalse(report["cases"])
         self.assertNotIn("test-secret", raw)
+
+    async def test_offline_account_stops_before_group_query_database_and_upload(self):
+        token = self.root / "token"
+        token.write_text("test-secret")
+        args = SimpleNamespace(webui_url="http://127.0.0.1:6100", bot_id=123, group_id=456,
+            requester_id=789, output_dir=self.root / "output", token_file=token)
+        with patch.dict("os.environ", TEST_POSTGRES_DSN="dbname=gaoji_acceptance", AI_POSTGRES_DSN=""), \
+                patch.object(NapCatTransport, "login", new_callable=AsyncMock), \
+                patch.object(NapCatTransport, "call_api", return_value={"online": False, "good": True}) as api, \
+                patch("psycopg.connect") as connect:
+            with self.assertRaisesRegex(AcceptanceError, "offline"):
+                await run_live(args)
+        connect.assert_not_called()
+        api.assert_awaited_once_with("get_status")
+        report = json.loads((args.output_dir / "result.json").read_text())
+        self.assertEqual(report["phase"], "preflight_online")
+        self.assertEqual(report["schema_cleanup"], "not_created")
 
 
 if __name__ == "__main__":

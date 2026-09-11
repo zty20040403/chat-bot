@@ -490,7 +490,7 @@ class RuntimeV2Tests(unittest.IsolatedAsyncioTestCase):
         jobs = DurableJobStore(Path(self.tmp.name) / "receipt-jobs.sqlite3")
         bot = Mock(self_id=123)
         bot.call_api = AsyncMock(
-            return_value={
+            side_effect=lambda action, **params: {"online": True, "good": True} if action == "get_status" else {
                 "files": [
                     {
                         "file_name": "out.pdf",
@@ -519,6 +519,15 @@ class RuntimeV2Tests(unittest.IsolatedAsyncioTestCase):
                 "src.plugins.ai_chat.agent.background.get_bot",
                 return_value=bot,
             ):
+                online_response = bot.call_api.side_effect
+                before = self.store.deliveries(task.task_id)
+                bot.call_api.side_effect = lambda action, **params: {"online": False, "good": True}
+                result = await dispatcher.reconcile(task.task_id)
+                self.assertEqual(result["state"], "deferred")
+                bot.call_api.assert_awaited_once_with("get_status")
+                self.assertEqual(self.store.deliveries(task.task_id), before)
+                bot.call_api.reset_mock()
+                bot.call_api.side_effect = online_response
                 result = await dispatcher.reconcile(task.task_id)
             self.assertEqual(result["matched"], 1)
             self.assertEqual(

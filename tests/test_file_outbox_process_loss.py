@@ -69,6 +69,47 @@ def _child(dsn, schema, task_id, root, boundary, pipe):
 
 @unittest.skipUnless(os.getenv("TEST_POSTGRES_DSN"), "Requires an isolated PostgreSQL test database")
 class FileOutboxProcessLossTests(unittest.IsolatedAsyncioTestCase):
+    async def test_postgres_offline_wait_keeps_manifest_and_retry_budget_after_reopen(self):
+        dsn = os.environ["TEST_POSTGRES_DSN"]
+        schema = "test_file_offline_" + uuid.uuid4().hex[:16]
+        database = store = None
+        try:
+            with patch.dict(os.environ, AI_POSTGRES_DSN=dsn, AI_POSTGRES_SCHEMA=schema):
+                command.upgrade(Config("alembic.ini"), "head")
+            database = PostgresDatabase(dsn, schema=schema, min_size=1, max_size=2)
+            store = SubAgentStore(database)
+            task = store.create_task(scope_key="group:1", conversation_id="group:1:user:2",
+                requester_user_id=2, trigger_message_id=None, objective="file", max_parallelism=1, max_steps=2)
+            artifact = {"name": "result.txt", "size": 4, "snapshot": hashlib.sha256(b"test").hexdigest(),
+                        "handle": "sandbox#s123abc/result.txt"}
+            store.queue_file(task.task_id, artifact, "test.txt")
+            prepare, send = AsyncMock(return_value=b"test"), AsyncMock(return_value={"ok": True})
+            for _ in range(8):
+                row = store.deliveries(task.task_id)[0]
+                with patch("src.plugins.ai_chat.agent.file_outbox.time.time", return_value=row["payload"]["next_attempt_at"] + 1):
+                    result = await attempt_file(store, task.task_id, row, prepare=prepare, send=send,
+                                                readiness=AsyncMock(return_value="offline"))
+                self.assertEqual((result["state"], result["attempts"]), ("queued", 0))
+                self.assertEqual(result["artifact"], artifact)
+                store.close()
+                database.close()
+                database = PostgresDatabase(dsn, schema=schema, min_size=1, max_size=2)
+                store = SubAgentStore(database)
+            prepare.assert_not_awaited()
+            send.assert_not_awaited()
+            with patch("src.plugins.ai_chat.agent.file_outbox.time.time", return_value=result["next_attempt_at"] + 1):
+                result = await attempt_file(store, task.task_id, store.deliveries(task.task_id)[0],
+                    prepare=prepare, send=send, readiness=AsyncMock(return_value=None))
+            self.assertEqual((result["state"], result["attempts"]), ("acknowledged", 1))
+            send.assert_awaited_once()
+        finally:
+            if store:
+                store.close()
+            if database:
+                database.close()
+            with psycopg.connect(dsn, autocommit=True) as connection:
+                connection.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
+
     async def test_sigkill_at_each_file_boundary_and_recover_without_duplicate_upload(self):
         dsn = os.environ["TEST_POSTGRES_DSN"]
         for boundary in ("queued", "prepared", "claimed", "uploaded", "acknowledged"):
@@ -124,7 +165,8 @@ class FileOutboxProcessLossTests(unittest.IsolatedAsyncioTestCase):
                     dispatcher.context = SimpleNamespace(state_dir=Path(root), sandbox_manager=None,
                         settings=SimpleNamespace(subagent_retention_seconds=3600))
                     dispatcher.coordinator = SimpleNamespace(_artifact_retention_state=lambda _: (False, set()))
-                    bot = SimpleNamespace(self_id="123", call_api=AsyncMock(return_value={"files": receipts}))
+                    bot = SimpleNamespace(self_id="123", call_api=AsyncMock(side_effect=
+                        lambda action, **params: {"online": True} if action == "get_status" else {"files": receipts}))
                     with patch("src.plugins.ai_chat.agent.background.get_bot", return_value=bot):
                         await dispatcher.reconcile(task.task_id)
                     final = store.deliveries(task.task_id)[0]
