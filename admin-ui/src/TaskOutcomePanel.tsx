@@ -9,7 +9,7 @@ const labels: Record<string, string> = {
   passed: '已核实', completed: '已完成', committed: '已送达', succeeded: '执行成功',
   running: '进行中', waiting: '等待授权', waiting_external: '等待外部结果',
   pending: '待处理', unverified: '尚未验证', failed: '失败', partial: '部分完成',
-  not_required: '无需授权', incomplete: '未完成', ambiguous: '回执待核对',
+  not_required: '无需授权', incomplete: '未完成', ambiguous: '回执待核对', resolved: '已返回',
 }
 
 export function TaskOutcomePanel({ detail, plane }: { detail: any; plane: Plane }) {
@@ -52,7 +52,7 @@ export function TaskOutcomePanel({ detail, plane }: { detail: any; plane: Plane 
       <div className="outcome-ref-list">{(row.evidence_refs ?? []).map((ref: string) => <button className="icon-button" key={ref}
         title={`查看 ${ref}`} aria-label={`查看 ${ref}`} onClick={() => showEvidence(ref)}><FileSearch size={16} /></button>)}</div></article>)}</div>
   const operations = <div className="outcome-operations">{(progress.operations ?? []).map((operation: any) =>
-    <article key={`${operation.run_id}:${operation.call_id}`}><div className="outcome-row-heading"><strong>{operation.host_id || operation.remote_path}</strong>{badge(operation.status)}</div>
+    <article key={`${operation.run_id}:${operation.call_id}`}><div className="outcome-row-heading"><strong>{operation.host_id || operation.remote_path || operation.tool_name || '工具调用'}</strong>{badge(operation.status)}</div>
       {operation.historical && <small>{operation.source_revision === revision ? '本轮授权与派发凭据' : `历史授权与派发凭据 · 修订 ${operation.source_revision ?? '-'}`}</small>}
       <time>{fmtTime(operation.updated_at)}</time><p>{operation.summary || operation.error || '等待最终操作回执'}</p>
       <details><summary>操作对象与命令</summary><pre>{JSON.stringify(operation.arguments, null, 2)}</pre></details>

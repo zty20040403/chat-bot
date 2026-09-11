@@ -255,6 +255,10 @@ class TaskEvidenceTests(unittest.TestCase):
         self.assertEqual(result["stages"][2]["status"], "not_required")
         self.assertEqual(result["operations"][0]["host_id"], "h610")
         self.assertEqual(result["operations"][0]["arguments"]["operation"], "host.metrics")
+        self.assertEqual(result["operations"][0]["tool_name"], "host.metrics")
+        self.assertEqual(result["operations"][0]["status"], "resolved")
+        self.assertIn("不代表业务目标已完成", result["operations"][0]["summary"])
+        self.assertNotIn("等待", result["operations"][0]["summary"])
 
     def test_timeline_preserves_managed_operation_approval_and_verification(self):
         task = self.store.get(self.task.task_id)

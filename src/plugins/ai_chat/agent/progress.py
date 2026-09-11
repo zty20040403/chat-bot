@@ -40,10 +40,12 @@ def task_progress(task: Any, runs: list, evidence: list[dict], external: list[di
         operations.append({"run_id": item["run_id"], "call_id": item["call_id"],
             "remote_path": item.get("remote_path"), "status": "unverified" if ended_approval else observed_status,
             "last_observed_status": observed_status,
+            "tool_name": request.get("tool_name") or arguments.get("operation") or "",
             "host_id": record.get("host_id") or result.get("host") or arguments.get("params", {}).get("host"),
             "updated_at": item["updated_at"], "arguments": redact(arguments),
             "summary": ("本轮任务已结束；这是最后一次授权观测，不代表现在仍可批准或已经执行。"
-                        if ended_approval else result.get("summary", "")),
+                        if ended_approval else result.get("summary") or
+                        ("工具已返回；结果以原始回执为准，不代表业务目标已完成。" if observed_status == "resolved" else "")),
             "verification": result.get("verification"),
             "error": record.get("error_code") or record.get("error") or ""})
     historical = {}
