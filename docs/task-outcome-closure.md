@@ -633,3 +633,30 @@ check relevant service identities before and after activation, and inspect
 existing file receipts without requeueing acknowledged deliveries. Local tests
 do not establish live account or transport availability. Keep actual server,
 account and deployment records in private audit storage, not public documentation.
+
+## Live File Recovery and Unknown Upload Time
+
+After user login, the real QQ file endpoint became available. Four bounded test
+attachments were uploaded once each. Owned test children were killed at queued,
+prepared, claimed and uploaded-before-ack-save boundaries. Queued/prepared files
+recovered, uploaded files reconciled, and the pre-upload claim correctly remained
+unknown without retransmission. No production process was killed.
+
+The initial acknowledged-boundary case failed: actual file entries returned
+`upload_time=0`, while the immediate confirmation path treated zero as an old
+timestamp. Background reconciliation already treated it as unknown. The original
+failed test report remains intact. Confirmation now agrees with reconciliation;
+filename, size and uploader checks remain, and known old timestamps are rejected.
+Earlier simulated fixtures had only returned positive timestamps, masking this
+real protocol case.
+
+A separate read-only follow-up reused the fourth existing attachment. Its actual
+QQ receipt was confirmed by the corrected code, persisted in an isolated test
+database, and the owned child was killed after acknowledgement. Reopening storage
+retained acknowledgement and did not prepare or upload again. This follow-up
+made no additional uploads. Test schemas were removed. The focused 25-test suite,
+including all five simulated process-loss boundaries with zero timestamps, passed.
+
+These observations cover file transport recovery, not the outstanding
+Bot-controller cleanup authorization and fresh inspection-coverage gates. Private
+receipt records are kept outside this repository.

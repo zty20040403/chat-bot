@@ -10,7 +10,6 @@ import subprocess
 import sys
 import tempfile
 import threading
-import time
 import unittest
 
 
@@ -41,7 +40,7 @@ class AcceptanceHarnessProcessTests(unittest.TestCase):
                     elif action == "upload_group_file" and params["group_id"] == 456:
                         content = base64.b64decode(params["file"].removeprefix("base64://"), validate=True)
                         files.append({"file_name": params["name"], "file_size": len(content), "uploader": 123,
-                                      "upload_time": int(time.time()), "file_id": f"simulated-{len(files) + 1}"})
+                                      "upload_time": 0, "file_id": f"simulated-{len(files) + 1}"})
                         data = None
                     else:
                         self.send_error(400)

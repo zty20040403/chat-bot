@@ -1086,7 +1086,7 @@ class AgentToolExecutor:
                     and int(item.get("file_size", -1)) == int(size)
                     and (
                         not_before is None
-                        or item.get("upload_time") is None
+                        or not item.get("upload_time")
                         or int(item.get("upload_time") or 0) >= not_before - 5
                     )
                     and (

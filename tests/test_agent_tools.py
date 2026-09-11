@@ -27,6 +27,7 @@ class FakeBot:
         self.uploads: list[dict[str, Any]] = []
         self.confirm_uploads = True
         self.online = True
+        self.upload_time = None
         self.group_files: list[dict[str, Any]] = [
             {
                 "file_id": "file-1",
@@ -120,7 +121,7 @@ class FakeBot:
                         "file_id": "uploaded",
                         "file_name": data["name"],
                         "file_size": len(raw),
-                        "upload_time": int(time.time()),
+                        "upload_time": int(time.time()) if self.upload_time is None else self.upload_time,
                         "uploader": 42,
                     }
                 )
@@ -294,6 +295,26 @@ class AgentToolExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["retryable"])
         self.assertEqual(result["state"], "not_sent")
         self.assertFalse(self.bot.uploads)
+
+    async def test_zero_upload_timestamp_confirms_file_without_waiting(self) -> None:
+        self.bot.upload_time = 0
+        with patch("src.plugins.ai_chat.agent_tools.asyncio.sleep", new_callable=AsyncMock) as sleep:
+            result = json.loads(await self.executor.send_file_content(b"test", "test.txt"))
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["state"], "acknowledged")
+        self.assertEqual(result["receipt"]["attempts"], 1)
+        self.assertEqual(len(self.bot.uploads), 1)
+        sleep.assert_not_awaited()
+
+    async def test_zero_timestamp_does_not_bypass_receipt_identity(self) -> None:
+        base = {"file_id": "receipt", "file_name": "test.txt", "file_size": 4,
+                "uploader": 42, "upload_time": 0}
+        for change in ({"file_name": "other.txt"}, {"file_size": 5}, {"uploader": 7},
+                       {"upload_time": 90}):
+            with self.subTest(change=change):
+                self.bot.group_files = [{**base, **change}]
+                result = await self.executor.confirm_group_file("test.txt", 4, attempts=1, not_before=100)
+                self.assertFalse(result["ok"])
 
     async def test_file_status_failure_does_not_attempt_upload(self) -> None:
         for response in (None, {"online": "true"}, {"online": True, "good": False}):
