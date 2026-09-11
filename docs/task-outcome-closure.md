@@ -444,3 +444,34 @@ Remaining acceptance work:
 
 No real cleanup, host reboot, unrelated service restart, or forced interruption
 of a live upload was performed in revision 7. The full checklist remains open.
+
+## Resumed Inspection and Expired QQ Login
+
+2026-09-11 noon: revision 8 had ended at its task deadline without authorization.
+The controller still held its old proposal as `awaiting_approval`, with attempt 0,
+no approval reference and no backend job. The console incorrectly presented that
+last observation as an active approval wait even though the task had ended.
+The projection now marks that state unverified, retains `last_observed_status`,
+and explains that the old request cannot resume the ended revision. Superseded
+repair findings are also excluded from the current task view. This does not
+cancel, approve or rewrite any controller record. The focused outcome and external
+continuation suite passed 36 tests.
+
+After the user's explicit request to continue, revision 9 was submitted once.
+Its private approval message failed to send; group progress messages also timed
+out in QQ's `NodeIKernelMsgService/sendMsg`. The gaoji NapCat container was running
+and not OOM-killed. Restarting only `docker-napcat-chat-bot.service` at 12:15 HKT
+revealed an explicit quick-login error: the QQ account identity had expired and
+required a fresh QR login. No QQ password was read, no code was confirmed on the
+user's behalf, and no server scan or cleanup was authorized. Login recovery and
+fresh approval still require the user.
+
+At 12:22:56 HKT Bot `0a69ad9` and nix-config `7c2247e` were deployed as
+`/nix/store/0i7i3a5ixgp4y95f79jj5qcv7r1kh3wj-nixos-system-h610-26.05.20260622.3426825`.
+Both gaoji services are active; the sandbox image was reused. Max PID 473603,
+Max NapCat PID 1396 and PostgreSQL node PID 8264 retained their activation times.
+The clean temporary build worktree was removed. At 12:25 the task remained at
+revision 9 waiting for authorization, with its evidence and completed steps
+preserved and no final delivery queued. The production console remained at an
+expired login page. These observations do not close the remaining live acceptance
+gates.
