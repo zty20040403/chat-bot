@@ -46,6 +46,12 @@ def _fresh(payload: dict[str, Any], now: int) -> bool:
     return payload.get("status") == "fresh" and (expires is None or expires > now)
 
 
+def _sample_fresh(sample_at: Any, now: int | float) -> bool:
+    # Stored capture times use whole seconds; Prometheus samples retain fractions.
+    return (type(sample_at) in (int, float) and math.isfinite(sample_at)
+            and -1 < now - sample_at <= 90)
+
+
 def _root_disk(host: dict[str, Any]) -> dict[str, Any] | None:
     pressure = _object(host.get("pressure"))
     values: dict[str, Any] = {}
@@ -110,9 +116,7 @@ def summarize_fleet(
         agent = _object(host.get("agent"))
         exporter = _object(host.get("exporter"))
         sample_at = exporter.get("sample_at_unix_seconds")
-        exporter_fresh = (
-            isinstance(sample_at, (int, float)) and 0 <= timestamp - sample_at <= 90
-        )
+        exporter_fresh = _sample_fresh(sample_at, timestamp)
         current = _fresh(payload, timestamp) and bool(host)
         agent_up = agent.get("state") == "reachable"
         exporter_up = exporter.get("state") == "up" and exporter_fresh
@@ -255,8 +259,7 @@ def summarize_resources(payload: dict[str, Any], host_id: str, *, now: int) -> d
     def samples(name):
         return [sample for sample in _items(_object(metrics.get(name)).get("samples"))
             if sample.get("state") == "available" and type(sample.get("value")) in (int, float)
-            and math.isfinite(sample["value"]) and type(sample.get("sample_at_unix_seconds")) in (int, float)
-            and 0 <= now - sample["sample_at_unix_seconds"] <= 90]
+            and math.isfinite(sample["value"]) and _sample_fresh(sample.get("sample_at_unix_seconds"), now)]
     def scalar(name):
         values = samples(name)
         return values[0] if len(values) == 1 else None

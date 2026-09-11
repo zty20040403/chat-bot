@@ -475,3 +475,42 @@ revision 9 waiting for authorization, with its evidence and completed steps
 preserved and no final delivery queued. The production console remained at an
 expired login page. These observations do not close the remaining live acceptance
 gates.
+
+## QR Recovery and Revision 10
+
+2026-09-11 13:05:07 HKT: account 3580515978 reconnected after the user scanned
+the new QR. Revision 9 had already ended; its final text receipt 55915319 was
+committed, and its expired controller proposal still had attempt 0 and no
+backend job. It was not revived or approved. Revision 10 was created once after
+the requested continuation, and its fresh private approval succeeded.
+
+The authorized h610 job `01a08ee3-280e-73a0-b4b5-2b337b3622f4` ran once from
+13:14:06 to 13:15:12. Its saved output establishes 164,852,035,584 available bytes
+on the root filesystem (66% used) and 67,645,728,403 apparent bytes under
+`/nix/store`. The latter is logical size, not allocated disk space or a cleanup
+estimate. The diagnostic profile ran as UID 983 with a restricted PATH:
+`/var/lib` traversal failed on protected directories, and docker/journalctl were
+absent. Its 10,036,842,496-byte partial `/var/lib` result is not the total.
+The successful final shell exit did not promote these failed subcommands.
+
+Revision 10 remained partial. h310/tank inspection steps completed, but the
+independent host coverage gate passed only h310. h610's later resource query
+was 250 seconds apart from its disk/service snapshot; tank's fleet response was
+stale. Tank's additional metrics also exposed a precision bug: sample
+1789103538.193 was rejected against whole-second capture time 1789103538.
+Freshness now tolerates only the subsecond difference within that capture second;
+the 90-second age limit, wrong-host checks and rejection of future seconds remain.
+The snapshot-gap gate is unchanged and now explains the specific observation to
+refresh without requesting another directory traversal. Operator instructions
+also distinguish read-only intent from execution identity, required tools and
+partial disk statistics. These are guidance changes, not added privileges or a
+guarantee that arbitrary scripts have been semantically preflighted.
+
+The focused suite passed 63 tests. At 13:28 HKT, the 9,787-byte report
+`kb-59-r10-3a5b28b2cb-h610-h310-tank-readonly-acceptance-20260911.md` was confirmed
+with QQ file ID `2bcd74e125e84ff190e7dead632928e0`, after exactly one upload and
+receipt reconciliation. The final text receipt was 1823582979. Neither this
+delivery nor the sample precision fix completes the missing privileged read-only
+directory measurements, authenticated console interaction, production upload
+process-loss boundaries or explicitly authorized disposable cleanup. Deployment
+of the precision/guidance changes and a fresh post-deploy observation are pending.

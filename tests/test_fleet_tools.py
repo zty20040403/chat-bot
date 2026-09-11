@@ -93,6 +93,27 @@ class FleetProjectionTests(unittest.IsolatedAsyncioTestCase):
         for name in ("service_control", "host_reboot"):
             self.assertEqual(policy_for_tool(name).approval, "task")
 
+    def test_fractional_samples_in_capture_second_are_not_future_or_stale(self) -> None:
+        for sample_at, accepted in ((1000.193, True), (1000.999, True), (910, True),
+                                    (909.999, False), (1001, False), (1005, False),
+                                    (float("nan"), False), (float("inf"), False), (True, False)):
+            with self.subTest(sample_at=sample_at):
+                payload = fleet_payload(1000)
+                payload["data"]["hosts"][-1]["exporter"]["sample_at_unix_seconds"] = sample_at
+                host = summarize_fleet(payload, host_id="tank", now=1000)["hosts"][0]
+                self.assertEqual(host["root_disk"] is not None, accepted)
+                metrics = {name: {"samples": [{"state": "available", "value": value,
+                    "sample_at_unix_seconds": sample_at, "labels": labels}]}
+                    for name, value, labels in (("memory_total_bytes", 1024, {}),
+                        ("memory_available_bytes", 256, {}),
+                        ("cpu_idle_seconds_per_second", 0.75, {"cpu": "0"}))}
+                resources = summarize_resources({"status": "fresh", "data": {
+                    "host": "tank", "observation": {"metrics": metrics}}}, "tank", now=1000)
+                self.assertEqual(resources["status"] == "available", accepted)
+                if accepted:
+                    self.assertEqual(resources["cpu_observed_at"], sample_at)
+                    self.assertEqual(resources["memory_observed_at"], sample_at)
+
     def test_job_tool_accepts_exact_worker_selection(self) -> None:
         catalog = ToolCatalog([CLUSTER_JOB_SUBMIT_TOOL])
         args = {"kind": "probe.http", "target_id": "h610-worker", "idempotency_key": "worker-selection"}

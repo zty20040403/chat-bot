@@ -197,6 +197,18 @@ class TaskEvidenceTests(unittest.TestCase):
             self.assertEqual(self.evaluate(contract("host_inspection", host_id="h610"),
                 [host_ref["ref"], ref["ref"]])["status"], "unverified")
 
+    def test_separated_observations_explain_what_to_refresh_without_relaxing_gate(self):
+        host_ref = self.record(observation(1010))
+        metric_ref = self.record(metrics_receipt(1260), tool="ops_call", at=1260,
+            args={"operation": "host.metrics", "params": {"host": "h610"}})
+        result = self.evaluate(contract("host_inspection", host_id="h610"),
+            [host_ref["ref"], metric_ref["ref"]])
+        self.assertEqual(result["status"], "unverified")
+        row = result["criteria"][0]
+        self.assertEqual(row["detail"]["observation_gap_seconds"], 250)
+        self.assertEqual(row["detail"]["resource_evidence_ref"], metric_ref["ref"])
+        self.assertIn("不必重跑目录扫描", row["reason"])
+
     def test_generic_review_cannot_hide_incomplete_host_coverage(self):
         data = observation(1010)
         del data["hosts"][0]["resources"]

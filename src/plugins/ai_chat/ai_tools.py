@@ -94,7 +94,7 @@ OPS_CALL_TOOL: ToolDefinition = {
     "type": "function",
     "function": {
         "name": OPS_CALL_TOOL_NAME,
-        "description": "仅管理员可用的 MaxOps 接口，参数必须来自 ops_catalog。服务启停优先 service_control，整机重启必须用 host_reboot，不拼 systemctl 路径。其他 exec.run 命令由目标机先检查程序、工作目录和环境再执行，检查失败不得自行替换路径执行。只读直接返回；重要服务器写操作申请本任务统一授权，子任务共享。用 operation_status 查询最终结果；排队、退出零和整机重启成功不是同一回事。结果未知时继续查原 operation，不能换 key 重复执行。",
+        "description": "仅管理员可用的 MaxOps 接口，参数必须来自 ops_catalog。服务启停优先 service_control，整机重启必须用 host_reboot，不拼 systemctl 路径。exec.run 的脚本预检只验证外层程序和语法，不保证内部工具或目录权限；长扫描前先核对所选 profile 的实际身份、工具和访问权，不凭 profile 名称推断权限。检查失败不得自行替换路径、提权或安装依赖。原生只读接口直接返回；exec.run 即使执行只读命令也沿用本任务授权，子任务共享。用 operation_status 查询最终结果；排队、退出零和业务目标完成不同。结果未知时继续查原 operation，不能换 key 重复执行。",
         "parameters": {"type": "object", "properties": {
             "operation": {"type": "string"},
             "params": {"type": "object", "description": "严格符合目录 schema 的参数。"},

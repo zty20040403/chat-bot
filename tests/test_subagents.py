@@ -18,6 +18,7 @@ from src.plugins.ai_chat.subagents import (
     SubAgentStore,
     TaskStep,
     _validate_plan,
+    _worker_prompt,
     parse_profile_overrides,
     route_subagent_request,
 )
@@ -263,6 +264,12 @@ class SubAgentPlanTests(unittest.TestCase):
                 "operator",
             },
         )
+
+    def test_operator_prompt_separates_readonly_scope_from_execution_permissions(self) -> None:
+        prompt = _worker_prompt(DEFAULT_AGENT_REGISTRY.worker("operator"))
+        for requirement in ("UID、PATH", "必需程序和目标目录可读性", "本任务审批和执行次数约束",
+                            "du -B1", "du -b", "不能当作目录总量"):
+            self.assertIn(requirement, prompt)
 
     def test_automatic_subagent_tool_is_exposed_on_request(self) -> None:
         tools = available_tools(

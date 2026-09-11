@@ -198,9 +198,11 @@ def _inspection_resources(item: dict, observation: dict, items: list[dict], host
     data = payload.get("result") or {}
     if (not successful_evidence(latest) or payload.get("operation") != "host.metrics"
             or not isinstance(data, dict) or data.get("host") != host
-            or not fresh_at_capture(data.get("observed_at"), latest, created)
-            or latest["recorded_at"] - item["recorded_at"] > 180):
+            or not fresh_at_capture(data.get("observed_at"), latest, created)):
         return {}, latest["evidence_id"]
+    gap = latest["recorded_at"] - item["recorded_at"]
+    if gap > 180:
+        return {"status": "partial", "observation_gap_seconds": gap}, latest["evidence_id"]
     return summarize_resources({"status": "fresh", "data": data}, host, now=latest["recorded_at"]), latest["evidence_id"]
 
 
@@ -222,6 +224,12 @@ def _check_server(check: dict, items: list[dict], created: int) -> tuple[str, st
                 return "passed", "已取得新鲜磁盘、CPU、内存和可见服务状态；发现异常不等于已修复", {
                     "host_id": host, "observation": {**value, "resources": resource},
                     "evidence_ref": item["evidence_id"], "resource_evidence_ref": resource_ref}
+            if value and resource.get("observation_gap_seconds"):
+                gap = resource["observation_gap_seconds"]
+                return "unverified", (f"资源采样与磁盘/服务观测相隔 {gap} 秒，不能作为同一时段的完整状态；"
+                    "需补查该主机概况与资源指标，不必重跑目录扫描"), {
+                        "host_id": host, "observation_gap_seconds": gap,
+                        "evidence_ref": item["evidence_id"], "resource_evidence_ref": resource_ref}
         return "unverified", "最新观测缺少目标主机的新鲜磁盘、资源或服务数据", {}
     if kind in {"service_effect", "host_reboot"}:
         level = "service_state" if kind == "service_effect" else "host_reboot"
