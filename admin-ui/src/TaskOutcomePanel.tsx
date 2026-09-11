@@ -53,6 +53,7 @@ export function TaskOutcomePanel({ detail, plane }: { detail: any; plane: Plane 
         title={`查看 ${ref}`} aria-label={`查看 ${ref}`} onClick={() => showEvidence(ref)}><FileSearch size={16} /></button>)}</div></article>)}</div>
   const operations = <div className="outcome-operations">{(progress.operations ?? []).map((operation: any) =>
     <article key={`${operation.run_id}:${operation.call_id}`}><div className="outcome-row-heading"><strong>{operation.host_id || operation.remote_path}</strong>{badge(operation.status)}</div>
+      {operation.historical && <small>{operation.source_revision === revision ? '本轮授权与派发凭据' : `历史授权与派发凭据 · 修订 ${operation.source_revision ?? '-'}`}</small>}
       <time>{fmtTime(operation.updated_at)}</time><p>{operation.summary || operation.error || '等待最终操作回执'}</p>
       <details><summary>操作对象与命令</summary><pre>{JSON.stringify(operation.arguments, null, 2)}</pre></details>
       {operation.verification && <details><summary>复查证据</summary><pre>{JSON.stringify(operation.verification, null, 2)}</pre></details>}</article>)}</div>

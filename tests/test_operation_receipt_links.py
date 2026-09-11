@@ -188,6 +188,42 @@ class OperationReceiptLinksTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(asyncio.CancelledError):
                 await self.link()
 
+    async def test_prior_unexecuted_request_does_not_block_current_approval(self):
+        source = await self.source()
+        base = self.proof(source["request"]["body"]["idempotency_key"], actor="qq:2", origin=self.task.scope_key)
+        self.lookup.side_effect = None
+        self.lookup.return_value = {**base, "approval": {}, "authorized_before_dispatch": False,
+            "dispatched_at": None, "recorded_status": "awaiting_approval"}
+        self.revise()
+        items = await self.link()
+        current = await self.source(call_id="current", response={"operation_id": "op_current", "host_id": "h610",
+            "status": "succeeded", "approval_ref": "approved_current"})
+        value = task_progress(self.task, [], items, [current], [], None, revision=2)
+        self.assertEqual(value["stages"][2]["status"], "completed")
+        historical = next(row for row in value["operations"] if row.get("historical"))
+        self.assertEqual(historical["source_revision"], 1)
+        self.assertEqual(historical["status"], "unverified")
+        self.assertFalse(items[0]["payload"]["ok"])
+        self.assertNotEqual(value["stages"][4]["status"], "passed")
+
+        current["response"].pop("approval_ref")
+        self.assertEqual(task_progress(self.task, [], items, [current], [], None,
+            revision=2)["stages"][2]["status"], "unverified")
+        current["response"]["status"] = "awaiting_approval"
+        self.assertEqual(task_progress(self.task, [], items, [current], [], None,
+            revision=2)["stages"][2]["status"], "waiting")
+
+    async def test_old_approval_does_not_authorize_a_new_revision(self):
+        await self.source()
+        self.revise()
+        items = await self.link()
+        value = task_progress(self.task, [], items, [], [], None, revision=2)
+        self.assertEqual(value["stages"][2]["status"], "not_required")
+        self.assertEqual(value["operations"][0]["status"], "passed")
+        current = await self.source(call_id="current", response={"operation_id": "op_current", "status": "failed"})
+        value = task_progress(self.task, [], items, [current], [], None, revision=2)
+        self.assertEqual(value["stages"][2]["status"], "unverified")
+
     async def test_acceptance_cache_changes_only_when_upstream_evidence_changes(self):
         await self.source()
         self.store.set_task_state(self.task.task_id, "running", plan={"contract": contract()})

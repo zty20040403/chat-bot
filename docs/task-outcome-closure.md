@@ -514,3 +514,25 @@ delivery nor the sample precision fix completes the missing privileged read-only
 directory measurements, authenticated console interaction, production upload
 process-loss boundaries or explicitly authorized disposable cleanup. Deployment
 of the precision/guidance changes and a fresh post-deploy observation are pending.
+
+## Current Revision Authorization and Deployment Verification
+
+2026-09-11: Bot `98f341a` was deployed to h610. After a separate DAE recovery,
+the system switch completed and live h610/h310/tank metric projection returned
+available CPU and memory, including fractional sample timestamps. Authenticated
+console inspection showed revision 10's file acknowledged and final text
+committed. A model-scope dropdown stayed open across live updates; the selected
+task detail also survived the Bot restart. No old report was sent again.
+
+The live lifecycle view still showed authorization unverified. Persisted receipt
+inspection established that the current operation had approval and a dispatch
+receipt, but old revision-8/9 requests never approved or dispatched were also
+included in the current-stage boolean. The projection now scores only the
+current revision's authorization. Historical receipts remain visible with their
+source revision and their original passed/unverified result. They cannot grant
+permission for a new revision or satisfy current health checks. Neither stored
+receipts nor task acceptance results are rewritten. The focused receipt/outcome
+suite passed 34 tests, including mixed old/current requests and missing current
+approval. Full browser evidence-panel acceptance, fresh protected directory
+measurements, live upload process-loss boundaries and approved disposable
+cleanup remain open; this change does not close those gates.

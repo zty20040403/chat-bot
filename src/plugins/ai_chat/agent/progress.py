@@ -58,11 +58,15 @@ def task_progress(task: Any, runs: list, evidence: list[dict], external: list[di
         payload = item["payload"]
         receipt = payload["receipt"]
         verified = payload.get("ok") is True
-        approval_checks.append(verified)
+        source_revision = payload["source_request"]["revision"]
+        # Historical proof remains visible without blocking a newer revision's approval.
+        if source_revision == revision:
+            approval_checks.append(verified)
         operations.append({"run_id": item["run_id"], "call_id": "receipt:" + key,
             "remote_path": "", "status": "passed" if verified else "unverified",
             "host_id": receipt["host_id"], "updated_at": receipt.get("dispatched_at") or receipt["created_at"],
-            "historical": True, "arguments": item["arguments"], "verification": receipt,
+            "historical": True, "source_revision": source_revision,
+            "arguments": item["arguments"], "verification": receipt,
             "summary": "历史授权与派发已核实；不是当前健康或修复结果。" if verified else "历史授权证明不足。",
             "error": ""})
     approval_relevant = bool(approval_checks)
@@ -80,7 +84,7 @@ def task_progress(task: Any, runs: list, evidence: list[dict], external: list[di
         {"key": "findings", "label": "发现问题", "status": "completed" if terminal or findings else "running" if active else "pending",
          "detail": f"{len(findings)} 条发现，{len(next_verification)} 项待补查"},
         {"key": "authorization", "label": "授权", "status": "unverified" if terminal and waiting_approval else "waiting" if waiting_approval else "completed" if approval_confirmed else "unverified" if approval_relevant else "not_required",
-         "detail": "本轮已结束，未取得有效授权；旧请求不能继续本轮任务" if terminal and waiting_approval else "等待本任务授权" if waiting_approval else "已记录批准凭据" if approval_confirmed else "操作记录未提供批准凭据" if approval_relevant else "未发生需授权的服务器操作"},
+         "detail": "本轮已结束，未取得有效授权；旧请求不能继续本轮任务" if terminal and waiting_approval else "等待本轮任务授权" if waiting_approval else "本轮已记录批准凭据；历史申请另列" if approval_confirmed else "本轮操作记录未提供批准凭据" if approval_relevant else "本轮未发生需授权的服务器操作"},
         {"key": "execution", "label": "执行", "status": task.result.get("execution_state") or ("completed" if task.status == "completed" else task.status),
          "detail": f"{len(finished)} 项已记录的完成工作"},
         {"key": "verification", "label": "复查", "status": matrix.get("status") or ("running" if task.status == "verifying" else "unverified" if terminal else "pending"),
