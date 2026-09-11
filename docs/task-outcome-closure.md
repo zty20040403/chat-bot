@@ -771,3 +771,20 @@ The QR refresh endpoint did not return a usable new QR URL. Real group-delivery
 verification remains dependent on the owner restoring the QQ login; administrator
 approval delegation cannot replace that identity verification. No extra test
 attachments or cleanup operations were performed.
+
+## Text Outbox Account Readiness
+
+The text outbox now shares the file-delivery account-health check. Adapter socket
+presence alone does not authorize a send. An offline account, malformed status,
+unhealthy adapter or failed status request defers an unattempted message without
+spending its retry budget. Each account is checked once per due batch and checked
+again in the next batch; final messages still require their original QQ account.
+Existing ambiguous sends stay ambiguous and are not automatically re-enqueued.
+This cannot eliminate a disconnect between the health check and the actual send;
+that case still needs a genuine receipt or history reconciliation.
+
+Thirty focused outbox and continuation tests passed, including offline-to-online
+recovery, group and private delivery, original-account isolation, malformed status,
+cancellation and preservation of ambiguous outcomes. The account remains logged
+out at the latest live check. No additional QQ attachment or cleanup test ran;
+the report-draft correction and real final-message receipt still await login.

@@ -33,6 +33,7 @@ from .onebot_codec import (
     record_onebot_outgoing,
     render_onebot_body,
 )
+from .onebot_availability import delivery_blocker
 from .reminders import (
     Reminder,
 )
@@ -200,6 +201,7 @@ class OneBotDelivery(HandlerService):
                     f"Parked {expired} expired delivery lease(s) as ambiguous."
                 )
             bots = [bot for bot in get_bots().values() if isinstance(bot, Bot)]
+            account_blockers: dict[str, str | None] = {}
             for delivery in self.context.delivery_store.claim_due(limit=20, exclude_platforms=() if bots else ("onebot-v11",)):
                 try:
                     if delivery.target_platform == "onebot-v11":
@@ -210,6 +212,14 @@ class OneBotDelivery(HandlerService):
                             selected_bot = next((bot for bot in bots if str(bot.self_id) == str(dispatch["bot_id"])), None)
                         if selected_bot is None:
                             self.context.delivery_store.defer_unsent(delivery, "原任务的 QQ 账号尚未连接")
+                            continue
+                        # A connected adapter can belong to a logged-out QQ account.
+                        bot_id = str(selected_bot.self_id)
+                        if bot_id not in account_blockers:
+                            account_blockers[bot_id] = await delivery_blocker(selected_bot)
+                        blocker = account_blockers[bot_id]
+                        if blocker is not None:
+                            self.context.delivery_store.defer_unsent(delivery, blocker)
                             continue
                         await self._deliver_onebot_outbox(selected_bot, delivery)
                     elif self.context.bridge_manager is not None:
