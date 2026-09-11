@@ -71,6 +71,7 @@
         (lib.fileset.fileFilter (file: file.hasExt "js") ./tools)
         ./tools/context_eval.py
         ./tools/evaluate_subagent_entry.py
+        ./tools/live_file_outbox_acceptance.py
         ./tools/qwen_control.py
         (lib.fileset.fileFilter (
             file:
