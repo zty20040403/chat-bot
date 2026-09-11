@@ -2131,7 +2131,8 @@ class SubAgentCoordinator:
 
         validation = await self._validate_workflow(task, completed, context=context,
             selected_profile=selected_profile, tools_by_name=tools_by_name,
-            execute_tool=tracked_execute_tool, hooks=hooks, parent_trace=parent_trace, progress=progress)
+            execute_tool=tracked_execute_tool, hooks=hooks, parent_trace=parent_trace, progress=progress,
+            prepare_draft=True)
         files_ready = bool(validation.get("artifacts")) and all(
             review.get("status") == "passed" for review in validation["artifacts"]
         ) and all(check.get("ok") for check in validation.get("checks", []))
@@ -2153,7 +2154,8 @@ class SubAgentCoordinator:
                     completed[repaired.step.key] = repaired
                     validation = await self._validate_workflow(task, completed, context=context,
                         selected_profile=selected_profile, tools_by_name=tools_by_name,
-                        execute_tool=tracked_execute_tool, hooks=hooks, parent_trace=parent_trace, progress=progress)
+                        execute_tool=tracked_execute_tool, hooks=hooks, parent_trace=parent_trace, progress=progress,
+                        prepare_draft=True)
         delivery_results = await self._deliver_requested_artifacts(
             task,
             completed,
@@ -2173,7 +2175,8 @@ class SubAgentCoordinator:
         final_profile = self._profile_for("supervisor", selected_profile)
         final_input = _synthesis_input(task.objective, completed) + "\n[宿主实际文件验收与附件交付状态]\n" + json.dumps({"validation": validation, "deliveries": delivery_results}, ensure_ascii=False)
         final_input += "\n上述 deliveries 只表示文件附件，不表示最终文字是否发送。你的回答正文随后由宿主持久消息队列发送；不要声称本文已发出或未发出。附件失败只能说附件失败。"
-        final_text = await self._supervisor_text(
+        draft = validation.get("report_draft")
+        final_text = str(draft["text"]) if draft else await self._supervisor_text(
             final_input,
             [],
             profile=final_profile,
@@ -2214,8 +2217,40 @@ class SubAgentCoordinator:
         self.store.append_checkpoint(task.task_id, "workflow_completed", result)
         return f"{task.handle}\n{final_text}" if final_text else f"{task.handle} 已完成。"
 
+    async def _prepare_report_draft(self, task, completed, contract, evidence, *,
+                                    selected_profile, parent_trace):
+        revision = self.store.control(task.task_id)["revision"]
+        source_hash = hashlib.sha256(json.dumps({"revision": revision, "contract": contract,
+            "evidence": evidence_fingerprint(evidence),
+            "results": {key: value.result for key, value in completed.items()}},
+            sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        for checkpoint in reversed(self.store.checkpoints(task.task_id)):
+            previous = checkpoint.get("state", {})
+            if (checkpoint.get("phase") == "report_draft" and previous.get("source_hash") == source_hash
+                    and previous.get("text") and previous.get("sha256") ==
+                    hashlib.sha256(previous["text"].encode()).hexdigest()):
+                return previous
+        trace = DeepSeekTrace(trace_id=task.trace_id)
+        text = await self._supervisor_text(_synthesis_input(task.objective, completed), [],
+            profile=self._profile_for("supervisor", selected_profile), trace=trace,
+            tool_context=("生成将交给独立验收人审阅的最终报告正文，不是报告写作计划。"
+                "直接说明实际发现、操作、前后对比和未解决事项，简短自然。"
+                "区分本轮与历史证据，不能把命令退出成功说成业务已验证，不能把未知写成正常。"
+                "只读任务发现告警不等于要求修复。不要暴露内部 JSON 或冗长流水。"
+                "此时尚未投递，禁止声称文字或附件已发送；实际投递结果由宿主另行附加。"
+                "不要承诺没有持久登记的后续工作。"))
+        _merge_trace(parent_trace, trace)
+        if not isinstance(text, str) or not text.strip():
+            raise RuntimeError("Final report draft is empty")
+        text = text.strip()
+        draft = {"revision": revision, "source_hash": source_hash, "text": text,
+                 "sha256": hashlib.sha256(text.encode()).hexdigest(),
+                 "source_kind": "unverified_model_draft"}
+        self.store.append_checkpoint(task.task_id, "report_draft", draft)
+        return draft
+
     async def _validate_workflow(self, task, completed, *, context, selected_profile, tools_by_name,
-                                 execute_tool, hooks, parent_trace, progress):
+                                 execute_tool, hooks, parent_trace, progress, prepare_draft=False):
         contract = (self.store.get(task.task_id) or task).plan.get("contract", {})
         outcome_v2 = contract.get("version", 1) >= 2
         has_artifacts = any(item.result.get("artifacts") for item in completed.values())
@@ -2245,11 +2280,16 @@ class SubAgentCoordinator:
         if hooks and hooks.operation_receipt:
             await link_operation_receipts(self.store, task, evidence_runs, hooks.operation_receipt)
         source_evidence = self.store.task_evidence(task.task_id, run_ids=evidence_runs)
+        draft = await self._prepare_report_draft(task, completed, contract, source_evidence,
+            selected_profile=selected_profile, parent_trace=parent_trace) if outcome_v2 and prepare_draft else None
         fingerprint = hashlib.sha256(json.dumps({"acceptance_version": ACCEPTANCE_VERSION,
+            "report_draft_sha256": draft["sha256"] if draft else None,
             "evidence": evidence_fingerprint(source_evidence),
             "contract": contract, "results": {k: v.result for k, v in completed.items()}}, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:8]
         key = f"acceptance_r{revision}_{fingerprint}"
         def attach_matrix(value, reviewer):
+            if draft:
+                value["report_draft"] = draft
             if outcome_v2:
                 value["task_outcome"] = evaluate_acceptance(contract, self.store.task_evidence(task.task_id), reviewer,
                     task_created_at=task.created_at)
@@ -2292,11 +2332,15 @@ class SubAgentCoordinator:
                 "按 outcome_checks 核实具体主机、服务动作或处理前后空间；不要把查询成功说成修复成功。\n"
                 "historical_operation_receipt 是宿主按本任务原始请求找回的历史批准/派发记录，"
                 "可核实旧命令当时是否获准，但不是当前健康检查、任务完成证明或新的操作授权。\n"
+                + ("下方 report_draft.text 是已经生成并持久保存的待发正文，请逐句审阅。"
+                "报告内容条款应检查这份正文，不要再等待尚未发送的群消息。"
+                "草稿自身不是事实证据；核对其中的陈述时，仍须读取并引用实际工具证据。"
+                "通过后宿主使用同一份正文，不会另用模型改写；实际发送状态由宿主单独附加。\n" if draft else "")
                 + json.dumps({"objective": task.objective, "pre_delivery_acceptance": [
                     item for item in contract.get("acceptance", [])
                     if not _DELIVERY_REQUEST_PATTERN.search(str(item))
                 ], "acceptance_all": contract.get("acceptance", []), "outcome_checks": contract.get("outcome_checks", []),
-                    "artifact_checks": checks}, ensure_ascii=False)),
+                    "artifact_checks": checks, "report_draft": draft}, ensure_ascii=False)),
             deliverable="发送前独立验收结果、实际执行的检查与内容缺陷", dependencies=tuple(completed))
         run = previous or self.store.create_run(task.task_id, step,
             allowed_tools=sorted(self.registry.worker(step.role).allowed_tools & tools_by_name.keys()),

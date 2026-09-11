@@ -740,3 +740,34 @@ The focused 131-test suite passed. Deployment and a fresh real task remain to be
 verified; neither a model's success statement nor these unit tests close the
 remaining end-to-end acceptance gates. Private receipts and operation identifiers
 are retained outside this repository.
+
+## Report Draft Before Acceptance
+
+The cache and role-capability fixes were deployed. A fresh real workflow obtained
+all three hosts' current observations and read the completed cleanup job's full
+logs using the assigned operator. Four of five criteria passed. The last criterion
+asked the reviewer to inspect the final report, but that report was only generated
+after review. Earlier tests had supplied a successful review without representing
+this ordering dependency.
+
+Version-two and newer workflows now generate and checkpoint the report draft
+before independent review. Its source fingerprint includes the task revision,
+contract, scoped evidence and worker results; changed sources invalidate the
+draft. The reviewer receives its exact text and content hash, while factual claims
+still require the original tool evidence. The draft is explicitly a model-authored
+document, not a new execution receipt. A successful review pins the same text for
+delivery; the supervisor does not rewrite it afterwards. Actual attachment status
+is appended separately by the host. Recovery reuses the checkpointed draft.
+Single-step delegation keeps its existing structured-result path.
+
+The focused 147-test suite passed, including reopening draft storage, invalidating
+changed evidence, presenting the exact draft to review, and preventing a second
+model rewrite after review. This correction still requires deployed live acceptance.
+
+The live workflow's final text encountered a QQ send timeout. A subsequent account
+check returned `isLogin=false`, despite the still-connected adapter socket. Its
+delivery stays ambiguous, not acknowledged or automatically retransmitted.
+The QR refresh endpoint did not return a usable new QR URL. Real group-delivery
+verification remains dependent on the owner restoring the QQ login; administrator
+approval delegation cannot replace that identity verification. No extra test
+attachments or cleanup operations were performed.
