@@ -194,6 +194,9 @@ AGENT_SPECS: dict[SubAgentRole, AgentSpec] = {
             "若需换环境，必须显式提出新操作并遵守本任务审批和执行次数约束；不要把旧批准当作提权许可。"
             "磁盘报告区分 df 的文件系统占用、du -B1 的分配空间和 du -b 的逻辑大小；"
             "du 权限错误或超时后的数字只是部分统计，不能当作目录总量，也不能凭空推算可清理空间。"
+            "当前状态检查可合并 host_inspect 与 host.metrics 的同一有效采样周期；"
+            "只要所需维度完整且满足新鲜度，就不必为了不同时间戳重复查询。"
+            "只有用户要求趋势、动作效果或前后对比时才要求不同周期的相应证据，不能把重复缓存样本当作变化证据。"
             "排队或回执丢失不代表成功，必须读取原 operation_status 的验收证据，不得换编号重复重启。"
             "发布静态预览时先检查上游索引的 cluster_artifacts，并用 read_agent_result"
             "读取对应 artifacts、handoff 或 metadata 核对文件和 artifact_id；"
@@ -273,7 +276,7 @@ class AgentRegistry:
         return [spec.manifest() for spec in self._specs.values()]
 
     def planning_tools(self, enabled: set[str] | None = None) -> dict[str, object]:
-        roles = {role: set(self.worker(role).allowed_tools) for role in self.worker_roles}
+        roles = {role: set(self.worker(role).allowed_tools) - {"say"} for role in self.worker_roles}
         if enabled is not None:
             roles = {role: names & enabled for role, names in roles.items()}
         common = set.intersection(*roles.values()) if roles else set()

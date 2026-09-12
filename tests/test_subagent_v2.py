@@ -107,6 +107,23 @@ class EntryContractTests(unittest.TestCase):
         self.assertIn("ops_call", guide["role_tools"]["operator"])
         self.assertNotIn("ops_call", guide["role_tools"]["analyst"])
 
+    def test_progress_is_runtime_capability_not_planned_delivery(self):
+        guide = DEFAULT_AGENT_REGISTRY.planning_tools()
+        self.assertNotIn("say", guide["shared_tools"])
+        for role in DEFAULT_AGENT_REGISTRY.worker_roles:
+            self.assertNotIn("say", guide["role_tools"][role])
+            self.assertIn("say", DEFAULT_AGENT_REGISTRY.worker(role).allowed_tools)
+        raw = decision("delegate")
+        raw["steps"][0]["required_tools"] = ["say"]
+        with self.assertRaisesRegex(ValueError, "say is progress-only"):
+            EntryDecision.parse(raw)
+        persisted = {**raw, "contract": {"version": 3}}
+        restored = EntryDecision.from_payload(persisted)
+        self.assertEqual(restored.steps[0]["required_tools"], ["say"])
+        raw["steps"][0]["required_tools"] = ["say", "not_a_tool"]
+        with self.assertRaisesRegex(ValueError, "cannot use not_a_tool"):
+            EntryDecision.from_payload({**raw, "contract": {"version": 3}})
+
     def test_new_entry_cannot_omit_checks_but_legacy_checkpoint_can_resume(self):
         raw = decision("workflow")
         del raw["outcome_checks"]

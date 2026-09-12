@@ -133,6 +133,22 @@ class RuntimeV2Tests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(planner.await_count, 2)
         self.assertEqual(self.store.recent(), [])
 
+    async def test_entry_repairs_say_delivery_step_before_task_submission(self):
+        invalid = decision("workflow")
+        invalid["steps"][-1].update(objective="发送最终报告", required_tools=["say"])
+        valid = decision("workflow")
+        with patch.object(self.coordinator, "_supervisor_json", new=AsyncMock(side_effect=[invalid, valid])) as planner:
+            entry = await self.coordinator.prepare_entry(self.packet, self.catalog.default)
+        self.assertEqual(planner.await_count, 2)
+        self.assertIn("say is progress-only", planner.call_args.args[0])
+        self.assertEqual(entry.steps[-1]["objective"], valid["steps"][-1]["objective"])
+        self.assertEqual(self.store.recent(), [])
+        with patch.object(self.coordinator, "_supervisor_json", new=AsyncMock(return_value=invalid)) as planner:
+            with self.assertRaises(ExecutionEntryError):
+                await self.coordinator.prepare_entry(self.packet, self.catalog.default)
+        self.assertEqual(planner.await_count, 2)
+        self.assertEqual(self.store.recent(), [])
+
 
     async def test_queued_plan_reuses_entry_and_can_survive_reopen(self):
         task = self.submit()

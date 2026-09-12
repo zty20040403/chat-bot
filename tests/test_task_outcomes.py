@@ -187,6 +187,17 @@ class TaskEvidenceTests(unittest.TestCase):
             args={"operation": "host.metrics", "params": {"host": "h610"}})
         self.assertEqual(self.evaluate(contract("host_inspection", host_id="h610"), refs)["status"], "unverified")
 
+    def test_current_inspection_accepts_complementary_sources_in_one_sample_cycle(self):
+        data = observation(1010)
+        data["hosts"][0]["resources"] = {"status": "unavailable"}
+        host_ref = self.record(data)
+        metric_ref = self.record(metrics_receipt(1010), tool="ops_call", at=1015,
+            args={"operation": "host.metrics", "params": {"host": "h610"}})
+        refs = [host_ref["ref"], metric_ref["ref"]]
+        self.assertEqual(self.evaluate(contract("host_inspection", host_id="h610"), refs)["status"], "passed")
+        self.assertEqual(self.evaluate(contract("disk_delta", host_id="h610", mountpoint="/",
+            minimum_delta_bytes=1), refs)["status"], "unverified")
+
     def test_wrong_host_or_stale_native_metrics_cannot_supply_missing_resources(self):
         data = observation(1010)
         data["hosts"][0]["resources"] = {"status": "unavailable"}

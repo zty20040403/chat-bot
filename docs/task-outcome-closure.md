@@ -788,3 +788,32 @@ recovery, group and private delivery, original-account isolation, malformed stat
 cancellation and preservation of ambiguous outcomes. The account remains logged
 out at the latest live check. No additional QQ attachment or cleanup test ran;
 the report-draft correction and real final-message receipt still await login.
+
+## Progress And Final Delivery Are Different Responsibilities
+
+After login recovery, a new read-only live plan incorrectly assigned final text
+delivery to a specialist using `say`. It also expanded a current-state inspection
+into repeated, distinct metric samples. The extra requirement caused a partial
+result even though complementary current-state observations were available.
+These are planning defects, not evidence that a reachable host is offline.
+
+New plans no longer advertise `say` as a required execution capability. Declaring
+it in `required_tools` triggers the existing single bounded planning correction;
+an unchanged invalid plan cannot create a task. Workers still retain `say` for
+progress. Existing persisted plans remain readable, with role permission checks
+intact. Worker instructions route final text back to host review and durable
+delivery rather than treating progress acknowledgements as final receipts.
+This structural guard catches the observed tool declaration, not every possible
+semantic mistake in a natural-language plan. Final receipt verification remains
+a separate runtime requirement.
+
+Planning and operator guidance distinguish one fresh current-state snapshot from
+a before/after comparison. Complementary sources may share a sampling cycle for
+the former; repeated cached data does not establish change for the latter.
+Freshness, evidence binding and disk-change verification were not relaxed.
+
+The focused 94-test entry, workflow and outcome suite passed, including bounded
+planning correction, old-plan recovery, runtime progress availability and a
+same-cycle inspection that cannot pass a disk-delta check. Deployment and the
+latest live report/receipt verification remain pending. No new attachment upload
+or cleanup was performed in this follow-up.

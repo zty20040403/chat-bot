@@ -40,12 +40,14 @@ outcome_checks 必填，按 acceptance 的从零开始序号逐条声明验收�
 每条服务器验收必须在文字中明确写出该条 host_id，且只对应一个主机；多台巡检分别列条款。
 criterion_index 必须指向同一主机的那一条，不能把主机巡检检查配到容量报告、授权核对等其他条款；后者另列 evidence。
 服务器巡检用 host_inspection，并为每台目标主机单列条款；空间清理用 disk_delta，指定 host_id、mountpoint 和最低预期变化字节。
+普通当前状态巡检只需一组完整、新鲜且时间接近的观测。host_inspect 与 host.metrics 是互补来源，不是要求两个不同采样周期；不要擅自追加两轮采样或趋势验收。用户要求趋势、清理前后或动作效果时才需要相应前后证据。
 服务启停重启用 service_effect，指定 host_id、完整 unit 和 action；整机重启用 host_reboot。
 其他内容用 evidence，由独立验收人逐项引用宿主证据。不能以“命令退出零”替代这些目标检查。
 delivery_required 专指必须上传文件（如 PDF、源码包、图片附件），不是普通文字回复。
 “把巡检结果/前后对比发群里”若未要求文件，delivery_required=false；最终文字始终由宿主消息队列发送。
-acceptance 只列发送前可验证的内容质量和可运行性，不把“已发送到群”列为文件验收条件。
-发送和回执由宿主在验收通过后执行，不要规划只负责群文件上传的子 Agent；最后的子步骤负责打包和运行说明。
+acceptance 只列发送前可验证的内容质量和可运行性；文字和附件都不能把“已发送到群”或“取得发送回执”列为前置验收条件。
+最终报告草稿、独立验收、文字和文件投递由宿主自动编排。不要再创建只负责发送、等待发送回执或重复最终验收的子步骤；最后的业务步骤交回待审阅正文或待验收产物。
+say 仅用于工作中的简短进度，不是持久最终投递，也不提供任务最终交付凭证，不能列入 required_tools。任务内仍可按需使用 say 报进度。
 不得把完整项目偷偷缩成演示并宣称完成。
 每个步骤声明 objective、deliverable、depends_on。独立工作目录由宿主按任务和步骤分配。
 接口和交付文件通过上游产物句柄交接，不能假设共享工作目录；集成步骤显式依赖实现步骤。
@@ -82,7 +84,7 @@ DECISION_TOOL = {
                             "deliverable": {"type": "string"},
                             "depends_on": _STRINGS,
                             "optional": {"type": "boolean"},
-                            "required_tools": _STRINGS,
+                            "required_tools": {**_STRINGS, "description": "完成业务步骤必需的执行工具；不含进度通知 say，最终投递由宿主负责"},
                         },
                         "required": ["id", "agent", "objective", "deliverable", "depends_on", "required_tools"],
                     },
@@ -124,7 +126,8 @@ class EntryDecision:
 
     @classmethod
     def parse(cls, raw: Mapping[str, Any], *, max_steps: int = 8, contract_version: int = 3,
-              worker_tools: Mapping[str, frozenset[str]] | None = None) -> "EntryDecision":
+              worker_tools: Mapping[str, frozenset[str]] | None = None,
+              restoring: bool = False) -> "EntryDecision":
         import re
         from .registry import DEFAULT_AGENT_REGISTRY
 
@@ -195,6 +198,9 @@ class EntryDecision:
             if (not isinstance(needed, list) or len(needed) > 16
                     or any(not isinstance(name, str) or not name for name in needed)):
                 raise ValueError("required_tools must be a list of at most 16 tool names")
+            if not restoring and "say" in needed:
+                raise ValueError("say is progress-only, not a required execution or delivery tool; "
+                                 "return the work product and let the host review and deliver it")
             allowed = (worker_tools.get(step["agent"], frozenset()) if worker_tools is not None
                        else DEFAULT_AGENT_REGISTRY.worker(step["agent"]).allowed_tools)
             missing = set(needed) - allowed
@@ -233,7 +239,8 @@ class EntryDecision:
             raise ValueError("Unsupported task contract version")
         if version < 2:
             raw["outcome_checks"] = list(normalize_checks(raw.get("outcome_checks"), raw.get("acceptance", [])))
-        return cls.parse(raw, max_steps=max_steps, contract_version=version)
+        # Existing durable plans must remain resumable after planning-policy changes.
+        return cls.parse(raw, max_steps=max_steps, contract_version=version, restoring=True)
 
 
 def normalize_direct_entry_payload(raw: Mapping[str, Any]) -> dict[str, Any] | None:
