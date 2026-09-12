@@ -4,11 +4,12 @@ import os
 import re
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 import nonebot
 from fastapi import FastAPI
+from nonebot.adapters.onebot.v11 import Bot
 
 os.environ.setdefault("AI_ALLOW_LEGACY_SQLITE", "true")
 nonebot.init()
@@ -97,6 +98,50 @@ class AdminAccountApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status_code, 403)
         self.assertEqual(self.preferences.writes, 0)
         self.assertFalse(self.sent)
+
+    async def test_qq_status_checks_account_not_just_websocket(self):
+        await self.login("viewer")
+        bot = Mock(spec=Bot)
+        bot.call_api = AsyncMock()
+        with patch("nonebot.get_bots", return_value={"qq": bot}):
+            for state, online in (
+                ({"online": False, "good": True}, False),
+                ({"online": True, "good": True}, True),
+                ({"online": True, "good": False}, False),
+                ({"online": "true", "good": True}, False),
+                ({"good": True}, False),
+                (None, False),
+            ):
+                with self.subTest(state=state):
+                    bot.call_api.reset_mock()
+                    bot.call_api.return_value = state
+                    response = await self.client.get("/bot-admin/api/v1/status")
+                    self.assertEqual(response.status_code, 200)
+                    self.assertIs(response.json()["qq_connected"], online)
+                    bot.call_api.assert_awaited_once_with("get_status")
+
+    async def test_qq_status_does_not_claim_online_when_probe_fails(self):
+        await self.login("viewer")
+        bot = Mock(spec=Bot)
+        bot.call_api = AsyncMock(side_effect=TimeoutError)
+        with patch("nonebot.get_bots", return_value={"qq": bot}):
+            response = await self.client.get("/bot-admin/api/v1/status")
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json()["qq_connected"])
+
+    async def test_qq_status_ignores_other_adapters_and_checks_all_qq_accounts(self):
+        await self.login("viewer")
+        with patch("nonebot.get_bots", return_value={"other": object()}):
+            response = await self.client.get("/bot-admin/api/v1/status")
+        self.assertFalse(response.json()["qq_connected"])
+        offline, online = Mock(spec=Bot), Mock(spec=Bot)
+        offline.call_api = AsyncMock(return_value={"online": False, "good": True})
+        online.call_api = AsyncMock(return_value={"online": True, "good": True})
+        with patch("nonebot.get_bots", return_value={"one": offline, "two": online}):
+            response = await self.client.get("/bot-admin/api/v1/status")
+        self.assertTrue(response.json()["qq_connected"])
+        offline.call_api.assert_awaited_once_with("get_status")
+        online.call_api.assert_awaited_once_with("get_status")
 
     async def test_all_registered_mutation_routes_deny_member_before_execution(self):
         await self.login("viewer")
